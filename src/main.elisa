@@ -1,0 +1,13 @@
+# Elisa C translator entry point.
+include "../../Elisa-compiler/elisacore_std/elisacore_runtime.elisa"
+include "../../Elisa-compiler/elisacore_std/elisacore_json.elisa"
+include "clang_ast.elisa"
+include "lower_expr.elisa"
+include "lower_stmt.elisa"
+include "emit_types.elisa"
+include "emit_expr.elisa"
+include "emit_program.elisa"
+include "cli.elisa"
+
+def main(argc: i64, argv: mutable void&) -> i64 can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+    return CTranslator::run(argc, argv)

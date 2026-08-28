@@ -1,0 +1,205 @@
+extend CTranslator:
+    def typed_emit_stmt(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        match statement.kind:
+            TypedStmtKind.Block:
+                if statement.children_count > 0:
+                    for offset in 0..<statement.children_count |out, ctx, statement, level|:
+                        child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
+                        typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                else:
+                    append_indent(out, level)
+                    append_view(out, sview("pass\n", 0, -1))
+            TypedStmtKind.Return:
+                append_indent(out, level)
+                append_view(out, sview("return", 0, -1))
+                if statement.expr >= 0:
+                    append_view(out, sview(" ", 0, -1))
+                    typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("\n", 0, -1))
+            TypedStmtKind.Declaration:
+                append_indent(out, level)
+                append_view(out, statement.name)
+                append_view(out, sview(": mutable ", 0, -1))
+                append_c_type(out, statement.type_name)
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(statement.type_name)
+                append_view(out, sview(" = ", 0, -1))
+                if c_type_is_array(statement.type_name) or statement.expr < 0:
+                    append_view(out, sview("zeroed", 0, -1))
+                else:
+                    typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("\n", 0, -1))
+            TypedStmtKind.If:
+                append_indent(out, level)
+                append_view(out, sview("if ", 0, -1))
+                typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview(":\n", 0, -1))
+                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if statement.aux2 >= 0:
+                    append_indent(out, level)
+                    append_view(out, sview("else:\n", 0, -1))
+                    typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            TypedStmtKind.While:
+                append_indent(out, level)
+                if typed_expr_is_always_true(ctx, statement.expr):
+                    append_view(out, sview("while true", 0, -1))
+                else:
+                    append_view(out, sview("while ", 0, -1))
+                    typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview(":\n", 0, -1))
+                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            TypedStmtKind.DoWhile:
+                append_indent(out, level)
+                append_view(out, sview("while true:\n", 0, -1))
+                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_indent(out, level + 1)
+                append_view(out, sview("break if not ", 0, -1))
+                typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("\n", 0, -1))
+            TypedStmtKind.For:
+                if statement.children_start >= 0:
+                    typed_emit_stmt(out, ctx, statement.children_start, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_indent(out, level)
+                append_view(out, sview("while ", 0, -1))
+                typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview(":\n", 0, -1))
+                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if statement.aux2 >= 0:
+                    typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            TypedStmtKind.Break:
+                append_indent(out, level)
+                append_view(out, sview("break\n", 0, -1))
+            TypedStmtKind.Continue:
+                append_indent(out, level)
+                append_view(out, sview("continue\n", 0, -1))
+            TypedStmtKind.Expression:
+                typed_emit_expression_statement(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            TypedStmtKind.Null:
+                append_indent(out, level)
+                append_view(out, sview("pass\n", 0, -1))
+            _:
+                append_indent(out, level)
+                append_view(out, sview("<invalid-ir>\n", 0, -1))
+
+    def typed_emit_function(out: mutable darray[u8]&, ctx: TypedContext&, function: TypedFunction) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        append_view(out, sview("def ", 0, -1))
+        append_view(out, function.name)
+        append_view(out, sview("(", 0, -1))
+        if function.params_count > 0:
+            for offset in 0..<function.params_count |out, ctx, function|:
+                append_view(out, sview(", ", 0, -1)) if offset > 0
+                parameter: TypedParam = ctx.params[(function.params_start + offset).usize()]
+                append_view(out, parameter.name)
+                if parameter.is_mutable:
+                    append_view(out, sview(": mutable ", 0, -1))
+                else:
+                    append_view(out, sview(": ", 0, -1))
+                append_c_type(out, parameter.type_name)
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(parameter.type_name)
+        if function.variadic:
+            append_view(out, sview(", ...", 0, -1)) if function.params_count > 0
+            append_view(out, sview("...", 0, -1)) if function.params_count == 0
+        append_view(out, sview(") -> ", 0, -1))
+        append_function_return_type(out, function.return_type)
+        # C has no effect-safe boundary for pointer arithmetic, raw extern calls,
+        # or lifetime escapes. The translated function is therefore an explicit
+        # unsafe ABI boundary; the nested trust block discharges the compiler's
+        # region-escape proof obligation for C's forwarded pointers.
+        append_view(out, sview(" can[Abort.Panic, Global, Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef]:\n", 0, -1))
+        append_indent(out, 1)
+        append_view(out, sview("trusted Unsafe.StaleRef:\n", 0, -1))
+        if sview_eq(function.name, sview("main", 0, -1)) and typed_has_global_initializers(ctx):
+            append_indent(out, 2)
+            append_view(out, sview("__c_init_globals()\n", 0, -1))
+        typed_emit_stmt(out, ctx, function.body, 2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if not sview_starts_with(c_function_return_type(function.return_type), sview("void", 0, -1)):
+            append_indent(out, 2)
+            append_view(out, sview("return null\n", 0, -1)) if sview_find_byte(c_function_return_type(function.return_type), 42) >= 0 else append_view(out, sview("return 0\n", 0, -1))
+
+    def typed_has_global_initializers(ctx: TypedContext&) -> bool:
+        for index in 0..<ctx.globals.count |ctx|:
+            return true if ctx.globals[index].initializer >= 0
+        return false
+
+    def typed_emit_global_initializers(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if not typed_has_global_initializers(ctx)
+        append_view(out, sview("def __c_init_globals() -> void can[Abort.Panic, Global, Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef]:\n", 0, -1))
+        append_view(out, sview("    trusted Unsafe.StaleRef:\n", 0, -1))
+        for index in 0..<ctx.globals.count |out, ctx|:
+            typed_global: TypedGlobal = ctx.globals[index.usize()]
+            if typed_global.initializer >= 0:
+                append_view(out, sview("        ", 0, -1))
+                append_view(out, typed_global.name)
+                append_view(out, sview(" <- ", 0, -1))
+                typed_emit_expr(out, ctx, typed_global.initializer) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("\n", 0, -1))
+        append_view(out, sview("\n", 0, -1))
+
+    def typed_emit_program(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        typed_emit_types(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_nonnull_helpers(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_externals(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if ctx.globals.count > 0:
+            for index in 0..<ctx.globals.count |out, ctx|:
+                typed_global: TypedGlobal = ctx.globals[index.usize()]
+                append_view(out, sview("global mutable ", 0, -1))
+                append_view(out, typed_global.name)
+                append_view(out, sview(": ", 0, -1))
+                append_c_type(out, typed_global.type_name)
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(typed_global.type_name)
+                append_view(out, sview(" = zeroed", 0, -1))
+                append_view(out, sview("\n\n", 0, -1))
+        typed_emit_global_initializers(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        for index in 0..<ctx.functions.count |out, ctx|:
+            typed_emit_function(out, ctx, ctx.functions[index.usize()]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview("\n", 0, -1)) if index + 1 < ctx.functions.count
+
+    def typed_append_diagnostic(out: mutable darray[u8]&, diagnostic: TypedDiagnostic) -> void:
+        append_view(out, sview("elisa-c-transpiler: unsupported ", 0, -1))
+        append_view(out, diagnostic.category)
+        append_view(out, sview(" ", 0, -1))
+        append_view(out, diagnostic.kind)
+        append_view(out, sview(" at ", 0, -1))
+        append_i64(out, diagnostic.line)
+        append_view(out, sview(":", 0, -1))
+        append_i64(out, diagnostic.column)
+        append_view(out, sview("\n", 0, -1))
+
+    def translate_ast(ast_bytes: darray[u8], source: cstr) -> TypedTranslation can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        output: mutable darray[u8] = []
+        parsed: JsonParseResult = json_parse_checked(&perm_arena, bytes_view(ast_bytes))
+        if parsed.code != JsonErrorCode.OK:
+            diagnostics: mutable darray[TypedDiagnostic] = []
+            diagnostics.push(TypedDiagnostic{category: sview("AST", 0, -1), kind: sview("invalid-json", 0, -1), line: 0, column: parsed.pos})
+            return TypedTranslation{output: output, diagnostics: diagnostics, failed: true}
+        context: mutable TypedContext = TypedContext{exprs: [], expr_children: [], stmts: [], stmt_children: [], params: [], extern_params: [], globals: [], functions: [], user_function_names: [], externs: [], extern_globals: [], fields: [], records: [], enums: [], enum_consts: [], labels: [], switch_depth: 0, current_for_increment: -1, current_return_type: sview("", 0, 0), source: source, root: JsonValue.Null, diagnostics: []}
+        root: JsonValue = parsed.value
+        context.root <- root
+        typed_collect_types(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_collect_external_globals(&context, root)
+        typed_collect_user_functions(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        declarations: JsonValue = ast_children(root)
+        count: i64 = json_array_len(declarations)
+        if count >= 0:
+            for index in 0..<count |context, declarations, source|:
+                declaration: JsonValue = ast_array_item(declarations, index)
+                if sview_eq(ast_kind(declaration), sview("VarDecl", 0, -1)) and ast_is_user_declaration(declaration, source):
+                    name: sview = safe_identifier(ast_name(declaration))
+                    if name.len > 0 and typed_global_index(context, name) < 0:
+                        initializer: mutable i64 = -1
+                        if ast_child_count(declaration) > 0:
+                            initializer <- typed_lower_expr(&context, ast_child(declaration, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        context.globals.push(TypedGlobal{name: name, type_name: ast_qual_type(declaration), initializer: initializer})
+            for index in 0..<count |output, declarations|:
+                declaration: JsonValue = ast_array_item(declarations, index)
+                if sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)) and ast_has_child(declaration, sview("CompoundStmt", 0, -1)) and ast_is_user_declaration(declaration, source):
+                    typed_collect_globals(&context, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            for index in 0..<count |output, declarations|:
+                declaration: JsonValue = ast_array_item(declarations, index)
+                if sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)) and ast_has_child(declaration, sview("CompoundStmt", 0, -1)) and ast_is_user_declaration(declaration, source):
+                    lowered_function: i64 = typed_lower_function(&context, declaration)
+                    _ = lowered_function
+        if context.diagnostics.count == 0:
+            append_view(&output, sview("# Generated by the Elisa C translator.\n\n", 0, -1))
+            typed_emit_program(&output, &context) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return TypedTranslation{output: output, diagnostics: context.diagnostics, failed: context.diagnostics.count > 0}

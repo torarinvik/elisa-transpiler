@@ -1,0 +1,38 @@
+extend CTranslator:
+    def emit_view_fd(value: sview, fd: i64) -> void can[Console, Unsafe.PointerCast]:
+        return if value.len == 0
+        raw: void& = value.data.cast[void&] can Unsafe.PointerCast
+        _ = write(fd, raw, value.len.usize()) can Console
+
+    def emit_view(value: sview) -> void can[Console, Unsafe.PointerCast]:
+        emit_view_fd(value, 1) can Console, Unsafe.PointerCast
+
+    def emit_typed_diagnostics(diagnostics: darray[TypedDiagnostic]) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        for index in 0..<diagnostics.count |output, diagnostics|:
+            typed_append_diagnostic(&output, diagnostics[index])
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
+
+    def emit_cstr(value: cstr) -> void can[Console, Unsafe.PointerCast]:
+        emit_view(sview(value, 0, -1)) can Console, Unsafe.PointerCast
+
+    def run(argc: i64, argv: mutable void&) -> i64 can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        region translation:
+            if argc < 2:
+                emit_cstr("usage: elisa-c-transpiler <input.c>".cast[cstr])
+                emit_cstr("\n".cast[cstr])
+                return 2
+
+            argv_slots: mutable cstr&& = argv.cast[mutable cstr&&]
+            input: cstr = argv_slots[1.usize()].cast[cstr]
+            ast_bytes: darray[u8] = run_clang_ast(input)
+            if ast_bytes.count == 0.usize():
+                emit_cstr("clang produced no AST\n".cast[cstr])
+                return 1
+
+            translation: TypedTranslation = translate_ast(ast_bytes, input)
+            if translation.failed:
+                emit_typed_diagnostics(translation.diagnostics)
+                return 1
+            emit_view(bytes_view(translation.output))
+            return 0
