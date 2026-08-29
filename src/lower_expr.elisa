@@ -195,11 +195,13 @@ extend CTranslator:
             callee_index: mutable i64 = -1
             varargs_start: bool = sview_eq(callee_name, sview("__builtin_va_start", 0, -1))
             varargs_end: bool = sview_eq(callee_name, sview("__builtin_va_end", 0, -1))
+            named_function_callee: bool = ast_callee_is_named_function(callee_node)
+            defined_named_function: bool = named_function_callee and ast_has_child(ast_find_function(ctx.root, callee_name), sview("CompoundStmt", 0, -1))
             # A named function pointer is still an expression callee. Lower it
             # as such instead of registering the local variable as an external
             # C function. This preserves typed indirect calls without adding a
             # target-library table.
-            if not varargs_start and not varargs_end and (callee_name.len == 0 or c_type_is_function_pointer(ast_c_type(callee_node))):
+            if not varargs_start and not varargs_end and (callee_name.len == 0 or (c_type_is_function_pointer(ast_c_type(callee_node)) and not defined_named_function)):
                 callee_index <- typed_lower_expr(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1 if callee_index < 0
             callee_name <- sview("llvm_va_start", 0, -1) if varargs_start

@@ -41,7 +41,8 @@ The prototype currently covers the constructs needed by the acceptance target:
 - idiomatic C `for`/`do`-`while` lowering, designated initializers, sparse array
   initializers, dense switch ranges, and symbolic enum switch patterns
 - a final output formatter that removes trailing whitespace and normalizes
-  generated module boundaries
+  generated module boundaries, preserves literal/comment whitespace, and wraps
+  long nested signatures and expressions
 - localized `trusted Unsafe.StaleRef` regions in idiomatic mode, with a
   `--fidelity` mode for broad source-faithful unsafe regions
 - typed non-null local function-pointer calls, source comments on translated
@@ -50,6 +51,8 @@ The prototype currently covers the constructs needed by the acceptance target:
 - source-qualified, de-duplicated diagnostics for unsupported constructs
 - a generic quality report for line count, cast/assertion pressure, unsafe
   markers, synthetic names, and invalid-IR regressions
+- branch-local non-null reuse for named pointers, collapsed nested trusted
+  regions, identity cleanup for C `sizeof` expressions, and no-op block removal
 
 Switches are lowered to Elisa `match` statements. Adjacent C labels that share
 an arm become Elisa or-patterns such as `0 | 1:`; three or more consecutive

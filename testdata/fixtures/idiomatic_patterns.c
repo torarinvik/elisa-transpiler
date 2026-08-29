@@ -18,6 +18,19 @@ static int read_mutable_pointer(int *value)
     return value[0];
 }
 
+static int inspect_readonly(const int *value)
+{
+    return value != 0;
+}
+
+static int read_after_readonly_call(int *value)
+{
+    if (value == 0)
+        return 0;
+    inspect_readonly(value);
+    return value[0];
+}
+
 int main(void)
 {
     int value = 7;

@@ -39,6 +39,12 @@ extend CTranslator:
         return true if expression.kind == TypedExprKind.Character and expression.value == 1
         return expression.kind == TypedExprKind.Integer and sview_eq(expression.text, sview("1", 0, -1))
 
+    def typed_expr_is_sizeof_value(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return true if expression.kind == TypedExprKind.Sizeof
+        return typed_expr_is_sizeof_value(ctx, expression.lhs) if expression.kind == TypedExprKind.Cast else false
+
     def typed_expr_is_redundant_cast(ctx: TypedContext&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
         expression: TypedExpr = typed_expr_at(ctx, index)
@@ -54,9 +60,15 @@ extend CTranslator:
     def typed_expr_is_identity_binary(ctx: TypedContext&, index: i64) -> i64:
         return -1 if index < 0 or index >= ctx.exprs.count.i64()
         expression: TypedExpr = typed_expr_at(ctx, index)
-        return -1 if expression.kind != TypedExprKind.Binary or not c_type_is_integer(expression.type_name)
+        return -1 if expression.kind != TypedExprKind.Binary
         if not typed_expr_is_side_effect_free(ctx, expression.rhs) or not typed_expr_is_side_effect_free(ctx, expression.lhs):
             return -1
+        # `sizeof` keeps its operand type in the IR for rendering, so its
+        # expression type is not itself an integer ABI type. It is nevertheless
+        # a pure size value and `sizeof(T) * 1`/`/ 1` are still identities.
+        if typed_expr_is_sizeof_value(ctx, expression.lhs) and (sview_eq(expression.text, sview("*", 0, -1)) or sview_eq(expression.text, sview("/", 0, -1))) and typed_expr_is_one_literal(ctx, expression.rhs):
+            return expression.lhs
+        return -1 if not c_type_is_integer(expression.type_name)
         if (sview_eq(expression.text, sview("+", 0, -1)) or sview_eq(expression.text, sview("-", 0, -1)) or sview_eq(expression.text, sview("|", 0, -1)) or sview_eq(expression.text, sview("^", 0, -1)) or sview_eq(expression.text, sview("<<", 0, -1)) or sview_eq(expression.text, sview(">>", 0, -1))) and typed_expr_is_zero_literal(ctx, expression.rhs):
             return expression.lhs
         if (sview_eq(expression.text, sview("+", 0, -1)) or sview_eq(expression.text, sview("|", 0, -1)) or sview_eq(expression.text, sview("^", 0, -1))) and typed_expr_is_zero_literal(ctx, expression.lhs):

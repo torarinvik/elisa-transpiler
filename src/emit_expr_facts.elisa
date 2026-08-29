@@ -54,3 +54,42 @@ extend CTranslator:
         if rhs.kind == TypedExprKind.Name and c_type_pointer_optional(rhs.type_name) and typed_expr_is_null_value(ctx, expression.lhs):
             return rhs.text
         return sview("", 0, 0)
+
+    # A call invalidates a null fact only when it can write through the same
+    # pointer root. The old whole-context reset was safe but made ordinary
+    # read-only library calls destroy useful proofs for every local in scope.
+    def typed_call_may_mutate_root(ctx: TypedContext&, index: i64, root: sview) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Call:
+            if expression.value == 1:
+                return true
+            for function_index in 0..<ctx.functions.count |ctx, expression, root|:
+                function: TypedFunction = ctx.functions[function_index.usize()]
+                if sview_eq(function.name, expression.text):
+                    return true if (typed_global_index(ctx, root) >= 0 or typed_external_global_index(ctx, root) >= 0) and function.has_global_effect
+                    if expression.args_count > 0:
+                        for offset in 0..<expression.args_count |ctx, expression, root, function|:
+                            argument_index: i64 = ctx.expr_children[(expression.args_start + offset).usize()]
+                            expected: sview = typed_call_parameter_type(ctx, expression.text, offset)
+                            if c_type_pointer_can_write(expected) and sview_eq(typed_expr_root_name(ctx, argument_index), root):
+                                return true
+                    return false
+            for external_index in 0..<ctx.externs.count |ctx, expression, root|:
+                external: TypedExtern = ctx.externs[external_index.usize()]
+                if sview_eq(external.name, expression.text) or sview_eq(external.link_name, expression.text):
+                    if expression.args_count > 0:
+                        for offset in 0..<expression.args_count |ctx, expression, root, external|:
+                            argument_index: i64 = ctx.expr_children[(expression.args_start + offset).usize()]
+                            expected: sview = typed_call_parameter_type(ctx, expression.text, offset)
+                            if c_type_pointer_can_write(expected) and sview_eq(typed_expr_root_name(ctx, argument_index), root):
+                                return true
+                    return false
+            return true
+        return true if typed_call_may_mutate_root(ctx, expression.lhs, root)
+        return true if typed_call_may_mutate_root(ctx, expression.rhs, root)
+        return true if typed_call_may_mutate_root(ctx, expression.third, root)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression, root|:
+                return true if typed_call_may_mutate_root(ctx, ctx.expr_children[(expression.args_start + offset).usize()], root)
+        return false

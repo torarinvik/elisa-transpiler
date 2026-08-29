@@ -1,4 +1,18 @@
 extend CTranslator:
+    # Empty declaration shells are common after a C static-local is hoisted to
+    # the module level. They should not become visible `pass` statements when
+    # surrounded by real code, but a genuinely empty Elisa block still needs a
+    # body marker.
+    def typed_stmt_is_empty(ctx: TypedContext&, index: i64) -> bool:
+        return true if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return true if statement.kind == TypedStmtKind.Null
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                return false if not typed_stmt_is_empty(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+            return true
+        return false
+
     # Statement emission is kept separate from program/function emission so
     # control-flow lowering can evolve without making the top-level emitter
     # harder to audit.

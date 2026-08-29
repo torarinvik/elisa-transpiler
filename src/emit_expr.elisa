@@ -24,6 +24,14 @@ extend CTranslator:
 
     def typed_emit_nonnull_expr(out: mutable darray[u8]&, ctx: TypedContext&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression: TypedExpr = typed_expr_at(ctx, index)
+        # A dominating C null guard is represented in the translator's flow
+        # facts. Reuse that proof at the final reference boundary instead of
+        # emitting another helper call. Elisa's checker understands the
+        # resulting branch-local non-null value, so this is both cleaner and
+        # semantically identical to the previous defensive spelling.
+        if typed_name_is_currently_nonnull(ctx, index) and expression.kind == TypedExprKind.Name:
+            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
         # Branch-local facts allow call arguments to avoid unnecessary defensive
         # casts, but Elisa still requires a non-null type at an indexing/member
         # boundary. Keep the checked helper at that boundary instead of emitting
@@ -528,8 +536,11 @@ extend CTranslator:
                         append_elisa_type_name(out, ctx.records[record_index.usize()].name)
                     else:
                         append_c_type_contextual(out, ctx, element_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    append_view(out, sview("] * ", 0, -1))
-                    append_view_range(out, expression.type_name, open_bracket + 1, close_bracket)
+                    if c_array_length(expression.type_name) != 1:
+                        append_view(out, sview("] * ", 0, -1))
+                        append_view_range(out, expression.type_name, open_bracket + 1, close_bracket)
+                    else:
+                        append_view(out, sview("]", 0, -1))
                 else:
                     record_index: i64 = typed_record_index(ctx, expression.type_name)
                     if record_index >= 0:

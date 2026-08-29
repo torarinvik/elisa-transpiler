@@ -21,6 +21,8 @@ clang -Wl,-dead_strip -o build/elisa-c-transpiler build/transpiler.o -lm
 rg -q '^def add\(left: i32, right: i32\) -> i32' build/simple.generated.elisa
 rg -q 'return \(left \+ right\)' build/simple.generated.elisa
 rg -q '^def main\(\) -> i32' build/simple.generated.elisa
+rg -Fq '"left  right"' build/simple.generated.elisa
+! rg -Uq 'def static_value\(\) -> i32:\n    pass' build/simple.generated.elisa
 ! rg -n '[[:blank:]]+$' build/simple.generated.elisa
 ! rg -U -q '\n\n\n' build/simple.generated.elisa
 ! rg -q '^def elisa_nonnull' build/simple.generated.elisa
@@ -85,7 +87,9 @@ rg -q 'result: i32 = value' build/idiomatic_patterns.generated.elisa
 ! rg -q 'if true:' build/idiomatic_patterns.generated.elisa
 rg -q '^    return result$' build/idiomatic_patterns.generated.elisa
 rg -q '^def elisa_nonnull_readonly\[T\]' build/idiomatic_patterns.generated.elisa
-rg -q 'return elisa_nonnull_readonly\(value\)\[0\]' build/idiomatic_patterns.generated.elisa
+rg -q 'return value\[0\]' build/idiomatic_patterns.generated.elisa
+! rg -q 'return elisa_nonnull_readonly\(value\)\[0\]' build/idiomatic_patterns.generated.elisa
+rg -A2 'inspect_readonly\(value\)' build/idiomatic_patterns.generated.elisa | rg -q 'return value\[0\]'
 clang -std=c11 testdata/fixtures/idiomatic_patterns.c -o build/idiomatic_patterns.native
 "$elisa_bin" -emit obj -O0 -o build/idiomatic_patterns.generated.o build/idiomatic_patterns.generated.elisa
 clang -Wl,-dead_strip -o build/idiomatic_patterns.generated build/idiomatic_patterns.generated.o
@@ -104,6 +108,7 @@ clang -Wl,-dead_strip -o build/const_cast.generated build/const_cast.generated.o
 rg -q '^invalid_ir_markers: 0$' build/cjson.quality.txt
 rg -q '^casts: [0-9]+$' build/cjson.quality.txt
 rg -q '^nonnull_assertions: [0-9]+$' build/cjson.quality.txt
+awk 'length($0) > 320 { found = 1 } END { exit found }' build/cjson.quality.elisa
 
 ./build/elisa-c-transpiler testdata/fixtures/for_loop.c > build/for_loop.generated.elisa
 rg -q 'while index < 5:' build/for_loop.generated.elisa
@@ -327,7 +332,7 @@ rg -q '^def cJSON_Delete\(item: mutable CJSON&\?\)' build/cjson.generated.elisa
 rg -q 'item_cursor: mutable CJSON&\? = item' build/cjson.generated.elisa
 ! rg -q '_param|__c_ext_|__c_global_' build/cjson.generated.elisa
 rg -q 'size_of\[CJSON\]' build/cjson.generated.elisa
-rg -q 'size_of\[Printbuffer\] \* 1' build/cjson.generated.elisa
+! rg -q 'size_of\[Printbuffer\] \* 1' build/cjson.generated.elisa
 ! rg -q '\(null\)\.i32|\.i32\(\) == \(null\)' build/cjson.generated.elisa
 ! rg -q '^extern (printf|cJSON_Parse|cJSON_Delete)\b' build/cjson.generated.elisa
 rg -q '^@link_name\("printf"\)$' build/cjson.generated.elisa

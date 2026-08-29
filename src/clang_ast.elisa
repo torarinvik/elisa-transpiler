@@ -42,7 +42,7 @@ module CTranslator:
         out.push(39)
 
     def append_shell_quoted(out: mutable darray[u8]&, value: cstr) -> void:
-        append_shell_quoted_view(out, sview(value, 0, -1))
+        append_shell_quoted_view(out, value[0:value.len])
 
     def run_command_output(command: cstr) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
         stream: mutable heap void&? = popen(command, "r")
@@ -568,6 +568,7 @@ module CTranslator:
         current_switch_done_name: mutable sview
         current_switch_done_index: mutable i64
         current_function_body: mutable i64
+        current_trusted_depth: mutable i64
         mode: TypedTranslationMode
         source: cstr
         root: mutable JsonValue

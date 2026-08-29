@@ -48,7 +48,12 @@ extend CTranslator:
     def typed_expr_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
         expression: TypedExpr = typed_expr_at(ctx, index)
-        return true if typed_type_uses_pointer(expression.type_name) and (expression.kind == TypedExprKind.Name or expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex)
+        # Merely carrying a nullable pointer value is not an unsafe operation:
+        # C code routinely compares or forwards it without dereferencing it.
+        # Mark the actual reference/ABI boundaries instead. This keeps null
+        # guards and pointer arguments outside trusted regions while retaining
+        # the unsafe effect for pointer-returning calls.
+        return true if typed_type_uses_pointer(expression.type_name) and (expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Call)
         return true if expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Member
         return true if expression.kind == TypedExprKind.Unary and (sview_eq(expression.text, sview("&", 0, -1)) or sview_eq(expression.text, sview("*", 0, -1)))
         return true if typed_expr_needs_unsafe(ctx, expression.lhs)

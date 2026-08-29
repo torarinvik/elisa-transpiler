@@ -1,4 +1,81 @@
 extend CTranslator:
+    def typed_format_is_identifier_byte(byte: u8) -> bool:
+        return (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+
+    # Wrap only after a comma in a nested syntactic construct. This keeps
+    # function signatures, calls, and aggregate literals readable while
+    # avoiding unsafe splitting inside strings or ordinary binary expressions.
+    def typed_wrap_long_lines(source: darray[u8]) -> darray[u8]:
+        result: mutable darray[u8] = []
+        line_width: mutable i64 = 0
+        line_indent: mutable i64 = 0
+        at_line_start: mutable bool = true
+        in_string: mutable bool = false
+        escaped: mutable bool = false
+        in_comment: mutable bool = false
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        brace_depth: mutable i64 = 0
+        for index in 0..<source.count.i64() |source, result, line_width, line_indent, at_line_start, in_string, escaped, in_comment, paren_depth, bracket_depth, brace_depth|:
+            byte: u8 = source[index.usize()]
+            if byte == 10:
+                result.push(byte)
+                line_width <- 0
+                line_indent <- 0
+                at_line_start <- true
+                in_comment <- false
+                continue
+            if at_line_start:
+                if byte == 32 or byte == 9:
+                    result.push(byte)
+                    line_width <- line_width + 1
+                    line_indent <- line_indent + 1
+                    continue
+                at_line_start <- false
+            if in_comment:
+                result.push(byte)
+                line_width <- line_width + 1
+                continue
+            result.push(byte)
+            line_width <- line_width + 1
+            if in_string:
+                if escaped:
+                    escaped <- false
+                elif byte == 92:
+                    escaped <- true
+                elif byte == 34:
+                    in_string <- false
+                continue
+            if byte == 34:
+                in_string <- true
+            elif byte == 35:
+                in_comment <- true
+            elif byte == 40:
+                paren_depth <- paren_depth + 1
+            elif byte == 41 and paren_depth > 0:
+                paren_depth <- paren_depth - 1
+            elif byte == 91:
+                bracket_depth <- bracket_depth + 1
+            elif byte == 93 and bracket_depth > 0:
+                bracket_depth <- bracket_depth - 1
+            elif byte == 123:
+                brace_depth <- brace_depth + 1
+            elif byte == 125 and brace_depth > 0:
+                brace_depth <- brace_depth - 1
+            elif byte == 44 and line_width > 120 and (paren_depth > 0 or bracket_depth > 0 or brace_depth > 0):
+                result.push(10)
+                line_width <- 0
+                for _indent in 0..<(line_indent + 1) |result, line_indent|:
+                    append_view(result, sview("    ", 0, -1))
+                    line_width <- line_width + 4
+            elif line_width > 120 and (paren_depth > 0 or bracket_depth > 0 or brace_depth > 0) and ((byte == 100 and index >= 3 and source[(index - 1).usize()] == 110 and source[(index - 2).usize()] == 97 and not typed_format_is_identifier_byte(source[(index - 3).usize()])) or (byte == 114 and index >= 2 and source[(index - 1).usize()] == 111 and not typed_format_is_identifier_byte(source[(index - 2).usize()]))):
+                result.push(10)
+                line_width <- 0
+                for _indent in 0..<(line_indent + 1) |result, line_indent|:
+                    append_view(result, sview("    ", 0, -1))
+                    line_width <- line_width + 4
+        return result
+
     # Formatting is deliberately a final, syntax-preserving pass. Emitters can
     # focus on semantics while this pass gives every translation the same
     # whitespace policy, including output assembled by the CFG backend.
@@ -6,13 +83,33 @@ extend CTranslator:
         result: mutable darray[u8] = []
         pending_spaces: mutable i64 = 0
         pending_newlines: mutable i64 = 0
-        for index in 0..<source.count.i64() |source, result, pending_spaces, pending_newlines|:
+        in_string: mutable bool = false
+        escaped: mutable bool = false
+        in_comment: mutable bool = false
+        for index in 0..<source.count.i64() |source, result, pending_spaces, pending_newlines, in_string, escaped, in_comment|:
             byte: u8 = source[index.usize()]
             if byte == 13:
                 continue
             if byte == 10:
                 pending_newlines <- pending_newlines + 1
                 pending_spaces <- 0
+                in_comment <- false
+                continue
+            if in_string or in_comment:
+                while pending_newlines > 0 |result, pending_newlines|:
+                    result.push(10) if pending_newlines <= 2
+                    pending_newlines <- pending_newlines - 1
+                while pending_spaces > 0 |result, pending_spaces|:
+                    result.push(32)
+                    pending_spaces <- pending_spaces - 1
+                result.push(byte)
+                if in_string:
+                    if escaped:
+                        escaped <- false
+                    elif byte == 92:
+                        escaped <- true
+                    elif byte == 34:
+                        in_string <- false
                 continue
             while pending_newlines > 0 |result, pending_newlines|:
                 result.push(10) if pending_newlines <= 2
@@ -24,6 +121,11 @@ extend CTranslator:
                 result.push(32)
                 pending_spaces <- pending_spaces - 1
             result.push(byte)
+            if byte == 34:
+                in_string <- true
+                escaped <- false
+            elif byte == 35:
+                in_comment <- true
         while pending_newlines > 0 |result, pending_newlines|:
             result.push(10) if pending_newlines <= 2
             pending_newlines <- pending_newlines - 1
@@ -33,4 +135,4 @@ extend CTranslator:
             _ = result.pop()
         if result.count > 0 and result[result.count - 1] != 10:
             result.push(10)
-        return result
+        return typed_wrap_long_lines(result)

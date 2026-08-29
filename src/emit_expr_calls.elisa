@@ -82,7 +82,11 @@ extend CTranslator:
         if same_cast_target and not mutable_text_shape and not address_of_nested_pointer and not nested_char_index:
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
-        if not address_of_nested_pointer and not nested_char_index and (not mutable_text_shape or decayed_readonly_compatible) and c_type_call_compatible(argument.type_name, target_type) and (target_optional or not typed_expr_may_be_null(ctx, index)) and (not force_cast or typed_expr_can_pass_mutable(ctx, index) or direct_function_compatible or existing_function_pointer or already_converted or decayed_readonly_compatible):
+        # A read-only parameter does not require a cast when the argument is
+        # already ABI-compatible. This is especially important for the common
+        # C conversion `T *` -> `const T *`: it preserves the source capability
+        # without manufacturing a redundant Elisa cast at every call site.
+        if not address_of_nested_pointer and not nested_char_index and (not mutable_text_shape or decayed_readonly_compatible) and c_type_call_compatible(argument.type_name, target_type) and (target_optional or not typed_expr_may_be_null(ctx, index)) and (not force_cast or not c_type_pointer_can_write(target_type) or typed_expr_can_pass_mutable(ctx, index) or direct_function_compatible or existing_function_pointer or already_converted or decayed_readonly_compatible):
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
         if c_type_is_array(argument.type_name) and argument.kind != TypedExprKind.String:
@@ -97,10 +101,10 @@ extend CTranslator:
                 typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview(")", 0, -1))
         append_view(out, sview(".cast[", 0, -1))
-        # Elisa's C ABI view uses mutable reference slots for data pointers,
-        # including C's `const T *` spelling. Function pointers have their own
-        # type renderer and must not receive this qualifier.
-        append_view(out, sview("mutable ", 0, -1)) if not c_type_is_function(target_type)
+        # Preserve the capability of the target C pointer. Read-only C pointer
+        # values retain Elisa's nullable reference shape; writable pointers
+        # receive the `mutable` capability at the cast boundary.
+        append_view(out, sview("mutable ", 0, -1)) if not c_type_is_function(target_type) and c_type_pointer_can_write(target_type)
         append_c_type_contextual(out, ctx, target_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         append_view(out, sview("?", 0, -1)) if target_optional
         append_view(out, sview("]", 0, -1))
@@ -162,7 +166,8 @@ extend CTranslator:
         if expression.kind != TypedExprKind.Null and not typed_expr_may_be_null(ctx, index) and sview_find_byte(target_type, 42) >= 0 and (sview_find_byte(expression.type_name, 42) >= 0 or expression.kind == TypedExprKind.Call) and not c_type_call_compatible(expression.type_name, target_type) and not (c_type_pointer_count(expression.type_name) == c_type_pointer_count(target_type) and sview_eq(c_type_abi_base(expression.type_name), c_type_abi_base(target_type)) and c_type_pointer_qualifiers_match(expression.type_name, target_type)):
             append_view(out, sview("(", 0, -1))
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            append_view(out, sview(").cast[mutable ", 0, -1))
+            append_view(out, sview(").cast[", 0, -1))
+            append_view(out, sview("mutable ", 0, -1)) if c_type_pointer_can_write(target_type)
             append_c_type_contextual(out, ctx, target_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(target_type)
             append_view(out, sview("]", 0, -1))
@@ -170,7 +175,8 @@ extend CTranslator:
         if expression.kind != TypedExprKind.Null and sview_find_byte(target_type, 42) >= 0 and c_type_pointer_can_write(target_type) and c_type_is_const_pointer(expression.type_name):
             append_view(out, sview("(", 0, -1))
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            append_view(out, sview(").cast[mutable ", 0, -1))
+            append_view(out, sview(").cast[", 0, -1))
+            append_view(out, sview("mutable ", 0, -1)) if c_type_pointer_can_write(target_type)
             append_c_type_contextual(out, ctx, target_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(target_type)
             append_view(out, sview("]", 0, -1))

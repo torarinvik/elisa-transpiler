@@ -95,6 +95,15 @@ extend CTranslator:
     def typed_callee_name(node: JsonValue) -> sview:
         return ast_expr_name(node)
 
+    def ast_callee_is_named_function(node: JsonValue) -> bool:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("DeclRefExpr", 0, -1)):
+            referenced: JsonValue = ast_field(node, sview("referencedDecl", 0, -1))
+            return sview_eq(ast_kind(referenced), sview("FunctionDecl", 0, -1))
+        if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
+            return ast_child_count(node) > 0 and ast_callee_is_named_function(ast_child(node, 0))
+        return false
+
     def ast_find_function(node: JsonValue, wanted: sview) -> JsonValue:
         if sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1)) and sview_eq(ast_name(node), wanted):
             return node
