@@ -1,0 +1,68 @@
+extend CTranslator:
+    # Small semantic predicates shared by the readability pass. These operate
+    # on the typed IR rather than on a target project's spelling, so they are
+    # safe to reuse for every translated C program.
+    def typed_expr_is_side_effect_free(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Integer or expression.kind == TypedExprKind.Floating or expression.kind == TypedExprKind.String or expression.kind == TypedExprKind.Character or expression.kind == TypedExprKind.Name or expression.kind == TypedExprKind.Null or expression.kind == TypedExprKind.Zeroed or expression.kind == TypedExprKind.Sizeof:
+            return true
+        if expression.kind == TypedExprKind.Call:
+            return false
+        if expression.kind == TypedExprKind.Binary:
+            return false if sview_eq(expression.text, sview("<-", 0, -1))
+            return typed_expr_is_side_effect_free(ctx, expression.lhs) and typed_expr_is_side_effect_free(ctx, expression.rhs)
+        if expression.kind == TypedExprKind.Unary:
+            return typed_expr_is_side_effect_free(ctx, expression.lhs)
+        if expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex:
+            return typed_expr_is_side_effect_free(ctx, expression.lhs) and (expression.kind != TypedExprKind.ArrayIndex or typed_expr_is_side_effect_free(ctx, expression.rhs))
+        if expression.kind == TypedExprKind.Conditional:
+            return typed_expr_is_side_effect_free(ctx, expression.lhs) and typed_expr_is_side_effect_free(ctx, expression.rhs) and typed_expr_is_side_effect_free(ctx, expression.third)
+        if expression.kind == TypedExprKind.Aggregate:
+            if expression.args_count > 0:
+                for offset in 0..<expression.args_count |ctx, expression|:
+                    return false if not typed_expr_is_side_effect_free(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+            return true
+        if expression.kind == TypedExprKind.Sequence:
+            return typed_expr_is_side_effect_free(ctx, expression.lhs) and typed_expr_is_side_effect_free(ctx, expression.rhs)
+        return false
+
+    def typed_expr_is_zero_literal(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return true if expression.kind == TypedExprKind.Character and expression.value == 0
+        return expression.kind == TypedExprKind.Integer and (sview_eq(expression.text, sview("0", 0, -1)) or sview_eq(expression.text, sview("-0", 0, -1)))
+
+    def typed_expr_is_one_literal(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return true if expression.kind == TypedExprKind.Character and expression.value == 1
+        return expression.kind == TypedExprKind.Integer and sview_eq(expression.text, sview("1", 0, -1))
+
+    def typed_expr_is_redundant_cast(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return false if expression.kind != TypedExprKind.Cast or expression.lhs < 0 or expression.lhs >= ctx.exprs.count.i64()
+        operand: TypedExpr = typed_expr_at(ctx, expression.lhs)
+        # Qualifier-only scalar casts do not change the Elisa representation.
+        # For pointers, preserve pointee constness: dropping a `const T *` to
+        # `T *` is an intentional capability change, not a redundant cast.
+        return true if sview_eq(operand.type_name, expression.type_name)
+        return false if c_type_pointer_count(operand.type_name) > 0 or c_type_pointer_count(expression.type_name) > 0
+        return sview_eq(c_type_without_qualifiers(operand.type_name), c_type_without_qualifiers(expression.type_name))
+
+    def typed_expr_is_identity_binary(ctx: TypedContext&, index: i64) -> i64:
+        return -1 if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return -1 if expression.kind != TypedExprKind.Binary or not c_type_is_integer(expression.type_name)
+        if not typed_expr_is_side_effect_free(ctx, expression.rhs) or not typed_expr_is_side_effect_free(ctx, expression.lhs):
+            return -1
+        if (sview_eq(expression.text, sview("+", 0, -1)) or sview_eq(expression.text, sview("-", 0, -1)) or sview_eq(expression.text, sview("|", 0, -1)) or sview_eq(expression.text, sview("^", 0, -1)) or sview_eq(expression.text, sview("<<", 0, -1)) or sview_eq(expression.text, sview(">>", 0, -1))) and typed_expr_is_zero_literal(ctx, expression.rhs):
+            return expression.lhs
+        if (sview_eq(expression.text, sview("+", 0, -1)) or sview_eq(expression.text, sview("|", 0, -1)) or sview_eq(expression.text, sview("^", 0, -1))) and typed_expr_is_zero_literal(ctx, expression.lhs):
+            return expression.rhs
+        if (sview_eq(expression.text, sview("*", 0, -1)) or sview_eq(expression.text, sview("/", 0, -1))) and typed_expr_is_one_literal(ctx, expression.rhs):
+            return expression.lhs
+        if sview_eq(expression.text, sview("*", 0, -1)) and typed_expr_is_one_literal(ctx, expression.lhs):
+            return expression.rhs
+        return -1

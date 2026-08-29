@@ -22,79 +22,24 @@ extend CTranslator:
     def typed_nonnull_supported(qual_type: sview) -> bool:
         return not c_type_is_function(qual_type) and sview_find_byte(qual_type, 42) >= 0 and c_type_pointer_optional(qual_type)
 
-    def typed_name_is_currently_nonnull(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        return false if not c_type_pointer_optional(expression.type_name)
-        for fact_index in 0..<ctx.current_nonnull_exprs.count |ctx, index|:
-            return true if typed_expr_is_same_place(ctx, index, ctx.current_nonnull_exprs[fact_index])
-        return false if expression.kind != TypedExprKind.Name
-        for offset in 0..<ctx.current_nonnull_names.count |ctx, expression|:
-            return true if sview_eq(ctx.current_nonnull_names[offset.usize()], expression.text)
-        return false
-
-    def typed_expr_is_same_place(ctx: TypedContext&, left_index: i64, right_index: i64) -> bool:
-        return false if left_index < 0 or right_index < 0 or left_index >= ctx.exprs.count.i64() or right_index >= ctx.exprs.count.i64()
-        left: TypedExpr = typed_expr_at(ctx, left_index)
-        right: TypedExpr = typed_expr_at(ctx, right_index)
-        return sview_eq(left.text, right.text) if left.kind == TypedExprKind.Name and right.kind == TypedExprKind.Name
-        return left.kind == TypedExprKind.Member and right.kind == TypedExprKind.Member and sview_eq(left.text, right.text) and typed_expr_is_same_place(ctx, left.lhs, right.lhs)
-        return left.kind == TypedExprKind.ArrayIndex and right.kind == TypedExprKind.ArrayIndex and typed_expr_is_same_place(ctx, left.lhs, right.lhs) and typed_expr_is_same_place(ctx, left.rhs, right.rhs)
-        return typed_expr_is_same_place(ctx, left.lhs, right.lhs) if left.kind == TypedExprKind.Cast
-        return false
-
-    def typed_expr_is_null_value(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        return true if expression.kind == TypedExprKind.Null
-        # Clang commonly lowers the C `NULL` macro as a zero integer wrapped in
-        # one or more pointer casts. Treat that canonical null pointer constant
-        # as null all the way through the cast chain; otherwise the generated
-        # Elisa compares a reference-shaped value such as `(0).i32()`.
-        if expression.kind == TypedExprKind.Cast:
-            constant: mutable i64 = 0
-            if (sview_find_byte(expression.type_name, 42) >= 0 or c_type_is_function_pointer(expression.type_name)) and typed_eval_integer_constant(ctx, index, constant) and constant == 0:
-                return true
-            return expression.lhs >= 0 and typed_expr_is_null_value(ctx, expression.lhs)
-        return false
-
-    def typed_null_guard_name(ctx: TypedContext&, index: i64, wants_nonnull: bool) -> sview:
-        return sview("", 0, 0) if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        return sview("", 0, 0) if expression.kind != TypedExprKind.Binary
-        expected_opcode: sview = sview("!=", 0, -1) if wants_nonnull else sview("==", 0, -1)
-        return sview("", 0, 0) if not sview_eq(expression.text, expected_opcode)
-        lhs: TypedExpr = typed_expr_at(ctx, expression.lhs)
-        rhs: TypedExpr = typed_expr_at(ctx, expression.rhs)
-        if lhs.kind == TypedExprKind.Name and c_type_pointer_optional(lhs.type_name) and typed_expr_is_null_value(ctx, expression.rhs):
-            return lhs.text
-        if rhs.kind == TypedExprKind.Name and c_type_pointer_optional(rhs.type_name) and typed_expr_is_null_value(ctx, expression.lhs):
-            return rhs.text
-        return sview("", 0, 0)
-
     def typed_emit_nonnull_expr(out: mutable darray[u8]&, ctx: TypedContext&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression: TypedExpr = typed_expr_at(ctx, index)
-        # A branch-local fact is stronger than the source pointer's nullable C
-        # type. Reuse the narrowed place directly so guards do not leave a
-        # trail of redundant non-null assertions in the generated code.
-        if typed_name_is_currently_nonnull(ctx, index):
-            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            return
+        # Branch-local facts allow call arguments to avoid unnecessary defensive
+        # casts, but Elisa still requires a non-null type at an indexing/member
+        # boundary. Keep the checked helper at that boundary instead of emitting
+        # a nullable reference as if the source type had been refined in place.
         # Only values whose emitted shape is a normal Elisa reference can use the
         # generic helper. Cast nodes may already carry an ABI-specific shape, so
         # wrapping those nodes can still be an invalid conversion.
         if typed_nonnull_supported(expression.type_name) and (expression.kind == TypedExprKind.Name or expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.Call or expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.Null):
-            if typed_expr_can_pass_mutable(ctx, index):
+            if not c_type_is_const_pointer(expression.type_name):
                 append_view(out, sview("elisa_nonnull(", 0, -1))
                 typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 append_view(out, sview(")", 0, -1))
             else:
-                append_view(out, sview("elisa_nonnull((", 0, -1))
+                append_view(out, sview("elisa_nonnull_readonly(", 0, -1))
                 typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview(").cast[mutable ", 0, -1))
-                append_c_type(out, expression.type_name)
-                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(expression.type_name)
-                append_view(out, sview("])", 0, -1))
+                append_view(out, sview(")", 0, -1))
         else:
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
 
@@ -339,6 +284,13 @@ extend CTranslator:
 
     def typed_emit_expr(out: mutable darray[u8]&, ctx: TypedContext&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression: TypedExpr = typed_expr_at(ctx, index)
+        if typed_expr_is_redundant_cast(ctx, index):
+            typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
+        identity_operand: i64 = typed_expr_is_identity_binary(ctx, index)
+        if identity_operand >= 0:
+            typed_emit_expr(out, ctx, identity_operand) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
         # Fold pure integer expressions at the final emission boundary. This
         # preserves the typed IR used by analysis while removing C-only
         # constant-expression scaffolding from generated Elisa. Pointer casts
@@ -439,7 +391,15 @@ extend CTranslator:
                     typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             TypedExprKind.ArrayIndex:
                 nested: TypedExpr = typed_expr_at(ctx, expression.lhs)
-                if c_type_pointer_count(nested.type_name) >= 2 and c_type_is_char_pointer(nested.type_name):
+                if nested.kind == TypedExprKind.Cast and nested.lhs >= 0 and c_type_is_array(typed_expr_at(ctx, nested.lhs).type_name):
+                    # Array decay is only an address view. Keep the source array
+                    # spelling when indexing so generated code reads `values[i]`
+                    # instead of `elisa_nonnull((&(values)[0]))[i]`.
+                    typed_emit_expr(out, ctx, nested.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("[", 0, -1))
+                    typed_emit_expr(out, ctx, expression.rhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("]", 0, -1))
+                elif c_type_pointer_count(nested.type_name) >= 2 and c_type_is_char_pointer(nested.type_name):
                     typed_emit_nested_pointer_value(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     append_view(out, sview("[", 0, -1))
                     typed_emit_expr(out, ctx, expression.rhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -491,7 +451,7 @@ extend CTranslator:
                     # function names are already first-class values, so retain
                     # the name and avoid manufacturing a same-signature cast.
                     typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                elif c_type_call_compatible(typed_expr_at(ctx, expression.lhs).type_name, expression.type_name) or (c_type_pointer_count(typed_expr_at(ctx, expression.lhs).type_name) == c_type_pointer_count(expression.type_name) and sview_eq(c_type_abi_base(typed_expr_at(ctx, expression.lhs).type_name), c_type_abi_base(expression.type_name))):
+                elif c_type_call_compatible(typed_expr_at(ctx, expression.lhs).type_name, expression.type_name) or (c_type_pointer_count(typed_expr_at(ctx, expression.lhs).type_name) == c_type_pointer_count(expression.type_name) and sview_eq(c_type_abi_base(typed_expr_at(ctx, expression.lhs).type_name), c_type_abi_base(expression.type_name)) and c_type_pointer_qualifiers_match(typed_expr_at(ctx, expression.lhs).type_name, expression.type_name)):
                     typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 else:
                     append_view(out, sview("(", 0, -1))

@@ -41,8 +41,7 @@ rg -q '^def add\(left: mutable i32, right: mutable i32\) -> i32' build/simple.fi
 
 ./build/elisa-c-transpiler testdata/fixtures/generic_nonnull.c > build/generic_nonnull.generated.elisa
 rg -Fq 'def elisa_nonnull[T](value: mutable T&?) -> mutable T&:' build/generic_nonnull.generated.elisa
-! rg -q '^def elisa_nonnull_' build/generic_nonnull.generated.elisa
-[ "$(rg -c '^def elisa_nonnull' build/generic_nonnull.generated.elisa)" -eq 1 ]
+[ "$(rg -c '^def elisa_nonnull\[' build/generic_nonnull.generated.elisa)" -eq 1 ]
 rg -Fq 'elisa_nonnull(byte)' build/generic_nonnull.generated.elisa
 rg -Fq 'elisa_nonnull(number)' build/generic_nonnull.generated.elisa
 rg -Fq 'elisa_nonnull(sample)' build/generic_nonnull.generated.elisa
@@ -80,6 +79,31 @@ clang -std=c11 testdata/fixtures/constant_fold.c -o build/constant_fold.native
 clang -Wl,-dead_strip -o build/constant_fold.generated build/constant_fold.generated.o
 ./build/constant_fold.native
 ./build/constant_fold.generated
+
+./build/elisa-c-transpiler testdata/fixtures/idiomatic_patterns.c > build/idiomatic_patterns.generated.elisa
+rg -q 'result: i32 = value' build/idiomatic_patterns.generated.elisa
+! rg -q 'if true:' build/idiomatic_patterns.generated.elisa
+rg -q '^    return result$' build/idiomatic_patterns.generated.elisa
+rg -q '^def elisa_nonnull_readonly\[T\]' build/idiomatic_patterns.generated.elisa
+rg -q 'return elisa_nonnull_readonly\(value\)\[0\]' build/idiomatic_patterns.generated.elisa
+clang -std=c11 testdata/fixtures/idiomatic_patterns.c -o build/idiomatic_patterns.native
+"$elisa_bin" -emit obj -O0 -o build/idiomatic_patterns.generated.o build/idiomatic_patterns.generated.elisa
+clang -Wl,-dead_strip -o build/idiomatic_patterns.generated build/idiomatic_patterns.generated.o
+./build/idiomatic_patterns.native
+./build/idiomatic_patterns.generated
+
+./build/elisa-c-transpiler testdata/fixtures/const_cast.c > build/const_cast.generated.elisa
+rg -q 'return elisa_nonnull\(\(value\)\.cast\[mutable i32&\?\]\)\[0\]' build/const_cast.generated.elisa
+clang -std=c11 testdata/fixtures/const_cast.c -o build/const_cast.native
+"$elisa_bin" -emit obj -O0 -o build/const_cast.generated.o build/const_cast.generated.elisa
+clang -Wl,-dead_strip -o build/const_cast.generated build/const_cast.generated.o
+./build/const_cast.native
+./build/const_cast.generated
+
+./scripts/quality_report.sh testdata/upstream/cJSON/cjson_smoke.c build/cjson.quality.elisa > build/cjson.quality.txt
+rg -q '^invalid_ir_markers: 0$' build/cjson.quality.txt
+rg -q '^casts: [0-9]+$' build/cjson.quality.txt
+rg -q '^nonnull_assertions: [0-9]+$' build/cjson.quality.txt
 
 ./build/elisa-c-transpiler testdata/fixtures/for_loop.c > build/for_loop.generated.elisa
 rg -q 'while index < 5:' build/for_loop.generated.elisa
@@ -132,7 +156,7 @@ set -e
 [ "$function_pointer_native_rc" -eq 0 ] && [ "$function_pointer_generated_rc" -eq 0 ]
 
 ./build/elisa-c-transpiler testdata/fixtures/nullable_function_field.c > build/nullable_function_field.generated.elisa
-rg -Fq 'allocate: (fn(usize) -> mutable void&?)?' build/nullable_function_field.generated.elisa
+rg -Fq 'allocate: mutable (fn(usize) -> mutable void&?)?' build/nullable_function_field.generated.elisa
 rg -Fq 'hooks.allocate(8)' build/nullable_function_field.generated.elisa
 ! rg -q '^    allocate: (mutable )?void&\?$' build/nullable_function_field.generated.elisa
 clang -std=c11 testdata/fixtures/nullable_function_field.c -o build/nullable_function_field.native

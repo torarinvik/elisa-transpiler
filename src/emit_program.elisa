@@ -51,6 +51,10 @@
                 return true if typed_stmt_guarantees_exit(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
             return false
         if statement.kind == TypedStmtKind.If:
+            constant: mutable i64 = 0
+            if typed_eval_integer_constant(ctx, statement.expr, constant):
+                return typed_stmt_guarantees_exit(ctx, statement.aux) if constant != 0
+                return statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux2)
             return statement.aux >= 0 and statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux) and typed_stmt_guarantees_exit(ctx, statement.aux2)
         if statement.kind == TypedStmtKind.Switch:
             has_default: mutable bool = false
@@ -203,6 +207,16 @@
                     typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 append_view(out, sview("\n", 0, -1))
             TypedStmtKind.If:
+                constant: mutable i64 = 0
+                if typed_eval_integer_constant(ctx, statement.expr, constant):
+                    if constant != 0:
+                        typed_emit_stmt(out, ctx, statement.aux, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    elif statement.aux2 >= 0:
+                        typed_emit_stmt(out, ctx, statement.aux2, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    else:
+                        append_indent(out, level)
+                        append_view(out, sview("pass\n", 0, -1))
+                    return
                 typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
                 append_indent(out, level)
                 append_view(out, sview("if ", 0, -1))
@@ -217,6 +231,14 @@
                     else_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, false)
                     typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     typed_pop_nonnull_facts(ctx, else_facts)
+                # An early-return guard establishes the opposite fact on the
+                # path that continues after the `if`. Carry that fact forward
+                # instead of reasserting the same nullable pointer at every
+                # later dereference.
+                if statement.aux2 < 0 and typed_stmt_guarantees_exit(ctx, statement.aux):
+                    _ = typed_push_condition_nonnull_facts(ctx, statement.expr, false)
+                elif statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux2):
+                    _ = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
             TypedStmtKind.While:
                 typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
                 append_indent(out, level)
@@ -473,7 +495,7 @@
         append_view(out, sview("\n", 0, -1))
 
     def typed_emit_program(out: mutable darray[u8]&, ctx: mutable TypedContext&, with_prelude: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        typed_emit_runtime_prelude(out, typed_context_needs_nonnull_helper(ctx), typed_context_needs_varargs(ctx)) if with_prelude
+        typed_emit_runtime_prelude(out, typed_context_needs_nonnull_helper(ctx), typed_context_needs_readonly_nonnull_helper(ctx), typed_context_needs_varargs(ctx)) if with_prelude
         typed_emit_types(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         typed_emit_externals(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if ctx.globals.count > 0:

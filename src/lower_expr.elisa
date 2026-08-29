@@ -71,7 +71,7 @@ extend CTranslator:
             operand: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if operand < 0:
                 return -1
-            if sview_eq(cast_kind, sview("BitCast", 0, -1)) or sview_eq(cast_kind, sview("PointerToIntegral", 0, -1)) or sview_eq(cast_kind, sview("IntegralToPointer", 0, -1)):
+            if sview_eq(cast_kind, sview("BitCast", 0, -1)) or sview_eq(cast_kind, sview("PointerToIntegral", 0, -1)) or sview_eq(cast_kind, sview("IntegralToPointer", 0, -1)) or sview_eq(cast_kind, sview("NoOp", 0, -1)):
                 return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Cast, text: type_name, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return operand
         if sview_eq(kind, sview("BinaryOperator", 0, -1)) or sview_eq(kind, sview("CompoundAssignOperator", 0, -1)):
@@ -381,6 +381,10 @@ extend CTranslator:
             result[0] <- 1 if left <= right else 0
         elif sview_eq(expression.text, sview(">=", 0, -1)):
             result[0] <- 1 if left >= right else 0
+        elif sview_eq(expression.text, sview("and", 0, -1)):
+            result[0] <- 1 if left != 0 and right != 0 else 0
+        elif sview_eq(expression.text, sview("or", 0, -1)):
+            result[0] <- 1 if left != 0 or right != 0 else 0
         else:
             return false
         return true

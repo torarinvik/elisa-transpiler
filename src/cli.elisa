@@ -110,7 +110,7 @@ extend CTranslator:
         # The manifest is shared by all generated modules, so retain both
         # optional runtime fragments even when an individual module does not
         # use them.
-        typed_emit_runtime_prelude(&manifest, true, true)
+        typed_emit_runtime_prelude(&manifest, true, true, true)
         for index in 0..<sources.count |manifest, sources|:
             module: mutable darray[u8] = []
             cli_module_name_for_sources(&module, sources, index)

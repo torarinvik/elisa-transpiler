@@ -36,7 +36,8 @@ The prototype currently covers the constructs needed by the acceptance target:
   recovery, enum qualification, constant-condition cleanup, and complete
   zero-filled aggregate initializers
 - integer constant folding, canonical C `NULL` handling, ABI-aware cast
-  elision, direct function decay, and readable source-derived temporary names
+  elision, const-preserving explicit casts, direct function decay, and readable
+  source-derived temporary names
 - idiomatic C `for`/`do`-`while` lowering, designated initializers, sparse array
   initializers, dense switch ranges, and symbolic enum switch patterns
 - a final output formatter that removes trailing whitespace and normalizes
@@ -47,6 +48,8 @@ The prototype currently covers the constructs needed by the acceptance target:
   declarations, demand-driven runtime helpers, and collision-safe project
   module names
 - source-qualified, de-duplicated diagnostics for unsupported constructs
+- a generic quality report for line count, cast/assertion pressure, unsafe
+  markers, synthetic names, and invalid-IR regressions
 
 Switches are lowered to Elisa `match` statements. Adjacent C labels that share
 an arm become Elisa or-patterns such as `0 | 1:`; three or more consecutive
@@ -86,6 +89,11 @@ translation with a diagnostic instead of being replaced by a placeholder.
 The translator is generic; cJSON and Kilo are regression targets, not special
 cases in the emitter.
 
+Non-null assertions are generic too. The prelude emits a mutable
+`elisa_nonnull[T]` only when a writable view is required, and a separate
+`elisa_nonnull_readonly[T]` only when a `const` C view needs narrowing. Neither
+helper has knowledge of cJSON, Kilo, or any other target program.
+
 It is intentionally not a general C translator yet. Macros as source
 constructs, full pointer arithmetic, `va_arg`, ownership/region inference,
 and broader library/runtime coverage
@@ -120,10 +128,22 @@ sh scripts/test.sh
 The script builds the Elisa translator, translates the local fixtures, the
 pinned `inih` example, cJSON, and Kilo, then compiles all generated programs.
 It compares the executable fixtures with native behavior, checks constant
-folding, C loop lowering, designated/sparse initializers, switch ranges and
-enum patterns, direct Elisa varargs lowering, source comments, formatter
-invariants, and Clang-derived external bindings. It also checks that
-unsupported syntax receives a source-qualified diagnostic.
+folding and dead-branch removal, C loop lowering, designated/sparse
+initializers, switch ranges and enum patterns, const-preserving casts, direct
+Elisa varargs lowering, source comments, formatter invariants, and
+Clang-derived external bindings. It also checks that unsupported syntax
+receives a source-qualified diagnostic and that a generic quality report has
+no invalid-IR markers.
+
+To inspect readability metrics for any translated C file:
+
+```sh
+./scripts/quality_report.sh testdata/upstream/cJSON/cjson_smoke.c \
+  build/cjson.quality.elisa
+```
+
+The report is source-agnostic and can be used as a baseline when adding new
+corpus programs.
 
 The normal tests use the stage-0 Elisa compiler. The translator source itself
 can also be checked with the stage-1 compiler, but the current stage-1 backend

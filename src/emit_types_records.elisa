@@ -85,6 +85,15 @@ extend CTranslator:
         return false
 
     def typed_record_field_is_mutable(ctx: TypedContext&, record_index: i64, field_name: sview) -> bool:
+        return false if record_index < 0 or record_index >= ctx.records.count.i64()
+        record: TypedRecord = ctx.records[record_index.usize()]
+        for offset in 0..<record.fields_count |ctx, record, field_name|:
+            field: TypedField = ctx.fields[(record.fields_start + offset).usize()]
+            if sview_eq(field.name, field_name):
+                # A non-const pointer field carries a writable C capability even
+                # when this translation unit only reads the slot itself.
+                return true if c_type_pointer_count(field.type_name) > 0 and not c_type_is_const_pointer(field.type_name)
+                break
         for function_index in 0..<ctx.functions.count |ctx, record_index, field_name|:
             return true if typed_stmt_writes_record_field(ctx, ctx.functions[function_index].body, record_index, field_name)
         return false

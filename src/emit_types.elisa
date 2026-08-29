@@ -226,6 +226,12 @@ extend CTranslator:
         # pointer, only a non-const pointee permits writes through the view.
         return c_type_pointer_count(qual_type) > 1 or not c_type_is_const_pointer(qual_type)
 
+    def c_type_pointer_qualifiers_match(left: sview, right: sview) -> bool:
+        # ABI compatibility alone must not erase an explicit C cast that adds
+        # or removes pointee constness. The distinction controls Elisa's
+        # mutable-reference capability even when both values use the same ABI.
+        return c_type_is_const_pointer(left) == c_type_is_const_pointer(right)
+
     def c_type_pointer_optional(qual_type: sview) -> bool:
         # The optional marker belongs to the pointer value, not to an array
         # aggregate containing pointer elements.

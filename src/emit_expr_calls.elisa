@@ -23,9 +23,9 @@ extend CTranslator:
             if target_parameter.len == 0:
                 return parameter_index >= function.params_count and not function.variadic
             if sview_eq(target_parameter, sview("void", 0, -1)):
-                # Keep the explicit cast for C's `(void)` prototype. Elisa
-                # distinguishes `fn()` from `fn(void)` in function values even
-                # though both spellings mean “no arguments” in C.
+                # Preserve the explicit cast for C's `(void)` prototype.
+                # Elisa distinguishes `fn()` from `fn(void)` in function
+                # values even though both spellings mean “no arguments” in C.
                 return false
             if sview_eq(target_parameter, sview("...", 0, -1)):
                 return function.variadic
@@ -75,6 +75,13 @@ extend CTranslator:
         direct_function_compatible: bool = typed_direct_function_matches_target(ctx, index, target_type)
         existing_function_pointer: bool = c_type_is_function_pointer(argument.type_name) and not (argument.kind == TypedExprKind.Cast and c_type_is_function(typed_expr_at(ctx, argument.lhs).type_name))
         already_converted: bool = argument.kind == TypedExprKind.Cast and not c_type_is_function_pointer(target_type) and c_type_call_compatible(argument.type_name, target_type)
+        same_cast_target: bool = argument.kind == TypedExprKind.Cast and c_type_pointer_count(argument.type_name) == c_type_pointer_count(target_type) and sview_eq(c_type_without_qualifiers(argument.type_name), c_type_without_qualifiers(target_type)) and c_type_pointer_qualifiers_match(argument.type_name, target_type)
+        if direct_function_compatible:
+            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
+        if same_cast_target and not mutable_text_shape and not address_of_nested_pointer and not nested_char_index:
+            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
         if not address_of_nested_pointer and not nested_char_index and (not mutable_text_shape or decayed_readonly_compatible) and c_type_call_compatible(argument.type_name, target_type) and (target_optional or not typed_expr_may_be_null(ctx, index)) and (not force_cast or typed_expr_can_pass_mutable(ctx, index) or direct_function_compatible or existing_function_pointer or already_converted or decayed_readonly_compatible):
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
@@ -152,7 +159,7 @@ extend CTranslator:
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview(" else 0)", 0, -1))
             return
-        if expression.kind != TypedExprKind.Null and not typed_expr_may_be_null(ctx, index) and sview_find_byte(target_type, 42) >= 0 and (sview_find_byte(expression.type_name, 42) >= 0 or expression.kind == TypedExprKind.Call) and not c_type_call_compatible(expression.type_name, target_type) and not (c_type_pointer_count(expression.type_name) == c_type_pointer_count(target_type) and sview_eq(c_type_abi_base(expression.type_name), c_type_abi_base(target_type))):
+        if expression.kind != TypedExprKind.Null and not typed_expr_may_be_null(ctx, index) and sview_find_byte(target_type, 42) >= 0 and (sview_find_byte(expression.type_name, 42) >= 0 or expression.kind == TypedExprKind.Call) and not c_type_call_compatible(expression.type_name, target_type) and not (c_type_pointer_count(expression.type_name) == c_type_pointer_count(target_type) and sview_eq(c_type_abi_base(expression.type_name), c_type_abi_base(target_type)) and c_type_pointer_qualifiers_match(expression.type_name, target_type)):
             append_view(out, sview("(", 0, -1))
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview(").cast[mutable ", 0, -1))
@@ -329,6 +336,13 @@ extend CTranslator:
         append_view(out, sview(")", 0, -1)) if wrapped
 
     def typed_emit_condition(out: mutable darray[u8]&, ctx: TypedContext&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # Constant conditions are common after macro expansion and enum
+        # lowering. Emit the final boolean directly instead of retaining a C
+        # comparison tree that adds casts and obscures unreachable branches.
+        constant: mutable i64 = 0
+        if typed_eval_integer_constant(ctx, index, constant):
+            append_view(out, sview("true", 0, -1)) if constant != 0 else append_view(out, sview("false", 0, -1))
+            return
         # Keep a simple pointer/null test in its native reference form. Besides
         # being much clearer than an address cast, this lets Elisa prove the
         # non-null branch and removes repeated `elisa_nonnull` wrappers from
