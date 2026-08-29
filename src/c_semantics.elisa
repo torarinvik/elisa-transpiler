@@ -1,4 +1,7 @@
 extend CTranslator:
+    def c_type_is_enum(qual_type: sview) -> bool:
+        return sview_starts_with(c_type_without_qualifiers(qual_type), sview("enum ", 0, -1))
+
     def c_type_is_integer(qual_type: sview) -> bool:
         base: sview = c_type_named_base(qual_type)
         return sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) or sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1))

@@ -220,6 +220,12 @@ extend CTranslator:
         base: sview = c_type_pointer_base(qual_type)
         return sview_starts_with(base, sview("const ", 0, -1))
 
+    def c_type_pointer_can_write(qual_type: sview) -> bool:
+        # For T **, the outer pointer writes a pointer slot even when the
+        # ultimate pointee is const (for example `const char **`). For a single
+        # pointer, only a non-const pointee permits writes through the view.
+        return c_type_pointer_count(qual_type) > 1 or not c_type_is_const_pointer(qual_type)
+
     def c_type_pointer_optional(qual_type: sview) -> bool:
         # The optional marker belongs to the pointer value, not to an array
         # aggregate containing pointer elements.

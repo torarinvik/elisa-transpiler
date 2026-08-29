@@ -42,7 +42,52 @@ extend CTranslator:
                 field: JsonValue = ast_child(node, index)
                 if sview_eq(ast_kind(field), sview("FieldDecl", 0, -1)):
                     ctx.fields.push(TypedField{name: safe_identifier(ast_name(field)), type_name: ast_c_type(field)})
-        ctx.records.push(TypedRecord{name: safe_identifier(c_type_named_base(name)), fields_start: fields_start, fields_count: ctx.fields.count.i64() - fields_start})
+        ctx.records.push(TypedRecord{name: safe_identifier(c_type_named_base(name)), fields_start: fields_start, fields_count: ctx.fields.count.i64() - fields_start, comment: ast_comment_text(node)})
+
+    def typed_expr_writes_record_field(ctx: TypedContext&, index: i64, record_index: i64, field_name: sview) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("<-", 0, -1)):
+            lhs: TypedExpr = typed_expr_at(ctx, expression.lhs)
+            if lhs.kind == TypedExprKind.Member and sview_eq(lhs.text, field_name):
+                base: TypedExpr = typed_expr_at(ctx, lhs.lhs)
+                return typed_record_index(ctx, base.type_name) == record_index
+        return true if typed_expr_writes_record_field(ctx, expression.lhs, record_index, field_name)
+        return true if typed_expr_writes_record_field(ctx, expression.rhs, record_index, field_name)
+        return true if typed_expr_writes_record_field(ctx, expression.third, record_index, field_name)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression, record_index, field_name|:
+                return true if typed_expr_writes_record_field(ctx, ctx.expr_children[(expression.args_start + offset).usize()], record_index, field_name)
+        return false
+
+    def typed_stmt_writes_record_field(ctx: TypedContext&, index: i64, record_index: i64, field_name: sview) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return true if typed_expr_writes_record_field(ctx, statement.expr, record_index, field_name)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement, record_index, field_name|:
+                return true if typed_stmt_writes_record_field(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], record_index, field_name)
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_stmt_writes_record_field(ctx, statement.aux, record_index, field_name)
+            return typed_stmt_writes_record_field(ctx, statement.aux2, record_index, field_name)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_writes_record_field(ctx, statement.children_start, record_index, field_name)
+            return true if typed_stmt_writes_record_field(ctx, statement.aux, record_index, field_name)
+            return typed_stmt_writes_record_field(ctx, statement.aux2, record_index, field_name)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+            return typed_stmt_writes_record_field(ctx, statement.aux, record_index, field_name)
+        elif statement.kind == TypedStmtKind.Label:
+            return typed_stmt_writes_record_field(ctx, statement.expr, record_index, field_name)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement, record_index, field_name|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_writes_record_field(ctx, switch_case.body, record_index, field_name)
+        return false
+
+    def typed_record_field_is_mutable(ctx: TypedContext&, record_index: i64, field_name: sview) -> bool:
+        for function_index in 0..<ctx.functions.count |ctx, record_index, field_name|:
+            return true if typed_stmt_writes_record_field(ctx, ctx.functions[function_index].body, record_index, field_name)
+        return false
 
     def typed_collect_enum(ctx: mutable TypedContext&, node: JsonValue) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         name: sview = ast_name(node)
@@ -213,6 +258,10 @@ extend CTranslator:
     def typed_emit_types(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         for index in 0..<ctx.records.count |out, ctx|:
             record: TypedRecord = ctx.records[index.usize()]
+            if record.comment.len > 0:
+                append_view(out, sview("#", 0, -1))
+                append_view(out, record.comment)
+                append_view(out, sview("\n", 0, -1))
             append_view(out, sview("struct ", 0, -1))
             append_elisa_type_name(out, record.name)
             append_view(out, sview(":\n", 0, -1))
@@ -223,8 +272,11 @@ extend CTranslator:
                     field: TypedField = ctx.fields[(record.fields_start + offset).usize()]
                     append_view(out, sview("    ", 0, -1))
                     append_view(out, field.name)
-                    append_view(out, sview(": mutable ", 0, -1))
+                    append_view(out, sview(": mutable ", 0, -1)) if typed_record_field_is_mutable(ctx, index, field.name) else append_view(out, sview(": ", 0, -1))
                     if c_type_is_function_pointer(field.type_name):
+                        # Nullable function references are not yet a stable Elisa
+                        # surface type. Keep callback storage opaque and cast only
+                        # at the call/assignment boundary.
                         append_view(out, sview("void&?", 0, -1))
                     else:
                         append_c_type_contextual(out, ctx, field.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -235,7 +287,7 @@ extend CTranslator:
         for index in 0..<ctx.enums.count |out, ctx|:
             enumeration: TypedEnum = ctx.enums[index.usize()]
             append_view(out, sview("const enum ", 0, -1))
-            append_view(out, enumeration.name)
+            append_elisa_type_name(out, enumeration.name)
             append_view(out, sview(" of i32:\n", 0, -1))
             emitted: mutable i64 = 0
             for constant_index in 0..<ctx.enum_consts.count |out, ctx, enumeration, emitted|:

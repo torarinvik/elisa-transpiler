@@ -1,5 +1,5 @@
 extend CTranslator:
-    def typed_emit_call_cast(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, target_type: sview, target_optional: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_emit_call_cast(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, target_type: sview, target_optional: bool, force_cast: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         argument: TypedExpr = typed_expr_at(ctx, index)
         # Calls are C ABI boundaries. Keep the conversion explicit for values
         # whose Elisa reference shape differs from the C spelling: a translated
@@ -14,7 +14,7 @@ extend CTranslator:
         # an explicit cast for either spelling, including the const-qualified C
         # form.
         mutable_text_shape: bool = typed_expr_is_string_value(ctx, index) or typed_expr_is_array_decay_value(ctx, index)
-        if not address_of_nested_pointer and not nested_char_index and not mutable_text_shape and c_type_call_compatible(argument.type_name, target_type) and (target_optional or not typed_expr_may_be_null(ctx, index)):
+        if not address_of_nested_pointer and not nested_char_index and not mutable_text_shape and c_type_call_compatible(argument.type_name, target_type) and (target_optional or not typed_expr_may_be_null(ctx, index)) and (not force_cast or typed_expr_can_pass_mutable(ctx, index)):
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
         if c_type_is_array(argument.type_name) and argument.kind != TypedExprKind.String:
@@ -41,8 +41,9 @@ extend CTranslator:
         argument: TypedExpr = typed_expr_at(ctx, index)
         expected_type: mutable sview = typed_call_parameter_type(ctx, callee, position)
         expected_type <- c_function_parameter_type(typed_expr_at(ctx, callee_index).type_name, position) if callee_index >= 0
-        if expected_type.len > 0 and sview_find_byte(expected_type, 42) >= 0 and argument.kind != TypedExprKind.Null:
-            typed_emit_call_cast(out, ctx, index, expected_type, c_type_pointer_optional(expected_type)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        expected_mutable: bool = typed_call_parameter_is_mutable(ctx, callee, position)
+        if expected_type.len > 0 and sview_find_byte(expected_type, 42) >= 0 and argument.kind != TypedExprKind.Null and (expected_mutable or callee_index >= 0 or typed_user_function_index(ctx, callee) >= 0 or not c_type_call_compatible(argument.type_name, expected_type)):
+            typed_emit_call_cast(out, ctx, index, expected_type, c_type_pointer_optional(expected_type), expected_mutable or callee_index >= 0 or typed_user_function_index(ctx, callee) >= 0) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
         if argument.kind == TypedExprKind.String and expected_type.len == 0:
             append_view(out, sview("(", 0, -1))
@@ -59,6 +60,12 @@ extend CTranslator:
     def typed_emit_target_value(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, target_type: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression: TypedExpr = typed_expr_at(ctx, index)
         if c_type_is_function_pointer(target_type):
+            # A non-null function-to-pointer decay already has Elisa's `fn`
+            # shape. Keep it typed for local callback variables; opaque storage
+            # is only needed by record fields that may also hold C NULL.
+            if expression.kind != TypedExprKind.Null and c_type_is_function_pointer(expression.type_name):
+                typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return
             typed_emit_function_pointer_storage_value(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
         if target_type.len > 0 and sview_find_byte(target_type, 42) >= 0 and expression.kind != TypedExprKind.Null and typed_nonnull_supported(expression.type_name) and not c_type_pointer_optional(target_type):
@@ -70,6 +77,14 @@ extend CTranslator:
             append_view(out, sview(" else 0)", 0, -1))
             return
         if expression.kind != TypedExprKind.Null and not typed_expr_may_be_null(ctx, index) and sview_find_byte(target_type, 42) >= 0 and (sview_find_byte(expression.type_name, 42) >= 0 or expression.kind == TypedExprKind.Call) and not c_type_call_compatible(expression.type_name, target_type) and not (c_type_pointer_count(expression.type_name) == c_type_pointer_count(target_type) and sview_eq(c_type_abi_base(expression.type_name), c_type_abi_base(target_type))):
+            append_view(out, sview("(", 0, -1))
+            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview(").cast[mutable ", 0, -1))
+            append_c_type_contextual(out, ctx, target_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(target_type)
+            append_view(out, sview("]", 0, -1))
+            return
+        if expression.kind != TypedExprKind.Null and sview_find_byte(target_type, 42) >= 0 and c_type_pointer_can_write(target_type) and c_type_is_const_pointer(expression.type_name):
             append_view(out, sview("(", 0, -1))
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview(").cast[mutable ", 0, -1))
@@ -157,17 +172,24 @@ extend CTranslator:
         return sview_eq(expression.type_name, sview("_Bool", 0, -1)) or sview_eq(expression.type_name, sview("bool", 0, -1))
 
     def typed_expr_may_be_null(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
         expression: TypedExpr = typed_expr_at(ctx, index)
         if expression.kind == TypedExprKind.Null:
             return true
+        # The C type itself is nullable unless the current branch has already
+        # narrowed this exact place. This keeps a nullable name or call result
+        # from slipping through a non-nullable ABI boundary without an
+        # assertion.
+        if c_type_pointer_optional(expression.type_name):
+            return not typed_name_is_currently_nonnull(ctx, index)
         if expression.kind == TypedExprKind.Conditional:
             return typed_expr_may_be_null(ctx, expression.rhs) or typed_expr_may_be_null(ctx, expression.third)
         return false
 
     def typed_expr_is_always_true(ctx: TypedContext&, index: i64) -> bool:
         return false if index < 0
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        return expression.kind == TypedExprKind.Integer and not sview_eq(expression.text, sview("0", 0, -1))
+        constant: mutable i64 = 0
+        return typed_eval_integer_constant(ctx, index, constant) and constant != 0
 
     def typed_expr_is_pointer(ctx: TypedContext&, index: i64) -> bool:
         expression: TypedExpr = typed_expr_at(ctx, index)
@@ -188,7 +210,7 @@ extend CTranslator:
         # being much clearer than an address cast, this lets Elisa prove the
         # non-null branch and removes repeated `elisa_nonnull` wrappers from
         # the body of the test.
-        if typed_null_guard_name(ctx, index, true).len > 0 or typed_null_guard_name(ctx, index, false).len > 0:
+        if typed_condition_nonnull_expr(ctx, index, true) >= 0 or typed_condition_nonnull_expr(ctx, index, false) >= 0:
             expression: TypedExpr = typed_expr_at(ctx, index)
             typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview(" ", 0, -1))

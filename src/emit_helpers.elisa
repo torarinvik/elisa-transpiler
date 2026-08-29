@@ -1,9 +1,9 @@
 extend CTranslator:
-    def typed_emit_runtime_prelude(out: mutable darray[u8]&) -> void:
-        append_view(out, sview("def ctx_string_index(value: cstr, index: i64) -> i64 can[Unsafe.PointerCast]:\n", 0, -1))
-        append_view(out, sview("    return value.cast[mutable u8&][index].i64()\n\n", 0, -1))
-        append_view(out, sview("def elisa_nonnull[T](value: mutable T&?) -> mutable T&:\n", 0, -1))
-        append_view(out, sview("    if value == null:\n", 0, -1))
-        append_view(out, sview("        return zeroed\n", 0, -1))
-        append_view(out, sview("    return value\n\n", 0, -1))
-        append_view(out, sview("extern va_list\n\n@intrinsic(\"llvm.va_start\")\nextern llvm_va_start(storage: mutable void&) -> void\n\n@intrinsic(\"llvm.va_end\")\nextern llvm_va_end(storage: mutable void&) -> void\n\n", 0, -1))
+    def typed_emit_runtime_prelude(out: mutable darray[u8]&, needs_nonnull: bool, needs_varargs: bool) -> void:
+        if needs_nonnull:
+            append_view(out, sview("def elisa_nonnull[T](value: mutable T&?) -> mutable T&:\n", 0, -1))
+            append_view(out, sview("    if value == null:\n", 0, -1))
+            append_view(out, sview("        return zeroed\n", 0, -1))
+            append_view(out, sview("    return value\n\n", 0, -1))
+        if needs_varargs:
+            append_view(out, sview("extern va_list\n\n@intrinsic(\"llvm.va_start\")\nextern llvm_va_start(storage: mutable void&) -> void\n\n@intrinsic(\"llvm.va_end\")\nextern llvm_va_end(storage: mutable void&) -> void\n\n", 0, -1))

@@ -179,7 +179,7 @@ extend CTranslator:
                     spelled_parameter_type: sview = ast_qual_type(parameter)
                     parameter_type: sview = spelled_parameter_type if sview_eq(spelled_parameter_type, sview("va_list", 0, -1)) or sview_eq(spelled_parameter_type, sview("__builtin_va_list", 0, -1)) else ast_abi_qual_type(parameter)
                     is_va_list: bool = sview_eq(parameter_type, sview("va_list", 0, -1)) or sview_eq(parameter_type, sview("__builtin_va_list", 0, -1))
-                    ctx.extern_params.push(TypedParam{name: parameter_name, type_name: parameter_type, is_mutable: not is_va_list and not c_type_is_const_pointer(parameter_type)})
+                    ctx.extern_params.push(TypedParam{name: parameter_name, type_name: parameter_type, is_mutable: c_type_pointer_count(parameter_type) > 0 and c_type_pointer_can_write(parameter_type)})
                     ordinal <- ordinal + 1
         variadic: bool = sview_find_byte(function_type, 46) >= 0
         ctx.externs.push(TypedExtern{name: external_binding_name(name), link_name: name, return_type: function_type, params_start: params_start, params_count: ctx.extern_params.count.i64() - params_start, variadic: variadic})

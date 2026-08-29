@@ -1,0 +1,209 @@
+extend CTranslator:
+    def typed_expr_assigns_name(ctx: TypedContext&, index: i64, name: sview) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("<-", 0, -1)):
+            lhs: TypedExpr = typed_expr_at(ctx, expression.lhs)
+            return true if lhs.kind == TypedExprKind.Name and sview_eq(lhs.text, name)
+        return true if typed_expr_assigns_name(ctx, expression.lhs, name)
+        return true if typed_expr_assigns_name(ctx, expression.rhs, name)
+        return true if typed_expr_assigns_name(ctx, expression.third, name)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression, name|:
+                return true if typed_expr_assigns_name(ctx, ctx.expr_children[(expression.args_start + offset).usize()], name)
+        return false
+
+    def typed_stmt_assigns_name(ctx: TypedContext&, index: i64, name: sview) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        if statement.kind == TypedStmtKind.Return or statement.kind == TypedStmtKind.Declaration or statement.kind == TypedStmtKind.Expression:
+            return true if typed_expr_assigns_name(ctx, statement.expr, name)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement, name|:
+                return true if typed_stmt_assigns_name(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], name)
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_expr_assigns_name(ctx, statement.expr, name)
+            return true if typed_stmt_assigns_name(ctx, statement.aux, name)
+            return statement.aux2 >= 0 and typed_stmt_assigns_name(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_assigns_name(ctx, statement.children_start, name)
+            return true if typed_expr_assigns_name(ctx, statement.expr, name)
+            return true if typed_stmt_assigns_name(ctx, statement.aux, name)
+            return statement.aux2 >= 0 and typed_stmt_assigns_name(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+            return true if typed_expr_assigns_name(ctx, statement.expr, name)
+            return typed_stmt_assigns_name(ctx, statement.aux, name)
+        elif statement.kind == TypedStmtKind.Switch:
+            return true if typed_expr_assigns_name(ctx, statement.expr, name)
+            for offset in 0..<statement.children_count |ctx, statement, name|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_assigns_name(ctx, switch_case.body, name)
+        elif statement.kind == TypedStmtKind.Label:
+            return typed_stmt_assigns_name(ctx, statement.expr, name)
+        return false
+
+    def typed_expr_root_name(ctx: TypedContext&, index: i64) -> sview:
+        return sview("", 0, 0) if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return expression.text if expression.kind == TypedExprKind.Name else typed_expr_root_name(ctx, expression.lhs) if expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.Unary else sview("", 0, 0)
+
+    def typed_expr_writes_name(ctx: TypedContext&, index: i64, name: sview) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("<-", 0, -1)):
+            return sview_eq(typed_expr_root_name(ctx, expression.lhs), name)
+        if expression.kind == TypedExprKind.Call and expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression, name|:
+                argument_index: i64 = ctx.expr_children[(expression.args_start + offset).usize()]
+                expected: sview = typed_call_parameter_type(ctx, expression.text, offset)
+                return true if typed_expr_root_name(ctx, argument_index).len > 0 and sview_eq(typed_expr_root_name(ctx, argument_index), name) and c_type_pointer_can_write(expected)
+        return true if typed_expr_writes_name(ctx, expression.lhs, name)
+        return true if typed_expr_writes_name(ctx, expression.rhs, name)
+        return true if typed_expr_writes_name(ctx, expression.third, name)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression, name|:
+                return true if typed_expr_writes_name(ctx, ctx.expr_children[(expression.args_start + offset).usize()], name)
+        return false
+
+    def typed_stmt_writes_name(ctx: TypedContext&, index: i64, name: sview) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return true if typed_expr_writes_name(ctx, statement.expr, name)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement, name|:
+                return true if typed_stmt_writes_name(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], name)
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_stmt_writes_name(ctx, statement.aux, name)
+            return statement.aux2 >= 0 and typed_stmt_writes_name(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_writes_name(ctx, statement.children_start, name)
+            return true if typed_stmt_writes_name(ctx, statement.aux, name)
+            return statement.aux2 >= 0 and typed_stmt_writes_name(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+            return typed_stmt_writes_name(ctx, statement.aux, name)
+        elif statement.kind == TypedStmtKind.Label:
+            return typed_stmt_writes_name(ctx, statement.expr, name)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement, name|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_writes_name(ctx, switch_case.body, name)
+        return false
+
+    def typed_parameter_is_mutable(ctx: TypedContext&, function: TypedFunction, parameter: TypedParam) -> bool:
+        return true if ctx.mode == TypedTranslationMode.Fidelity
+        return true if c_type_pointer_count(parameter.type_name) > 0 and not c_type_is_const_pointer(parameter.type_name)
+        return typed_stmt_writes_name(ctx, function.body, parameter.name)
+
+    def typed_declaration_is_mutable(ctx: TypedContext&, statement: TypedStmt) -> bool:
+        return true if ctx.mode == TypedTranslationMode.Fidelity
+        return true if c_type_pointer_count(statement.type_name) > 0 and not c_type_is_const_pointer(statement.type_name)
+        return typed_stmt_writes_name(ctx, ctx.current_function_body, statement.name)
+
+    def typed_stmt_declares_name_mutably(ctx: TypedContext&, index: i64, name: sview) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return typed_declaration_is_mutable(ctx, statement) if statement.kind == TypedStmtKind.Declaration and sview_eq(statement.name, name)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement, name|:
+                return true if typed_stmt_declares_name_mutably(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], name)
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_stmt_declares_name_mutably(ctx, statement.aux, name)
+            return statement.aux2 >= 0 and typed_stmt_declares_name_mutably(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_declares_name_mutably(ctx, statement.children_start, name)
+            return true if typed_stmt_declares_name_mutably(ctx, statement.aux, name)
+            return statement.aux2 >= 0 and typed_stmt_declares_name_mutably(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+            return typed_stmt_declares_name_mutably(ctx, statement.aux, name)
+        elif statement.kind == TypedStmtKind.Label:
+            return typed_stmt_declares_name_mutably(ctx, statement.expr, name)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement, name|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_declares_name_mutably(ctx, switch_case.body, name)
+        return false
+
+    def typed_expr_can_pass_mutable(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Name:
+            return true if typed_global_index(ctx, expression.text) >= 0
+            for function_index in 0..<ctx.functions.count |ctx, expression|:
+                function: TypedFunction = ctx.functions[function_index.usize()]
+                if function.body == ctx.current_function_body:
+                    for offset in 0..<function.params_count |ctx, function, expression|:
+                        parameter: TypedParam = ctx.params[(function.params_start + offset).usize()]
+                        return typed_parameter_is_mutable(ctx, function, parameter) if sview_eq(parameter.name, expression.text)
+            return typed_stmt_declares_name_mutably(ctx, ctx.current_function_body, expression.text)
+        return true if expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex
+        return typed_expr_can_pass_mutable(ctx, expression.lhs) if expression.kind == TypedExprKind.Cast
+        if expression.kind == TypedExprKind.Call:
+            return c_type_pointer_count(expression.type_name) > 0 and not c_type_is_const_pointer(expression.type_name)
+        return false
+
+    def typed_name_matches_suffix(name: sview, prefix: sview, suffix: sview) -> bool:
+        return false if name.len != prefix.len + suffix.len
+        for index in 0..<prefix.len |name, prefix, suffix|:
+            return false if string_view_index(name, index) != string_view_index(prefix, index)
+        for index in 0..<suffix.len |name, prefix, suffix|:
+            return false if string_view_index(name, prefix.len + index) != string_view_index(suffix, index)
+        return true
+
+    def typed_expr_contains_call(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return true if expression.kind == TypedExprKind.Call
+        return true if typed_expr_contains_call(ctx, expression.lhs)
+        return true if typed_expr_contains_call(ctx, expression.rhs)
+        return true if typed_expr_contains_call(ctx, expression.third)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression|:
+                return true if typed_expr_contains_call(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        return false
+
+    def typed_expr_uses_nonnull_helper(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if typed_nonnull_supported(expression.type_name) and (expression.kind == TypedExprKind.Name or expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Call or expression.kind == TypedExprKind.Cast):
+            return true
+        return true if typed_expr_uses_nonnull_helper(ctx, expression.lhs)
+        return true if typed_expr_uses_nonnull_helper(ctx, expression.rhs)
+        return true if typed_expr_uses_nonnull_helper(ctx, expression.third)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression|:
+                return true if typed_expr_uses_nonnull_helper(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        return false
+
+    def typed_stmt_uses_nonnull_helper(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return true if typed_expr_uses_nonnull_helper(ctx, statement.expr)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                return true if typed_stmt_uses_nonnull_helper(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+        elif statement.kind == TypedStmtKind.If or statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+            return true if typed_stmt_uses_nonnull_helper(ctx, statement.aux)
+            return typed_stmt_uses_nonnull_helper(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_uses_nonnull_helper(ctx, statement.children_start)
+            return true if typed_stmt_uses_nonnull_helper(ctx, statement.aux)
+            return typed_stmt_uses_nonnull_helper(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.Label:
+            return typed_stmt_uses_nonnull_helper(ctx, statement.expr)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_uses_nonnull_helper(ctx, switch_case.body)
+        return false
+
+    def typed_context_needs_nonnull_helper(ctx: TypedContext&) -> bool:
+        for index in 0..<ctx.functions.count |ctx|:
+            return true if typed_stmt_uses_nonnull_helper(ctx, ctx.functions[index].body)
+        for index in 0..<ctx.globals.count |ctx|:
+            return true if typed_expr_uses_nonnull_helper(ctx, ctx.globals[index].initializer)
+        return false
+
+    def typed_context_needs_varargs(ctx: TypedContext&) -> bool:
+        for index in 0..<ctx.functions.count |ctx|:
+            return true if ctx.functions[index].variadic
+        return false

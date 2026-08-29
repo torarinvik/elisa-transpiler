@@ -56,6 +56,8 @@ extend CTranslator:
             return operand
         if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
             return typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if sview_eq(kind, sview("ImplicitValueInitExpr", 0, -1)):
+            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("CXXStaticCastExpr", 0, -1)):
             cast_kind: sview = ast_cast_kind(node)
             if sview_eq(cast_kind, sview("NullToPointer", 0, -1)):
@@ -149,6 +151,12 @@ extend CTranslator:
             when_false: i64 = typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if condition < 0 or when_true < 0 or when_false < 0:
                 return -1
+            # A constant condition has no evaluation side effect. Select its
+            # arm in the IR so generated Elisa does not retain a noisy
+            # conditional expression for enum/flag and literal predicates.
+            constant: mutable i64 = 0
+            if typed_eval_integer_constant(ctx, condition, constant):
+                return when_true if constant != 0 else when_false
             return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Conditional, text: sview("", 0, 0), type_name: type_name, lhs: condition, rhs: when_true, third: when_false, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("MemberExpr", 0, -1)):
             base: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -172,16 +180,21 @@ extend CTranslator:
                 ctx.expr_children.push(lowered_args[index])
             return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Aggregate, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: ctx.expr_children.count.i64() - args_start, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("CallExpr", 0, -1)):
-            callee_name: mutable sview = typed_callee_name(ast_child(node, 0))
+            callee_node: JsonValue = ast_child(node, 0)
+            callee_name: mutable sview = typed_callee_name(callee_node)
             callee_index: mutable i64 = -1
-            if callee_name.len == 0:
-                callee_index <- typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            # A named function pointer is still an expression callee. Lower it
+            # as such instead of registering the local variable as an external
+            # C function. This preserves typed indirect calls without adding a
+            # target-library table.
+            if callee_name.len == 0 or c_type_is_function_pointer(ast_c_type(callee_node)):
+                callee_index <- typed_lower_expr(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1 if callee_index < 0
             varargs_start: bool = sview_eq(callee_name, sview("__builtin_va_start", 0, -1))
             varargs_end: bool = sview_eq(callee_name, sview("__builtin_va_end", 0, -1))
             callee_name <- sview("llvm_va_start", 0, -1) if varargs_start
             callee_name <- sview("llvm_va_end", 0, -1) if varargs_end
-            typed_add_external(ctx, callee_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if callee_name.len > 0 and not varargs_start and not varargs_end
+            typed_add_external(ctx, callee_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if callee_index < 0 and callee_name.len > 0 and not varargs_start and not varargs_end
             lowered_args: mutable darray[i64] = []
             first_argument: mutable i64 = 1
             last_argument: mutable i64 = 2 if varargs_start or varargs_end else ast_child_count(node)

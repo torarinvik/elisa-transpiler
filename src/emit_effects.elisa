@@ -191,7 +191,7 @@ extend CTranslator:
         append_view(out, sview("can ", 0, -1))
         typed_emit_effect_list(out, needs_global, needs_unsafe)
         append_view(out, sview(":\n", 0, -1))
-        if needs_unsafe:
+        if needs_unsafe and ctx.mode == TypedTranslationMode.Fidelity:
             append_indent(out, 2)
             append_view(out, sview("trusted Unsafe.StaleRef:\n", 0, -1))
             return 3

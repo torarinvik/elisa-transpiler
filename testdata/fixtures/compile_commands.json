@@ -1,4 +1,5 @@
 [
   {"directory":".","file":"testdata/fixtures/module_a.c","command":"clang -std=c11 -DPROJECT_INCREMENT=1 -c testdata/fixtures/module_a.c"},
-  {"directory":".","file":"testdata/fixtures/module_b.c","command":"clang -std=c11 -c testdata/fixtures/module_b.c"}
+  {"directory":".","file":"testdata/fixtures/module_b.c","command":"clang -std=c11 -c testdata/fixtures/module_b.c"},
+  {"directory":".","file":"testdata/fixtures/other.module_a.c","command":"clang -std=c11 -c testdata/fixtures/other.module_a.c"}
 ]

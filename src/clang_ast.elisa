@@ -61,7 +61,7 @@ module CTranslator:
 
     def run_clang_ast(path: cstr) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
         command: mutable darray[u8] = []
-        append_literal(&command, "clang -std=c11 -D_DEFAULT_SOURCE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wno-everything -Xclang -ast-dump=json -fsyntax-only ")
+        append_literal(&command, "clang -std=c11 -D_DEFAULT_SOURCE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wno-everything -Xclang -fparse-all-comments -Xclang -ast-dump=json -fsyntax-only ")
         append_shell_quoted(&command, path)
         command.push(0)
         stream: mutable heap void&? = popen((&command[0]).cast[cstr], "r")
@@ -85,7 +85,7 @@ module CTranslator:
             append_shell_quoted_view(&command, directory)
             append_literal(&command, " && ")
         append_view(&command, compile_command)
-        append_literal(&command, " -Wno-unused-command-line-argument -Xclang -ast-dump=json -fsyntax-only")
+        append_literal(&command, " -Wno-unused-command-line-argument -Xclang -fparse-all-comments -Xclang -ast-dump=json -fsyntax-only")
         command.push(0)
         return run_command_output((&command[0]).cast[cstr])
 
@@ -151,6 +151,16 @@ module CTranslator:
 
     def ast_child(node: JsonValue, index: i64) -> JsonValue:
         return ast_array_item(ast_children(node), index)
+
+    def ast_comment_text(node: JsonValue) -> sview:
+        if sview_eq(ast_kind(node), sview("TextComment", 0, -1)):
+            return ast_string(ast_field(node, sview("text", 0, -1)))
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count:
+                comment: sview = ast_comment_text(ast_child(node, index))
+                return comment if comment.len > 0
+        return sview("", 0, 0)
 
     def ast_find_child(node: JsonValue, wanted: sview) -> JsonValue:
         count: i64 = ast_child_count(node)
@@ -356,6 +366,7 @@ module CTranslator:
         Aggregate
         Sequence
         Null
+        Zeroed
 
     const enum TypedStmtKind of i8:
         Invalid
@@ -378,6 +389,10 @@ module CTranslator:
     const enum TypedBindingKind of i8:
         External
         ExternalGlobal
+
+    const enum TypedTranslationMode of i8:
+        Fidelity
+        Idiomatic
 
     struct TypedExpr:
         kind: TypedExprKind
@@ -417,6 +432,7 @@ module CTranslator:
         name: sview
         fields_start: i64
         fields_count: i64
+        comment: sview
 
     struct TypedEnumConst:
         name: sview
@@ -448,6 +464,7 @@ module CTranslator:
         name: sview
         type_name: sview
         initializer: i64
+        comment: sview
 
     struct TypedSwitchCase:
         value: i64
@@ -467,6 +484,7 @@ module CTranslator:
         has_unsafe_effect: bool
         has_goto: bool
         label_count: i64
+        comment: sview
 
     const enum TypedFlowTermKind of i8:
         Open
@@ -542,6 +560,8 @@ module CTranslator:
         current_emit_goto_name: mutable sview
         current_switch_done_name: mutable sview
         current_switch_done_index: mutable i64
+        current_function_body: mutable i64
+        mode: TypedTranslationMode
         source: cstr
         root: mutable JsonValue
         diagnostics: mutable darray[TypedDiagnostic]

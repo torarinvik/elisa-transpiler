@@ -30,6 +30,16 @@ The prototype currently covers the constructs needed by the acceptance target:
 - source-defined C variadic functions through Elisa `...`, `va_list`, and
   `llvm.va_start`/`llvm.va_end`
 - Clang-derived external function and global declarations
+- flow-sensitive null facts for names, fields, and indexed pointer slots, with
+  invalidation after writes and opaque calls
+- inferred local/parameter/field mutability, C integer promotions, boolean
+  recovery, enum qualification, constant-condition cleanup, and complete
+  zero-filled aggregate initializers
+- localized `trusted Unsafe.StaleRef` regions in idiomatic mode, with a
+  `--fidelity` mode for broad source-faithful unsafe regions
+- typed non-null local function-pointer calls, source comments on translated
+  declarations, demand-driven runtime helpers, and collision-safe project
+  module names
 
 ## External C functions
 
@@ -58,9 +68,12 @@ source symbol, in which case a readable fallback is selected.
 Lowering is deliberately fail-closed: a construct outside this subset stops
 translation with a diagnostic instead of being replaced by a placeholder.
 
-It is intentionally not a general C translator yet. Typedef recovery, macros
-as source constructs, full pointer arithmetic, function pointers, `va_arg`,
-and broader library/runtime coverage still need work.
+It is intentionally not a general C translator yet. Macros as source
+constructs, full pointer arithmetic, nullable function-pointer fields,
+`va_arg`, ownership/region inference, and broader library/runtime coverage
+still need work. C pointers are represented as nullable Elisa references at
+the ABI boundary; the translator does not pretend that C ownership can be
+inferred soundly from syntax alone.
 C++ support comes after the C pipeline has a broader typed IR.
 
 ## Requirements
@@ -104,4 +117,7 @@ an `elisa_project.elisa` manifest containing the shared runtime prelude:
 Each database entry retains its `directory` and `command`, so Clang sees the
 same working directory, include paths, defines, and other frontend options as
 the original build. Multiple direct input paths can also be supplied with
-`--output-dir`; a single input keeps the original stdout mode.
+`--output-dir`; a single input keeps the original stdout mode. Use
+`--idiomatic` (the default) for inferred mutability and localized unsafe
+regions, or `--fidelity` to retain mutable C-style bindings and broad unsafe
+regions.

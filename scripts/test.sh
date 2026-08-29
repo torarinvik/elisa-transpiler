@@ -18,9 +18,11 @@ mkdir -p build
 clang -Wl,-dead_strip -o build/elisa-c-transpiler build/transpiler.o -lm
 
 ./build/elisa-c-transpiler testdata/fixtures/simple.c > build/simple.generated.elisa
-rg -q '^def add\(left: mutable i32, right: mutable i32\) -> i32' build/simple.generated.elisa
+rg -q '^def add\(left: i32, right: i32\) -> i32' build/simple.generated.elisa
 rg -q 'return \(left \+ right\)' build/simple.generated.elisa
 rg -q '^def main\(\) -> i32' build/simple.generated.elisa
+! rg -q '^def elisa_nonnull' build/simple.generated.elisa
+! rg -q '^extern va_list' build/simple.generated.elisa
 "$elisa_bin" -emit obj -O0 -o build/simple.generated.o build/simple.generated.elisa
 clang -Wl,-dead_strip -o build/simple.generated build/simple.generated.o
 set +e
@@ -31,6 +33,9 @@ if [ "$simple_rc" -ne 42 ]; then
     echo "simple fixture returned $simple_rc, expected 42" >&2
     exit 1
 fi
+
+./build/elisa-c-transpiler --fidelity testdata/fixtures/simple.c > build/simple.fidelity.elisa
+rg -q '^def add\(left: mutable i32, right: mutable i32\) -> i32' build/simple.fidelity.elisa
 
 ./build/elisa-c-transpiler testdata/fixtures/generic_nonnull.c > build/generic_nonnull.generated.elisa
 rg -Fq 'def elisa_nonnull[T](value: mutable T&?) -> mutable T&:' build/generic_nonnull.generated.elisa
@@ -63,6 +68,37 @@ integer_native_rc=$?
 integer_generated_rc=$?
 set -e
 [ "$integer_native_rc" -eq 0 ] && [ "$integer_generated_rc" -eq 0 ]
+
+./build/elisa-c-transpiler testdata/fixtures/aggregate.c > build/aggregate.generated.elisa
+rg -q '# A small aggregate exercises C' build/aggregate.generated.elisa
+rg -q '# The translator should preserve this declaration' build/aggregate.generated.elisa
+rg -q 'Pair\{first: 7, second: zeroed, third: zeroed\}' build/aggregate.generated.elisa
+clang -std=c11 testdata/fixtures/aggregate.c -o build/aggregate.native
+"$elisa_bin" -emit obj -O0 -o build/aggregate.generated.o build/aggregate.generated.elisa
+clang -Wl,-dead_strip -o build/aggregate.generated build/aggregate.generated.o
+./build/aggregate.native
+./build/aggregate.generated
+
+./build/elisa-c-transpiler testdata/fixtures/enum_flags.c > build/enum_flags.generated.elisa
+rg -q 'Mode\.MODE_BOTH' build/enum_flags.generated.elisa
+clang -std=c11 testdata/fixtures/enum_flags.c -o build/enum_flags.native
+"$elisa_bin" -emit obj -O0 -o build/enum_flags.generated.o build/enum_flags.generated.elisa
+clang -Wl,-dead_strip -o build/enum_flags.generated build/enum_flags.generated.o
+./build/enum_flags.native
+./build/enum_flags.generated
+
+./build/elisa-c-transpiler testdata/fixtures/function_pointer.c > build/function_pointer.generated.elisa
+! rg -q '^extern operation\(' build/function_pointer.generated.elisa
+clang -std=c11 testdata/fixtures/function_pointer.c -o build/function_pointer.native
+"$elisa_bin" -emit obj -O0 -o build/function_pointer.generated.o build/function_pointer.generated.elisa
+clang -Wl,-dead_strip -o build/function_pointer.generated build/function_pointer.generated.o
+set +e
+./build/function_pointer.native
+function_pointer_native_rc=$?
+./build/function_pointer.generated
+function_pointer_generated_rc=$?
+set -e
+[ "$function_pointer_native_rc" -eq 0 ] && [ "$function_pointer_generated_rc" -eq 0 ]
 
 ./build/elisa-c-transpiler testdata/fixtures/name_collision.c > build/name_collision.generated.elisa
 rg -q '^def elisa_initialize_globals\(' build/name_collision.generated.elisa
@@ -125,6 +161,7 @@ mkdir -p build/project-db
 ./build/elisa-c-transpiler --compile-commands testdata/fixtures/compile_commands.json \
     --output-dir build/project-db
 rg -q 'include "module_a.elisa"' build/project-db/elisa_project.elisa
+rg -q 'include "module_a_2.elisa"' build/project-db/elisa_project.elisa
 rg -q 'include "module_b.elisa"' build/project-db/elisa_project.elisa
 rg -q 'return \(value \+ 1\)' build/project-db/module_a.elisa
 "$elisa_bin" -emit obj -O0 -o build/project-db/project.o build/project-db/elisa_project.elisa

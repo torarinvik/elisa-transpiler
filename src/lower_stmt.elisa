@@ -186,7 +186,7 @@ extend CTranslator:
                 initializer: mutable i64 = -1
                 if ast_child_count(node) > 0 and not c_type_is_array(ast_c_type(node)):
                     initializer <- typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                ctx.globals.push(TypedGlobal{name: name, type_name: ast_c_type(node), initializer: initializer})
+                ctx.globals.push(TypedGlobal{name: name, type_name: ast_c_type(node), initializer: initializer, comment: ast_comment_text(node)})
             return
         count: i64 = ast_child_count(node)
         if count >= 0:
@@ -203,7 +203,7 @@ extend CTranslator:
                     parameter_type: sview = ast_c_type(parameter)
                     # A C parameter is a local object even when its pointee is
                     # const; `const T *p` still permits rebinding p.
-                    is_mutable: bool = true
+                    is_mutable: bool = false
                     ctx.params.push(TypedParam{name: safe_identifier(ast_name(parameter)), type_name: parameter_type, is_mutable: is_mutable})
         body_node: JsonValue = ast_find_child(node, sview("CompoundStmt", 0, -1))
         ctx.labels <- []
@@ -218,4 +218,4 @@ extend CTranslator:
         ctx.current_has_goto <- saved_has_goto
         if body < 0:
             return -1
-        return typed_push_function(ctx, TypedFunction{name: safe_identifier(ast_name(node)), return_type: ast_c_type(node), params_start: params_start, params_count: ctx.params.count.i64() - params_start, body: body, variadic: sview_find_byte(ast_c_type(node), 46) >= 0, has_global_effect: ast_contains_static_decl(body_node), has_unsafe_effect: ast_contains_kind(node, sview("ArraySubscriptExpr", 0, -1)), has_goto: has_goto, label_count: ctx.labels.count.i64()}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return typed_push_function(ctx, TypedFunction{name: safe_identifier(ast_name(node)), return_type: ast_c_type(node), params_start: params_start, params_count: ctx.params.count.i64() - params_start, body: body, variadic: sview_find_byte(ast_c_type(node), 46) >= 0, has_global_effect: ast_contains_static_decl(body_node), has_unsafe_effect: ast_contains_kind(node, sview("ArraySubscriptExpr", 0, -1)), has_goto: has_goto, label_count: ctx.labels.count.i64(), comment: ast_comment_text(node)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
