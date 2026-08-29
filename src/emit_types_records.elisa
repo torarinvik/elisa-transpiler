@@ -274,10 +274,12 @@ extend CTranslator:
                     append_view(out, field.name)
                     append_view(out, sview(": mutable ", 0, -1)) if typed_record_field_is_mutable(ctx, index, field.name) else append_view(out, sview(": ", 0, -1))
                     if c_type_is_function_pointer(field.type_name):
-                        # Nullable function references are not yet a stable Elisa
-                        # surface type. Keep callback storage opaque and cast only
-                        # at the call/assignment boundary.
-                        append_view(out, sview("void&?", 0, -1))
+                        # C function-pointer fields may contain NULL. Elisa expresses
+                        # nullability on the complete function value; parentheses keep
+                        # that marker distinct from a nullable function return type.
+                        append_view(out, sview("(", 0, -1))
+                        append_c_function_type(out, field.type_name)
+                        append_view(out, sview(")?", 0, -1))
                     else:
                         append_c_type_contextual(out, ctx, field.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                         append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(field.type_name)

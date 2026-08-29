@@ -135,7 +135,11 @@ extend CTranslator:
                         parameter: TypedParam = ctx.params[(function.params_start + offset).usize()]
                         return typed_parameter_is_mutable(ctx, function, parameter) if sview_eq(parameter.name, expression.text)
             return typed_stmt_declares_name_mutably(ctx, ctx.current_function_body, expression.text)
-        return true if expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex
+        # A selected field/element may inherit an interior const qualifier that
+        # C's flattened type spelling does not expose as the base pointee const.
+        # Use the explicit ABI cast at this boundary; names retain the cheaper
+        # direct path when their declaration proves mutability.
+        return false if expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex
         return typed_expr_can_pass_mutable(ctx, expression.lhs) if expression.kind == TypedExprKind.Cast
         if expression.kind == TypedExprKind.Call:
             return c_type_pointer_count(expression.type_name) > 0 and not c_type_is_const_pointer(expression.type_name)

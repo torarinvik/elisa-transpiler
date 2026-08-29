@@ -118,14 +118,9 @@ extend CTranslator:
         if expression.kind == TypedExprKind.Null:
             append_view(out, sview("null", 0, -1))
             return
-        # A member read already has the nullable opaque-pointer representation
-        # used for C callback slots. Do not cast that value to the same type.
-        if expression.kind == TypedExprKind.Member:
-            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            return
-        append_view(out, sview("(", 0, -1))
+        # Function values and nullable function fields now share a first-class
+        # typed representation; no opaque pointer conversion is required.
         typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        append_view(out, sview(").cast[mutable void&?]", 0, -1))
 
     def typed_emit_binary_value(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, other_index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         # Clang represents C's integer truth values and `_Bool` constants with
@@ -134,7 +129,7 @@ extend CTranslator:
         # operator (comparisons, arithmetic, and bit operations).
         expression: TypedExpr = typed_expr_at(ctx, index)
         other: TypedExpr = typed_expr_at(ctx, other_index)
-        if c_type_is_enum(expression.type_name) and c_type_is_integer(other.type_name):
+        if (c_type_is_enum(expression.type_name) or expression.value == 2) and c_type_is_integer(other.type_name):
             append_view(out, sview("(", 0, -1))
             typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             append_view(out, sview(").i32()", 0, -1))
@@ -500,8 +495,12 @@ extend CTranslator:
                 external_index: i64 = typed_external_index(ctx, expression.text)
                 if expression.value == 1:
                     callee: TypedExpr = typed_expr_at(ctx, expression.lhs)
-                    if c_type_is_function(callee.type_name):
-                        typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    # Clang inserts a function-to-pointer decay around direct function
+                    # names. Elisa function names are already first-class fn values, and
+                    # retaining the synthetic cast can lose typedef-expanded callback
+                    # parameters from the signature.
+                    if callee.kind == TypedExprKind.Cast and typed_expr_at(ctx, callee.lhs).kind == TypedExprKind.Name and c_type_is_function(callee.type_name):
+                        typed_emit_expr(out, ctx, callee.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     else:
                         typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 else:

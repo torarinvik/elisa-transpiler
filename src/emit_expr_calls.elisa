@@ -1,4 +1,31 @@
 extend CTranslator:
+    def typed_callback_callee(ctx: TypedContext&, index: i64) -> i64:
+        return -1 if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return typed_callback_callee(ctx, expression.lhs) if expression.kind == TypedExprKind.Cast
+        return index if expression.kind == TypedExprKind.Member and c_type_is_function_pointer(expression.type_name)
+        return -1
+
+    def typed_emit_callback_guards(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Call and expression.value == 1:
+            callback: i64 = typed_callback_callee(ctx, expression.lhs)
+            if callback >= 0 and not typed_name_is_currently_nonnull(ctx, callback):
+                # Calling a null C function pointer is undefined behavior. Make
+                # that precondition explicit so Elisa's flow checker can safely
+                # narrow the first-class optional fn for the indirect call.
+                append_indent(out, level)
+                append_view(out, sview("assert ", 0, -1))
+                typed_emit_expr(out, ctx, callback) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview(" != null\n", 0, -1))
+        typed_emit_callback_guards(out, ctx, expression.lhs, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_callback_guards(out, ctx, expression.rhs, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_callback_guards(out, ctx, expression.third, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |out, ctx, expression, level|:
+                typed_emit_callback_guards(out, ctx, ctx.expr_children[(expression.args_start + offset).usize()], level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
     def typed_emit_call_cast(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, target_type: sview, target_optional: bool, force_cast: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         argument: TypedExpr = typed_expr_at(ctx, index)
         # Calls are C ABI boundaries. Keep the conversion explicit for values
@@ -40,8 +67,15 @@ extend CTranslator:
     def typed_emit_call_arg(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, position: i64, callee_index: i64, callee: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         argument: TypedExpr = typed_expr_at(ctx, index)
         expected_type: mutable sview = typed_call_parameter_type(ctx, callee, position)
-        expected_type <- c_function_parameter_type(typed_expr_at(ctx, callee_index).type_name, position) if callee_index >= 0
+        if callee_index >= 0:
+            indirect_expected: sview = c_function_parameter_type(typed_expr_at(ctx, callee_index).type_name, position)
+            expected_type <- indirect_expected if indirect_expected.len > 0
         expected_mutable: bool = typed_call_parameter_is_mutable(ctx, callee, position)
+        if (c_type_is_enum(argument.type_name) or argument.value == 2) and c_type_is_integer(expected_type):
+            append_view(out, sview("(", 0, -1))
+            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview(").i32()", 0, -1))
+            return
         if expected_type.len > 0 and sview_find_byte(expected_type, 42) >= 0 and argument.kind != TypedExprKind.Null and (expected_mutable or callee_index >= 0 or typed_user_function_index(ctx, callee) >= 0 or not c_type_call_compatible(argument.type_name, expected_type)):
             typed_emit_call_cast(out, ctx, index, expected_type, c_type_pointer_optional(expected_type), expected_mutable or callee_index >= 0 or typed_user_function_index(ctx, callee) >= 0) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
@@ -59,6 +93,11 @@ extend CTranslator:
 
     def typed_emit_target_value(out: mutable darray[u8]&, ctx: TypedContext&, index: i64, target_type: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression: TypedExpr = typed_expr_at(ctx, index)
+        if (c_type_is_enum(expression.type_name) or expression.value == 2) and c_type_is_integer(target_type):
+            append_view(out, sview("(", 0, -1))
+            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview(").i32()", 0, -1))
+            return
         if c_type_is_function_pointer(target_type):
             # A non-null function-to-pointer decay already has Elisa's `fn`
             # shape. Keep it typed for local callback variables; opaque storage

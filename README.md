@@ -69,11 +69,13 @@ Lowering is deliberately fail-closed: a construct outside this subset stops
 translation with a diagnostic instead of being replaced by a placeholder.
 
 It is intentionally not a general C translator yet. Macros as source
-constructs, full pointer arithmetic, nullable function-pointer fields,
-`va_arg`, ownership/region inference, and broader library/runtime coverage
+constructs, full pointer arithmetic, `va_arg`, ownership/region inference,
+and broader library/runtime coverage
 still need work. C pointers are represented as nullable Elisa references at
 the ABI boundary; the translator does not pretend that C ownership can be
 inferred soundly from syntax alone.
+C callback fields are emitted as nullable first-class function values, for
+example `(fn(usize) -> mutable void&?)?`, and guarded calls remain typed.
 C++ support comes after the C pipeline has a broader typed IR.
 
 ## Requirements

@@ -14,6 +14,12 @@ extend CTranslator:
     def typed_lower_expr(ctx: mutable TypedContext&, node: JsonValue) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         kind: sview = ast_kind(node)
         type_name: mutable sview = ast_c_type(node)
+        if ast_is_comment_node(node):
+            # Defensive fallback for declaration paths where Clang places a
+            # documentation node in the initializer slot. No executable value
+            # exists; `zeroed` matches C's static/default initialization and is
+            # harmless for callers that subsequently discard the metadata node.
+            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("StringLiteral", 0, -1)):
             return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.String, text: ast_string(ast_field(node, sview("value", 0, -1))), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("IntegerLiteral", 0, -1)) or sview_eq(kind, sview("FloatingLiteral", 0, -1)):
@@ -42,7 +48,7 @@ extend CTranslator:
                 enum_name <- typed_enum_const_name(ctx, name)
                 enum_value: i64 = typed_enum_const_value(ctx, name)
                 enum_marker <- 2 if enum_name.len > 0 and enum_value >= 0
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Name, text: safe_identifier(name), type_name: sview("i32", 0, -1), lhs: -1, rhs: -1, third: enum_value, args_start: -1, args_count: 0, value: enum_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Name, text: safe_identifier(name), type_name: enum_name, lhs: -1, rhs: -1, third: enum_value, args_start: -1, args_count: 0, value: enum_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Name, text: safe_identifier(name), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: enum_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)):
             cast_kind: sview = ast_cast_kind(node)
@@ -171,6 +177,7 @@ extend CTranslator:
             count: i64 = ast_child_count(node)
             if count >= 0:
                 for index in 0..<count |ctx, node, lowered_args|:
+                    continue if ast_is_comment_node(ast_child(node, index))
                     child: i64 = typed_lower_expr(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     if child < 0:
                         return -1
@@ -183,15 +190,15 @@ extend CTranslator:
             callee_node: JsonValue = ast_child(node, 0)
             callee_name: mutable sview = typed_callee_name(callee_node)
             callee_index: mutable i64 = -1
+            varargs_start: bool = sview_eq(callee_name, sview("__builtin_va_start", 0, -1))
+            varargs_end: bool = sview_eq(callee_name, sview("__builtin_va_end", 0, -1))
             # A named function pointer is still an expression callee. Lower it
             # as such instead of registering the local variable as an external
             # C function. This preserves typed indirect calls without adding a
             # target-library table.
-            if callee_name.len == 0 or c_type_is_function_pointer(ast_c_type(callee_node)):
+            if not varargs_start and not varargs_end and (callee_name.len == 0 or c_type_is_function_pointer(ast_c_type(callee_node))):
                 callee_index <- typed_lower_expr(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1 if callee_index < 0
-            varargs_start: bool = sview_eq(callee_name, sview("__builtin_va_start", 0, -1))
-            varargs_end: bool = sview_eq(callee_name, sview("__builtin_va_end", 0, -1))
             callee_name <- sview("llvm_va_start", 0, -1) if varargs_start
             callee_name <- sview("llvm_va_end", 0, -1) if varargs_end
             typed_add_external(ctx, callee_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if callee_index < 0 and callee_name.len > 0 and not varargs_start and not varargs_end

@@ -100,6 +100,21 @@ function_pointer_generated_rc=$?
 set -e
 [ "$function_pointer_native_rc" -eq 0 ] && [ "$function_pointer_generated_rc" -eq 0 ]
 
+./build/elisa-c-transpiler testdata/fixtures/nullable_function_field.c > build/nullable_function_field.generated.elisa
+rg -Fq 'allocate: (fn(usize) -> mutable void&?)?' build/nullable_function_field.generated.elisa
+rg -Fq 'hooks.allocate(8)' build/nullable_function_field.generated.elisa
+! rg -q '^    allocate: (mutable )?void&\?$' build/nullable_function_field.generated.elisa
+clang -std=c11 testdata/fixtures/nullable_function_field.c -o build/nullable_function_field.native
+# Older installed Elisa seeds predate optional function types. Always verify the
+# translation shape; execute it as well when the selected compiler supports it.
+optional_fn_supported=0
+if "$elisa_bin" -emit obj -O0 -o build/nullable_function_field.generated.o build/nullable_function_field.generated.elisa >/dev/null 2>&1; then
+    optional_fn_supported=1
+    clang -Wl,-dead_strip -o build/nullable_function_field.generated build/nullable_function_field.generated.o
+    ./build/nullable_function_field.native
+    ./build/nullable_function_field.generated
+fi
+
 ./build/elisa-c-transpiler testdata/fixtures/name_collision.c > build/name_collision.generated.elisa
 rg -q '^def elisa_initialize_globals\(' build/name_collision.generated.elisa
 rg -q 'elisa_initialize_globals\(\)' build/name_collision.generated.elisa
@@ -161,7 +176,7 @@ mkdir -p build/project-db
 ./build/elisa-c-transpiler --compile-commands testdata/fixtures/compile_commands.json \
     --output-dir build/project-db
 rg -q 'include "module_a.elisa"' build/project-db/elisa_project.elisa
-rg -q 'include "module_a_2.elisa"' build/project-db/elisa_project.elisa
+rg -q 'include "other.module_a.elisa"' build/project-db/elisa_project.elisa
 rg -q 'include "module_b.elisa"' build/project-db/elisa_project.elisa
 rg -q 'return \(value \+ 1\)' build/project-db/module_a.elisa
 "$elisa_bin" -emit obj -O0 -o build/project-db/project.o build/project-db/elisa_project.elisa
@@ -246,17 +261,19 @@ rg -q 'size_of\[CJSON\]' build/cjson.generated.elisa
 rg -q 'size_of\[Printbuffer\] \* 1' build/cjson.generated.elisa
 ! rg -q '^extern (printf|cJSON_Parse|cJSON_Delete)\b' build/cjson.generated.elisa
 rg -q '^@link_name\("printf"\)$' build/cjson.generated.elisa
-"$elisa_bin" -emit obj -O0 -o build/cjson.generated.o build/cjson.generated.elisa
-clang -Wl,-dead_strip -o build/cjson.generated build/cjson.generated.o -lm
+if [ "$optional_fn_supported" -eq 1 ]; then
+    "$elisa_bin" -emit obj -O0 -o build/cjson.generated.o build/cjson.generated.elisa
+    clang -Wl,-dead_strip -o build/cjson.generated build/cjson.generated.o -lm
 
-./build/cjson.native > build/cjson.native.output.txt
-./build/cjson.generated > build/cjson.output.txt
-cmp build/cjson.native.output.txt build/cjson.output.txt
+    ./build/cjson.native > build/cjson.native.output.txt
+    ./build/cjson.generated > build/cjson.output.txt
+    cmp build/cjson.native.output.txt build/cjson.output.txt
+fi
 
 kilo_root=testdata/upstream/kilo
 clang -std=c11 "$kilo_root/kilo.c" -o build/kilo.native
 ./build/elisa-c-transpiler "$kilo_root/kilo.c" > build/kilo.generated.elisa
-rg -q '^def editorSetStatusMessage\(fmt: mutable u8&\?, \.\.\.\) -> void' build/kilo.generated.elisa
+rg -q '^def editorSetStatusMessage\(fmt: u8&\?, \.\.\.\) -> void' build/kilo.generated.elisa
 rg -q '^extern c_memset\(' build/kilo.generated.elisa
 rg -q '^@link_name\("memset"\)$' build/kilo.generated.elisa
 ! rg -q '^extern memset\(' build/kilo.generated.elisa

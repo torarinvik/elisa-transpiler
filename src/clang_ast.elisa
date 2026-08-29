@@ -152,6 +152,12 @@ module CTranslator:
     def ast_child(node: JsonValue, index: i64) -> JsonValue:
         return ast_array_item(ast_children(node), index)
 
+    def ast_is_comment_node(node: JsonValue) -> bool:
+        # With `-fparse-all-comments`, Clang attaches documentation trees to
+        # declarations and occasionally exposes a FullComment alongside body
+        # statements. They are metadata, never executable expressions.
+        return sview_eq(ast_kind(node), sview("FullComment", 0, -1))
+
     def ast_comment_text(node: JsonValue) -> sview:
         if sview_eq(ast_kind(node), sview("TextComment", 0, -1)):
             return ast_string(ast_field(node, sview("text", 0, -1)))

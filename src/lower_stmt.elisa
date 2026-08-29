@@ -37,6 +37,7 @@ extend CTranslator:
             if count >= 0:
                 for index in 0..<count |ctx, node, children|:
                     child_node: JsonValue = ast_child(node, index)
+                    continue if ast_is_comment_node(child_node)
                     structured_label: mutable i64 = -1
                     if typed_ast_is_loop(child_node) and index + 1 < count:
                         next_node: JsonValue = ast_child(node, index + 1)
@@ -59,6 +60,7 @@ extend CTranslator:
             if count >= 0:
                 for index in 0..<count |ctx, node, children|:
                     child: JsonValue = ast_child(node, index)
+                    continue if ast_is_comment_node(child)
                     if ast_is_static_decl(child):
                         continue
                     child_stmt: i64 = typed_lower_declaration(ctx, child) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -175,8 +177,12 @@ extend CTranslator:
         initialization: mutable i64 = -1
         declaration_type: sview = ast_c_type(node)
         if not c_type_is_array(declaration_type) and ast_child_count(node) > 0:
-            initialization <- typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            return -1 if initialization < 0
+            for child_index in 0..<ast_child_count(node) |ctx, node, initialization|:
+                initializer_node: JsonValue = ast_child(node, child_index)
+                continue if ast_is_comment_node(initializer_node)
+                initialization <- typed_lower_expr(ctx, initializer_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1 if initialization < 0
+                break
         return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Declaration, expr: initialization, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: safe_identifier(ast_name(node)), type_name: declaration_type}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
 
     def typed_collect_globals(ctx: mutable TypedContext&, node: JsonValue) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
@@ -185,7 +191,11 @@ extend CTranslator:
             if typed_global_index(ctx, name) < 0:
                 initializer: mutable i64 = -1
                 if ast_child_count(node) > 0 and not c_type_is_array(ast_c_type(node)):
-                    initializer <- typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    for child_index in 0..<ast_child_count(node) |ctx, node, initializer|:
+                        initializer_node: JsonValue = ast_child(node, child_index)
+                        continue if ast_is_comment_node(initializer_node)
+                        initializer <- typed_lower_expr(ctx, initializer_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        break
                 ctx.globals.push(TypedGlobal{name: name, type_name: ast_c_type(node), initializer: initializer, comment: ast_comment_text(node)})
             return
         count: i64 = ast_child_count(node)

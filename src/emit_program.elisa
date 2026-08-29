@@ -211,6 +211,7 @@
 
     def typed_emit_stmt_body(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         statement: TypedStmt = typed_stmt_at(ctx, index)
+        typed_emit_callback_guards(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.expr >= 0
         match statement.kind:
             TypedStmtKind.Block:
                 if statement.children_count > 0:
