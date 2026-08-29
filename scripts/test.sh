@@ -159,8 +159,13 @@ set -e
 
 ./build/elisa-c-transpiler testdata/fixtures/switch.c > build/switch.generated.elisa
 rg -q 'match value:' build/switch.generated.elisa
-rg -q '^[[:space:]]+0:' build/switch.generated.elisa
+rg -q '^[[:space:]]+0[[:space:]]+\|[[:space:]]+1:' build/switch.generated.elisa
 rg -q '^[[:space:]]+5:' build/switch.generated.elisa
+rg -q 'switch_done_' build/switch.generated.elisa
+if sed -n '/^def nested_switch/,/^def conditional_break/p' build/switch.generated.elisa | rg -q 'switch_done_'; then
+    echo "direct switch breaks should not require switch_done" >&2
+    exit 1
+fi
 clang -std=c11 testdata/fixtures/switch.c -o build/switch.native
 "$elisa_bin" -emit obj -O0 -o build/switch.generated.o build/switch.generated.elisa
 clang -Wl,-dead_strip -o build/switch.generated build/switch.generated.o

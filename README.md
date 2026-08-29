@@ -41,6 +41,12 @@ The prototype currently covers the constructs needed by the acceptance target:
   declarations, demand-driven runtime helpers, and collision-safe project
   module names
 
+Switches are lowered to Elisa `match` statements. Adjacent C labels that share
+an arm become Elisa or-patterns such as `0 | 1:`, ordinary terminal `break`
+statements disappear because the arm naturally ends there, and a synthetic
+completion flag is retained only for conditional breaks whose fall-through
+path still has code to suppress.
+
 ## External C functions
 
 The translator has no built-in table for `printf`, `memset`, `read`, or any

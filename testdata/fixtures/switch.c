@@ -51,7 +51,23 @@ static int nested_switch(int value)
     return result;
 }
 
+static int conditional_break(int value, int stop)
+{
+    switch (value)
+    {
+        case 0:
+            if (stop)
+                break;
+            value += 1;
+        case 1:
+            return value + 10;
+        default:
+            return -1;
+    }
+    return 20;
+}
+
 int main(void)
 {
-    return classify(0) == 10 && classify(2) == 5 && classify(5) == 5 && classify(9) == -1 && loop_break(0) == 0 && nested_switch(2) == 20 ? 0 : 1;
+    return classify(0) == 10 && classify(2) == 5 && classify(5) == 5 && classify(9) == -1 && loop_break(0) == 0 && nested_switch(2) == 20 && conditional_break(0, 1) == 20 && conditional_break(0, 0) == 11 && conditional_break(1, 0) == 11 ? 0 : 1;
 }

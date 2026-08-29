@@ -57,6 +57,7 @@
             for offset in 0..<statement.children_count |ctx, statement, has_default|:
                 switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
                 has_default <- true if switch_case.is_default
+                return false if typed_stmt_contains_switch_break(ctx, switch_case.body)
                 return false if not typed_stmt_guarantees_exit(ctx, switch_case.body)
             return has_default and statement.children_count > 0
         if statement.kind == TypedStmtKind.Label:
@@ -151,6 +152,9 @@
         return false if index < 0 or index >= ctx.stmts.count.i64()
         statement: TypedStmt = typed_stmt_at(ctx, index)
         return true if statement.kind == TypedStmtKind.SwitchBreak
+        # A break in a nested switch belongs to that nested switch, not to the
+        # switch whose arm contains it.
+        return false if statement.kind == TypedStmtKind.Switch
         if statement.kind == TypedStmtKind.Block:
             for offset in 0..<statement.children_count |ctx, statement|:
                 return true if typed_stmt_contains_switch_break(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
@@ -165,40 +169,74 @@
             return typed_stmt_contains_switch_break(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
         return false
 
-    def typed_switch_contains_break(ctx: TypedContext&, index: i64) -> bool:
+    def typed_stmt_needs_switch_done(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return false if statement.kind == TypedStmtKind.SwitchBreak or statement.kind == TypedStmtKind.Switch
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
+                child: TypedStmt = typed_stmt_at(ctx, child_index)
+                # A direct break naturally ends the emitted match arm. The
+                # flag is only required when a break is nested in another
+                # statement and later arm code may still need suppressing.
+                continue if child.kind == TypedStmtKind.SwitchBreak
+                return true if typed_stmt_needs_switch_done(ctx, child_index)
+                break if typed_switch_stmt_terminates(ctx, child_index)
+            return false
+        return typed_stmt_contains_switch_break(ctx, index)
+
+    def typed_switch_needs_done(ctx: TypedContext&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.stmts.count.i64()
         statement: TypedStmt = typed_stmt_at(ctx, index)
         return false if statement.kind != TypedStmtKind.Switch
         for offset in 0..<statement.children_count |ctx, statement|:
             switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-            return true if typed_stmt_contains_switch_break(ctx, switch_case.body)
+            return true if typed_stmt_needs_switch_done(ctx, switch_case.body)
         return false
 
-    def typed_emit_switch_case_body(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_emit_switch_case_sequence(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64, guarded: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if index < 0 or index >= ctx.stmts.count.i64()
         statement: TypedStmt = typed_stmt_at(ctx, index)
         if statement.kind == TypedStmtKind.Block:
             if statement.children_count == 0:
-                append_indent(out, level)
-                append_view(out, sview("pass\n", 0, -1))
-                return
-            guarded: bool = typed_stmt_contains_switch_break(ctx, index)
-            for offset in 0..<statement.children_count |out, ctx, statement, level, guarded|:
-                child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
-                child: TypedStmt = typed_stmt_at(ctx, child_index)
-                if child.kind == TypedStmtKind.SwitchBreak or not guarded:
-                    typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                else:
+                if guarded:
                     append_indent(out, level)
                     append_view(out, sview("if not ", 0, -1))
                     typed_append_switch_done_name(out, ctx)
                     append_view(out, sview(":\n", 0, -1))
-                    typed_emit_stmt(out, ctx, child_index, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                # A direct switch break ends this match arm. Nested conditional
-                # breaks are retained as branch-local no-ops for now; the CFG
-                # path handles those cases conservatively.
-                break if child.kind == TypedStmtKind.SwitchBreak
+                    append_indent(out, level + 1)
+                    append_view(out, sview("pass\n", 0, -1))
+                else:
+                    append_indent(out, level)
+                    append_view(out, sview("pass\n", 0, -1))
+                return
+            for offset in 0..<statement.children_count |out, ctx, statement, level, guarded|:
+                child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
+                child: TypedStmt = typed_stmt_at(ctx, child_index)
+                if child.kind == TypedStmtKind.SwitchBreak:
+                    typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if guarded
+                    break
+                typed_emit_switch_case_sequence(out, ctx, child_index, level, guarded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
-        typed_emit_stmt(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if statement.kind == TypedStmtKind.SwitchBreak:
+            typed_emit_stmt(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if guarded
+            return
+        if guarded:
+            append_indent(out, level)
+            append_view(out, sview("if not ", 0, -1))
+            typed_append_switch_done_name(out, ctx)
+            append_view(out, sview(":\n", 0, -1))
+            typed_emit_stmt(out, ctx, index, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        else:
+            typed_emit_stmt(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_emit_switch_case_body(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        initial_output_size: i64 = out.count.i64()
+        typed_emit_switch_case_sequence(out, ctx, index, level, typed_stmt_needs_switch_done(ctx, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if out.count.i64() == initial_output_size:
+            append_indent(out, level)
+            append_view(out, sview("pass\n", 0, -1))
 
     def typed_stmt_directly_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.stmts.count.i64()
@@ -215,18 +253,28 @@
         match statement.kind:
             TypedStmtKind.Block:
                 if statement.children_count > 0:
-                    for offset in 0..<statement.children_count |out, ctx, statement, level|:
+                    guarded_switch: bool = ctx.current_switch_done_index >= 0 and typed_stmt_needs_switch_done(ctx, index)
+                    for offset in 0..<statement.children_count |out, ctx, statement, level, guarded_switch|:
                         child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
                         child: TypedStmt = typed_stmt_at(ctx, child_index)
-                        if ctx.current_emit_has_goto and child.kind != TypedStmtKind.Label and not typed_stmt_is_declaration_group(ctx, child_index):
+                        if child.kind == TypedStmtKind.SwitchBreak:
+                            typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ctx.current_switch_done_index >= 0
+                            break
+                        child_level: mutable i64 = level
+                        if guarded_switch:
                             append_indent(out, level)
+                            append_view(out, sview("if not ", 0, -1))
+                            typed_append_switch_done_name(out, ctx)
+                            append_view(out, sview(":\n", 0, -1))
+                            child_level <- level + 1
+                        if ctx.current_emit_has_goto and child.kind != TypedStmtKind.Label and not typed_stmt_is_declaration_group(ctx, child_index):
+                            append_indent(out, child_level)
                             append_view(out, sview("if ", 0, -1))
                             append_view(out, ctx.current_emit_goto_name)
                             append_view(out, sview(" == 0:\n", 0, -1))
-                            typed_emit_stmt(out, ctx, child_index, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            typed_emit_stmt(out, ctx, child_index, child_level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                         else:
-                            typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                        break if child.kind == TypedStmtKind.SwitchBreak
+                            typed_emit_stmt(out, ctx, child_index, child_level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                         break if not ctx.current_emit_has_goto and typed_stmt_guarantees_exit(ctx, child_index)
                 else:
                     append_indent(out, level)
@@ -337,7 +385,7 @@
             TypedStmtKind.Switch:
                 typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
                 saved_switch_done_index: i64 = ctx.current_switch_done_index
-                needs_switch_done: bool = typed_switch_contains_break(ctx, index)
+                needs_switch_done: bool = typed_switch_needs_done(ctx, index)
                 ctx.current_switch_done_index <- index if needs_switch_done else -1
                 if needs_switch_done:
                     append_indent(out, level)
@@ -348,7 +396,8 @@
                 typed_emit_expr(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 append_view(out, sview(":\n", 0, -1))
                 has_default: mutable bool = false
-                for offset in 0..<statement.children_count |out, ctx, statement, level, has_default|:
+                offset: mutable i64 = 0
+                while offset < statement.children_count |out, ctx, statement, level, has_default, offset|:
                     switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
                     append_indent(out, level + 1)
                     if switch_case.is_default:
@@ -356,8 +405,17 @@
                         has_default <- true
                     else:
                         append_i64(out, switch_case.constant_value) if switch_case.is_constant else typed_emit_expr(out, ctx, switch_case.value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        group_end: mutable i64 = offset + 1
+                        while group_end < statement.children_count |ctx, statement, switch_case, group_end|:
+                            next_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + group_end).usize()]
+                            break if next_case.is_default or next_case.body != switch_case.body
+                            append_view(out, sview(" | ", 0, -1))
+                            append_i64(out, next_case.constant_value) if next_case.is_constant else typed_emit_expr(out, ctx, next_case.value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            group_end <- group_end + 1
+                        offset <- group_end - 1
                         append_view(out, sview(":\n", 0, -1))
                     typed_emit_switch_case_body(out, ctx, switch_case.body, level + 2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    offset <- offset + 1
                 if not has_default:
                     append_indent(out, level + 1)
                     append_view(out, sview("_:\n", 0, -1))
@@ -365,9 +423,10 @@
                     append_view(out, sview("pass\n", 0, -1))
                 ctx.current_switch_done_index <- saved_switch_done_index
             TypedStmtKind.SwitchBreak:
-                append_indent(out, level)
-                typed_append_switch_done_name(out, ctx)
-                append_view(out, sview(" <- true\n", 0, -1))
+                if ctx.current_switch_done_index >= 0:
+                    append_indent(out, level)
+                    typed_append_switch_done_name(out, ctx)
+                    append_view(out, sview(" <- true\n", 0, -1))
             TypedStmtKind.Goto:
                 append_indent(out, level)
                 append_view(out, ctx.current_emit_goto_name)
