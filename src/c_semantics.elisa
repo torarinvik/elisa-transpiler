@@ -1,0 +1,31 @@
+extend CTranslator:
+    def c_type_is_integer(qual_type: sview) -> bool:
+        base: sview = c_type_named_base(qual_type)
+        return sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) or sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1))
+
+    def c_type_is_unsigned_integer(qual_type: sview) -> bool:
+        base: sview = c_type_named_base(qual_type)
+        return sview_starts_with(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("size_t", 0, -1))
+
+    def c_type_integer_width(qual_type: sview) -> i64:
+        base: sview = c_type_named_base(qual_type)
+        return 8 if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) else 16 if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) else 64 if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) else 32
+
+    def c_type_integer_promotion(qual_type: sview) -> sview:
+        return sview("", 0, 0) if not c_type_is_integer(qual_type)
+        width: i64 = c_type_integer_width(qual_type)
+        # C promotes every integer type narrower than int to int.  This is
+        # important for unsigned char/short: their values still fit in int on
+        # the target ABI and must not be promoted to unsigned int.
+        return sview("i32", 0, -1) if width < 32 else sview("i64", 0, -1) if width == 64 and not c_type_is_unsigned_integer(qual_type) else sview("u64", 0, -1) if width == 64 else sview("u32", 0, -1) if c_type_is_unsigned_integer(qual_type) else sview("i32", 0, -1)
+
+    def c_type_usual_arithmetic_type(left: sview, right: sview) -> sview:
+        left_type: sview = c_type_integer_promotion(left)
+        right_type: sview = c_type_integer_promotion(right)
+        return sview("", 0, 0) if left_type.len == 0 or right_type.len == 0
+        return left_type if sview_eq(left_type, right_type) else sview("u64", 0, -1) if (sview_eq(left_type, sview("u64", 0, -1)) or sview_eq(right_type, sview("u64", 0, -1))) else sview("i64", 0, -1) if (sview_eq(left_type, sview("i64", 0, -1)) and sview_eq(right_type, sview("u32", 0, -1))) or (sview_eq(right_type, sview("i64", 0, -1)) and sview_eq(left_type, sview("u32", 0, -1))) else sview("u32", 0, -1) if sview_eq(left_type, sview("u32", 0, -1)) or sview_eq(right_type, sview("u32", 0, -1)) else sview("i32", 0, -1)
+
+    def c_integer_type_same(left: sview, right: sview) -> bool:
+        left_promoted: sview = c_type_integer_promotion(left)
+        right_promoted: sview = c_type_integer_promotion(right)
+        return left_promoted.len > 0 and sview_eq(left_promoted, right_promoted)

@@ -2,12 +2,20 @@
 include "../../Elisa-compiler/elisacore_std/elisacore_runtime.elisa"
 include "../../Elisa-compiler/elisacore_std/elisacore_json.elisa"
 include "clang_ast.elisa"
+include "clang_context.elisa"
 include "lower_expr.elisa"
 include "lower_stmt.elisa"
 include "emit_types.elisa"
+include "emit_types_records.elisa"
+include "c_semantics.elisa"
 include "emit_expr.elisa"
+include "emit_places.elisa"
+include "emit_helpers.elisa"
+include "emit_expr_calls.elisa"
+include "emit_cfg.elisa"
 include "emit_program.elisa"
+include "emit_effects.elisa"
 include "cli.elisa"
 
 def main(argc: i64, argv: mutable void&) -> i64 can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
-    return CTranslator::run(argc, argv)
+    return CTranslator::run(argc, argv) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console

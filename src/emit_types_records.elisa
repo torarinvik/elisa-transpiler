@@ -1,0 +1,251 @@
+extend CTranslator:
+    def c_type_is_array(qual_type: sview) -> bool:
+        return sview_find_byte(qual_type, 91) >= 0
+
+    def typed_record_index(ctx: TypedContext&, qual_type: sview) -> i64:
+        wanted: sview = safe_identifier(c_type_named_base(qual_type))
+        for index in 0..<ctx.records.count |ctx, wanted|:
+            if sview_eq(ctx.records[index].name, wanted):
+                return index
+        return -1
+
+    def append_c_type_contextual(out: mutable darray[u8]&, ctx: TypedContext&, qual_type: sview) -> void:
+        # Clang keeps a typedef's spelling on array types (for example
+        # `printbuffer[1]`) but does not repeat the typedef's record identity in
+        # the array type node. Recover known record aliases from the collected
+        # type table before falling back to the spelling-only renderer.
+        open_bracket: i64 = sview_find_byte(qual_type, 91)
+        close_bracket: i64 = sview_find_byte(qual_type, 93)
+        if open_bracket >= 0 and close_bracket > open_bracket:
+            append_view(out, sview("array[", 0, -1))
+            element_type: sview = string_view_prefix(qual_type, open_bracket)
+            record_index: i64 = typed_record_index(ctx, element_type)
+            if record_index >= 0:
+                append_elisa_type_name(out, ctx.records[record_index.usize()].name)
+            else:
+                append_c_type_contextual(out, ctx, element_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(element_type)
+            append_view(out, sview(", ", 0, -1))
+            append_view_range(out, qual_type, open_bracket + 1, close_bracket)
+            append_view(out, sview("]", 0, -1))
+            return
+        append_c_type(out, qual_type)
+
+    def typed_collect_record(ctx: mutable TypedContext&, node: JsonValue, alias: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        name: sview = alias if alias.len > 0 else ast_name(node)
+        if name.len == 0 or typed_record_index(ctx, name) >= 0:
+            return
+        fields_start: i64 = ctx.fields.count.i64()
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                field: JsonValue = ast_child(node, index)
+                if sview_eq(ast_kind(field), sview("FieldDecl", 0, -1)):
+                    ctx.fields.push(TypedField{name: safe_identifier(ast_name(field)), type_name: ast_c_type(field)})
+        ctx.records.push(TypedRecord{name: safe_identifier(c_type_named_base(name)), fields_start: fields_start, fields_count: ctx.fields.count.i64() - fields_start})
+
+    def typed_collect_enum(ctx: mutable TypedContext&, node: JsonValue) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        name: sview = ast_name(node)
+        if name.len == 0:
+            return
+        for index in 0..<ctx.enums.count |ctx, name|:
+            return if sview_eq(ctx.enums[index].name, name)
+        ctx.enums.push(TypedEnum{name: safe_identifier(name), underlying_type: sview("i32", 0, -1)})
+        previous: mutable i64 = -1
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, name, previous|:
+                constant: JsonValue = ast_child(node, index)
+                if not sview_eq(ast_kind(constant), sview("EnumConstantDecl", 0, -1)):
+                    continue
+                value: i64 = ast_enum_value(constant, previous + 1)
+                previous <- value
+                ctx.enum_consts.push(TypedEnumConst{name: safe_identifier(ast_name(constant)), enum_name: safe_identifier(name), value: value})
+
+    def typed_collect_types(ctx: mutable TypedContext&, root: JsonValue, source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        count: i64 = ast_child_count(root)
+        if count < 0:
+            return
+        for index in 0..<count |ctx, root, source|:
+            declaration: JsonValue = ast_child(root, index)
+            name: sview = ast_name(declaration)
+            user: bool = ast_is_user_declaration(declaration, source)
+            if sview_eq(ast_kind(declaration), sview("RecordDecl", 0, -1)) and (user or ast_is_embedded_user_record(declaration, source) or sview_eq(name, sview("termios", 0, -1)) or sview_eq(name, sview("winsize", 0, -1))):
+                typed_collect_record(ctx, declaration, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(ast_kind(declaration), sview("EnumDecl", 0, -1)) and user:
+                typed_collect_enum(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(ast_kind(declaration), sview("TypedefDecl", 0, -1)) and user:
+                record_type: JsonValue = ast_find_child(declaration, sview("RecordType", 0, -1))
+                record_ref: JsonValue = ast_field(record_type, sview("decl", 0, -1))
+                record_id: sview = ast_string(ast_field(record_ref, sview("id", 0, -1)))
+                record: JsonValue = ast_find_record_by_id(root, record_id)
+                if record != JsonValue.Null:
+                    typed_collect_record(ctx, record, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_collect_external_globals(ctx: mutable TypedContext&, node: JsonValue) -> void:
+        # Referenced external globals are registered while lowering their DeclRefExpr.
+        # Clang also marks implementation-detail declarations from system headers as
+        # used (for example Darwin's _DefaultRuneLocale), even when the source-level
+        # expression is folded away. Eagerly exporting those declarations both leaks
+        # private libc types and can make an otherwise valid translation uncompilable.
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count:
+                typed_collect_external_globals(ctx, ast_child(node, index))
+
+    def typed_collect_user_functions(ctx: mutable TypedContext&, root: JsonValue, source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        count: i64 = ast_child_count(root)
+        if count < 0:
+            return
+        for index in 0..<count |ctx, root, source|:
+            declaration: JsonValue = ast_child(root, index)
+            if not sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)):
+                continue
+            if not ast_has_child(declaration, sview("CompoundStmt", 0, -1)) or not ast_is_user_declaration(declaration, source):
+                continue
+            name: sview = ast_name(declaration)
+            if typed_user_function_index(ctx, name) < 0:
+                ctx.user_function_names.push(name)
+
+    def ast_is_static_decl(node: JsonValue) -> bool:
+        return sview_eq(ast_string(ast_field(node, sview("storageClass", 0, -1))), sview("static", 0, -1))
+
+    def ast_contains_kind(node: JsonValue, wanted: sview) -> bool:
+        return true if sview_eq(ast_kind(node), wanted)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count:
+                return true if ast_contains_kind(ast_child(node, index), wanted)
+        return false
+
+    def ast_contains_static_decl(node: JsonValue) -> bool:
+        return true if ast_is_static_decl(node)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count:
+                return true if ast_contains_static_decl(ast_child(node, index))
+        return false
+
+    def ast_contains_varargs_builtin(node: JsonValue) -> bool:
+        if sview_eq(ast_kind(node), sview("CallExpr", 0, -1)) and ast_child_count(node) > 0:
+            callee: sview = ast_expr_name(ast_child(node, 0))
+            return true if sview_starts_with(callee, sview("__builtin_va_", 0, -1))
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count:
+                return true if ast_contains_varargs_builtin(ast_child(node, index))
+        return false
+
+    def append_i64(out: mutable darray[u8]&, value: i64) -> void:
+        magnitude: mutable i64 = value
+        if magnitude < 0:
+            out.push(45)
+            magnitude <- 0 - magnitude
+        if magnitude == 0:
+            out.push(48)
+            return
+        digits: mutable i64[24] = zeroed
+        count: mutable i64 = 0
+        while magnitude > 0 |magnitude, digits, count|:
+            digits[count] <- magnitude % 10
+            magnitude <- magnitude / 10
+            count <- count + 1
+        for index in 0..<count |out, digits, count|:
+            out.push((digits[count - index - 1] + 48).u8())
+
+    def append_function_return_type(out: mutable darray[u8]&, function_type: sview) -> void:
+        return_type: sview = c_function_return_type(function_type)
+        append_view(out, sview("mutable ", 0, -1)) if sview_find_byte(return_type, 42) >= 0 and not c_type_is_const_pointer(return_type)
+        append_c_type(out, return_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(return_type)
+
+    def c_function_return_type(function_type: sview) -> sview:
+        open_paren: i64 = sview_find_byte(function_type, 40)
+        return sview_trim_trailing(string_view_prefix(function_type, open_paren), 32) if open_paren > 0 else function_type
+
+    def append_external_bindings(out: mutable darray[u8]&, root: JsonValue) -> void:
+        # External signatures are collected from Clang FunctionDecl nodes while
+        # lowering calls. There are intentionally no translator-owned C bindings.
+        pass
+
+    def typed_emit_externals(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        for index in 0..<ctx.extern_globals.count |out, ctx|:
+            external_global: TypedExternGlobal = ctx.extern_globals[index.usize()]
+            if typed_global_index(ctx, external_global.name) < 0:
+                append_view(out, sview("@link_name(\"", 0, -1))
+                append_view(out, external_global.link_name)
+                append_view(out, sview("\")\nextern ", 0, -1))
+                typed_emit_external_alias(out, ctx, TypedBindingKind.ExternalGlobal, index)
+                append_view(out, sview(": ", 0, -1))
+                append_view(out, sview("mutable ", 0, -1))
+                append_c_type_contextual(out, ctx, external_global.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(external_global.type_name)
+                append_view(out, sview("\n", 0, -1))
+        append_view(out, sview("\n", 0, -1)) if ctx.extern_globals.count > 0
+        if ctx.externs.count > 0:
+            append_view(out, sview("# Discovered C ABI bindings.\n", 0, -1))
+        for index in 0..<ctx.externs.count |out, ctx|:
+            external: TypedExtern = ctx.externs[index.usize()]
+            append_view(out, sview("@link_name(\"", 0, -1))
+            append_view(out, external.link_name)
+            append_view(out, sview("\")\nextern ", 0, -1))
+            typed_emit_external_alias(out, ctx, TypedBindingKind.External, index)
+            append_view(out, sview("(", 0, -1))
+            if external.params_count > 0:
+                for offset in 0..<external.params_count |out, ctx, external|:
+                    if offset > 0:
+                        append_view(out, sview(", ", 0, -1))
+                    parameter: TypedParam = ctx.extern_params[(external.params_start + offset).usize()]
+                    append_view(out, parameter.name)
+                    append_view(out, sview(": ", 0, -1))
+                    if parameter.is_mutable:
+                        append_view(out, sview("mutable ", 0, -1))
+                    append_c_type_contextual(out, ctx, parameter.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(parameter.type_name)
+            if external.variadic:
+                append_view(out, sview(", ...", 0, -1)) if external.params_count > 0
+                append_view(out, sview("...", 0, -1)) if external.params_count == 0
+            append_view(out, sview(") -> ", 0, -1))
+            append_function_return_type(out, external.return_type)
+            append_view(out, sview("\n", 0, -1))
+        append_view(out, sview("\n", 0, -1)) if ctx.externs.count > 0
+
+    def typed_emit_types(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        for index in 0..<ctx.records.count |out, ctx|:
+            record: TypedRecord = ctx.records[index.usize()]
+            append_view(out, sview("struct ", 0, -1))
+            append_elisa_type_name(out, record.name)
+            append_view(out, sview(":\n", 0, -1))
+            if record.fields_count == 0:
+                append_view(out, sview("    pass\n", 0, -1))
+            else:
+                for offset in 0..<record.fields_count |out, ctx, record|:
+                    field: TypedField = ctx.fields[(record.fields_start + offset).usize()]
+                    append_view(out, sview("    ", 0, -1))
+                    append_view(out, field.name)
+                    append_view(out, sview(": mutable ", 0, -1))
+                    if c_type_is_function_pointer(field.type_name):
+                        append_view(out, sview("void&?", 0, -1))
+                    else:
+                        append_c_type_contextual(out, ctx, field.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(field.type_name)
+                    append_view(out, sview("\n", 0, -1))
+            append_view(out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.enums.count |out, ctx|:
+            enumeration: TypedEnum = ctx.enums[index.usize()]
+            append_view(out, sview("const enum ", 0, -1))
+            append_view(out, enumeration.name)
+            append_view(out, sview(" of i32:\n", 0, -1))
+            emitted: mutable i64 = 0
+            for constant_index in 0..<ctx.enum_consts.count |out, ctx, enumeration, emitted|:
+                constant: TypedEnumConst = ctx.enum_consts[constant_index.usize()]
+                if sview_eq(constant.enum_name, enumeration.name):
+                    append_view(out, sview("    ", 0, -1))
+                    append_view(out, constant.name)
+                    append_view(out, sview(" = ", 0, -1))
+                    append_i64(out, constant.value)
+                    append_view(out, sview("\n", 0, -1))
+                    emitted <- emitted + 1
+            append_view(out, sview("    pass\n", 0, -1)) if emitted == 0
+            append_view(out, sview("\n", 0, -1))

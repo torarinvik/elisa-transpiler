@@ -1,4 +1,28 @@
 extend CTranslator:
+    def typed_ast_is_loop(node: JsonValue) -> bool:
+        kind: sview = ast_kind(node)
+        return sview_eq(kind, sview("ForStmt", 0, -1)) or sview_eq(kind, sview("WhileStmt", 0, -1)) or sview_eq(kind, sview("DoStmt", 0, -1))
+
+    def typed_ast_contains_direct_loop_goto(node: JsonValue, label_id: sview) -> bool:
+        # A goto nested inside another loop may leave more than one loop. It
+        # therefore cannot be represented by a single Elisa `break`; leave the
+        # enclosing function on the CFG path in that case.
+        return false if typed_ast_is_loop(node)
+        if sview_eq(ast_kind(node), sview("GotoStmt", 0, -1)):
+            return sview_eq(ast_target_label_id(node), label_id)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node, label_id|:
+                return true if typed_ast_contains_direct_loop_goto(ast_child(node, index), label_id)
+        return false
+
+    def typed_loop_contains_direct_goto(node: JsonValue, label_id: sview) -> bool:
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node, label_id|:
+                return true if typed_ast_contains_direct_loop_goto(ast_child(node, index), label_id)
+        return false
+
     def typed_lower_stmt(ctx: mutable TypedContext&, node: JsonValue) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         kind: sview = ast_kind(node)
         if sview_eq(kind, sview("ReturnStmt", 0, -1)):
@@ -12,7 +36,19 @@ extend CTranslator:
             count: i64 = ast_child_count(node)
             if count >= 0:
                 for index in 0..<count |ctx, node, children|:
-                    child_stmt: i64 = typed_lower_stmt(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    child_node: JsonValue = ast_child(node, index)
+                    structured_label: mutable i64 = -1
+                    if typed_ast_is_loop(child_node) and index + 1 < count:
+                        next_node: JsonValue = ast_child(node, index + 1)
+                        if sview_eq(ast_kind(next_node), sview("LabelStmt", 0, -1)):
+                            label_id: sview = ast_string(ast_field(next_node, sview("declId", 0, -1)))
+                            candidate: i64 = typed_label_index(ctx, label_id)
+                            if candidate >= 0 and typed_loop_contains_direct_goto(child_node, label_id):
+                                structured_label <- candidate
+                    saved_structured_label: i64 = ctx.current_structured_break_label
+                    ctx.current_structured_break_label <- structured_label if structured_label >= 0 else saved_structured_label
+                    child_stmt: i64 = typed_lower_stmt(ctx, child_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    ctx.current_structured_break_label <- saved_structured_label
                     if child_stmt < 0:
                         return -1
                     children.push(child_stmt)
@@ -29,6 +65,7 @@ extend CTranslator:
                     if child_stmt < 0:
                         return -1
                     children.push(child_stmt)
+            return children[0] if children.count == 1
             return typed_make_block(ctx, children) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("IfStmt", 0, -1)):
             condition_parts: TypedCondition = typed_lower_condition(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -49,7 +86,9 @@ extend CTranslator:
             condition: mutable i64 = condition_parts.expression
             saved_increment: i64 = ctx.current_for_increment
             ctx.current_for_increment <- -1
+            ctx.break_scopes.push(1)
             body: mutable i64 = typed_lower_stmt(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            _ = ctx.break_scopes.pop()
             ctx.current_for_increment <- saved_increment
             if condition < 0 or body < 0:
                 return -1
@@ -65,7 +104,9 @@ extend CTranslator:
                 condition <- typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.While, expr: condition, aux: body, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("DoStmt", 0, -1)):
+            ctx.break_scopes.push(1)
             body: mutable i64 = typed_lower_stmt(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            _ = ctx.break_scopes.pop()
             condition: mutable i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if condition < 0 or body < 0:
                 return -1
@@ -85,7 +126,9 @@ extend CTranslator:
                 increment <- typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Expression, expr: increment_expression, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) if increment_expression >= 0
             saved_increment: i64 = ctx.current_for_increment
             ctx.current_for_increment <- increment
+            ctx.break_scopes.push(1)
             body: i64 = typed_lower_stmt(ctx, ast_child(node, 4)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            _ = ctx.break_scopes.pop()
             ctx.current_for_increment <- saved_increment
             if condition < 0 or body < 0 or (not ast_is_empty(ast_child(node, 3)) and increment < 0):
                 return -1
@@ -93,7 +136,8 @@ extend CTranslator:
         if sview_eq(kind, sview("SwitchStmt", 0, -1)):
             return typed_lower_switch(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("BreakStmt", 0, -1)):
-            return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Null if ctx.switch_depth > 0 else TypedStmtKind.Break, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            nearest_break_scope: i8 = ctx.break_scopes[(ctx.break_scopes.count - 1).usize()] if ctx.break_scopes.count > 0 else 0
+            return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.SwitchBreak if nearest_break_scope == 2 else TypedStmtKind.Break, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("ContinueStmt", 0, -1)):
             if ctx.current_for_increment >= 0:
                 continuation: i64 = typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Continue, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -101,13 +145,22 @@ extend CTranslator:
                 return typed_make_block(ctx, wrapped) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Continue, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("GotoStmt", 0, -1)):
-            target: JsonValue = typed_find_label(ctx, ast_target_label_id(node))
-            if target == JsonValue.Null or ast_child_count(target) == 0:
+            target_index: i64 = typed_label_index(ctx, ast_target_label_id(node))
+            if target_index < 0:
                 typed_record_unsupported(ctx, node, sview("statement", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1
-            return typed_lower_stmt(ctx, ast_child(target, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if target_index == ctx.current_structured_break_label:
+                return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Break, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            ctx.current_has_goto <- true
+            return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Goto, expr: -1, aux: target_index, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("LabelStmt", 0, -1)):
-            return typed_lower_stmt(ctx, ast_child(node, 0)) if ast_child_count(node) > 0 else typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            label_index: i64 = typed_label_index(ctx, ast_string(ast_field(node, sview("declId", 0, -1))))
+            if label_index < 0:
+                typed_record_unsupported(ctx, node, sview("statement", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            body: i64 = typed_lower_stmt(ctx, ast_child(node, 0)) if ast_child_count(node) > 0 else typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1 if body < 0
+            return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Label, expr: body, aux: label_index, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("NullStmt", 0, -1)):
             return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         expression: i64 = typed_lower_expr(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -120,7 +173,7 @@ extend CTranslator:
             typed_record_unsupported(ctx, node, sview("declaration", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return -1
         initialization: mutable i64 = -1
-        declaration_type: sview = ast_qual_type(node)
+        declaration_type: sview = ast_c_type(node)
         if not c_type_is_array(declaration_type) and ast_child_count(node) > 0:
             initialization <- typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return -1 if initialization < 0
@@ -131,9 +184,9 @@ extend CTranslator:
             name: sview = safe_identifier(ast_name(node))
             if typed_global_index(ctx, name) < 0:
                 initializer: mutable i64 = -1
-                if ast_child_count(node) > 0 and not c_type_is_array(ast_qual_type(node)):
+                if ast_child_count(node) > 0 and not c_type_is_array(ast_c_type(node)):
                     initializer <- typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                ctx.globals.push(TypedGlobal{name: name, type_name: ast_qual_type(node), initializer: initializer})
+                ctx.globals.push(TypedGlobal{name: name, type_name: ast_c_type(node), initializer: initializer})
             return
         count: i64 = ast_child_count(node)
         if count >= 0:
@@ -147,16 +200,22 @@ extend CTranslator:
             for index in 0..<count |ctx, node|:
                 parameter: JsonValue = ast_child(node, index)
                 if sview_eq(ast_kind(parameter), sview("ParmVarDecl", 0, -1)):
-                    parameter_type: sview = ast_qual_type(parameter)
-                    is_mutable: bool = not c_type_is_const_pointer(parameter_type)
+                    parameter_type: sview = ast_c_type(parameter)
+                    # A C parameter is a local object even when its pointee is
+                    # const; `const T *p` still permits rebinding p.
+                    is_mutable: bool = true
                     ctx.params.push(TypedParam{name: safe_identifier(ast_name(parameter)), type_name: parameter_type, is_mutable: is_mutable})
         body_node: JsonValue = ast_find_child(node, sview("CompoundStmt", 0, -1))
         ctx.labels <- []
         typed_collect_labels(ctx, body_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         saved_return_type: sview = ctx.current_return_type
-        ctx.current_return_type <- c_function_return_type(ast_qual_type(node))
+        saved_has_goto: bool = ctx.current_has_goto
+        ctx.current_return_type <- c_function_return_type(ast_c_type(node))
+        ctx.current_has_goto <- false
         body: i64 = typed_lower_stmt(ctx, body_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        has_goto: bool = ctx.current_has_goto
         ctx.current_return_type <- saved_return_type
+        ctx.current_has_goto <- saved_has_goto
         if body < 0:
             return -1
-        return typed_push_function(ctx, TypedFunction{name: safe_identifier(ast_name(node)), return_type: ast_qual_type(node), params_start: params_start, params_count: ctx.params.count.i64() - params_start, body: body, variadic: sview_find_byte(ast_qual_type(node), 46) >= 0, has_global_effect: ast_contains_static_decl(body_node), has_unsafe_effect: ast_contains_kind(node, sview("ArraySubscriptExpr", 0, -1))}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return typed_push_function(ctx, TypedFunction{name: safe_identifier(ast_name(node)), return_type: ast_c_type(node), params_start: params_start, params_count: ctx.params.count.i64() - params_start, body: body, variadic: sview_find_byte(ast_c_type(node), 46) >= 0, has_global_effect: ast_contains_static_decl(body_node), has_unsafe_effect: ast_contains_kind(node, sview("ArraySubscriptExpr", 0, -1)), has_goto: has_goto, label_count: ctx.labels.count.i64()}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

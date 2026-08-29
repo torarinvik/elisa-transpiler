@@ -6,12 +6,13 @@ JSON, lowers the supported C subset into a typed, index-based intermediate
 representation, and writes Elisa source. Unsupported constructs are reported
 with their Clang AST kind and source location.
 
-The first acceptance target is the small `inih` C library's `ini_dump.c`
-example. The generated Elisa program is linked with the original native `ini.c`
-library so the translator can be checked against the original executable's
-behavior. The pinned `antirez/kilo` text editor is also translated completely,
-including its source-defined variadic status-message function, and linked
-without a C adapter.
+The acceptance targets are the small `inih` C library's `ini_dump.c` example,
+the pinned `antirez/kilo` text editor, and the pinned cJSON library's combined
+parser/printer smoke program. The generated programs are checked against
+native C behavior where practical. Kilo exercises a source-defined variadic
+function, while cJSON exercises recursive records, allocator function
+pointers, C strings, record-sized allocation, one-element array idioms, and
+pointer-address comparisons.
 
 ## Current scope
 
@@ -22,8 +23,10 @@ The prototype currently covers the constructs needed by the acceptance target:
 - calls, arithmetic/comparison/assignment expressions
 - array subscripting and a limited conditional expression
 - `if`/`else`, declarations, returns, and compound statements
-- loops, `switch`, `break`/`continue`, and basic labels/gotos
-- structs, enums, scalar/pointer type lowering, and reserved-name avoidance
+- loops, `switch`, `break`/`continue`, and ordinary labels/gotos
+- structs, enums, partial typedef recovery, scalar/pointer type lowering, and
+  reserved-name avoidance
+- record and array `sizeof` lowering through Elisa's `size_of[...]`
 - source-defined C variadic functions through Elisa `...`, `va_list`, and
   `llvm.va_start`/`llvm.va_end`
 - Clang-derived external function and global declarations
@@ -33,15 +36,24 @@ The prototype currently covers the constructs needed by the acceptance target:
 The translator has no built-in table for `printf`, `memset`, `read`, or any
 other target C function. When a call is encountered, its declaration is looked
 up in Clang's AST; the return type, parameter types, mutability, and variadic
-shape are emitted from that declaration. The generated Elisa declaration uses
-an opaque name such as `__c_ext_3` and preserves the original linker spelling
-with `@link_name("...")`. This keeps the translator generic and prevents C
-library names from colliding with Elisa/runtime functions.
+shape are emitted from that declaration. The generated Elisa declaration
+retains the source name and preserves the original linker spelling with
+`@link_name("...")`. Reserved words are mapped through the normal identifier
+sanitizer, and a collision-safe fallback is used only when a source name cannot
+be represented directly.
 
 The same rule is used for referenced external variables, which are emitted as
-opaque `__c_global_N` aliases. Pointer values are nullable where Elisa can
+source-named declarations. Pointer values are nullable where Elisa can
 represent the C pointer shape; translated C functions are explicitly marked as
 unsafe ABI boundaries because C does not provide Elisa's ownership guarantees.
+
+Functions containing a C `goto` are lowered through a control-flow graph. The
+translator emits Elisa basic blocks selected by a mutable program-counter loop,
+so forward, backward, and cross-nested jumps do not require adding a `goto`
+construct to Elisa itself. Locals in those functions are hoisted to the
+function entry and their initializers remain in their original CFG blocks. The
+dispatcher variable is named `control_state` unless that conflicts with a
+source symbol, in which case a readable fallback is selected.
 
 Lowering is deliberately fail-closed: a construct outside this subset stops
 translation with a diagnostic instead of being replaced by a placeholder.
@@ -67,11 +79,29 @@ sh scripts/test.sh
 ```
 
 The script builds the Elisa translator, translates the small local fixture,
-the pinned `inih` example, and Kilo, then compiles all generated programs. It
-compares `ini_dump` with native behavior and verifies Kilo's no-argument path,
-including direct Elisa varargs lowering with no adapter. It also verifies that
-library bindings are Clang-derived opaque aliases and checks that unsupported
-syntax receives a source-located diagnostic.
+the pinned `inih` example, cJSON, and Kilo, then compiles all generated
+programs. It compares the `ini_dump` and cJSON smoke programs with native
+behavior and verifies Kilo's no-argument path, including direct Elisa varargs
+lowering with no adapter. It also verifies that library bindings are
+Clang-derived opaque aliases and checks that unsupported syntax receives a
+source-located diagnostic.
 
 The upstream test source is vendored under
 `testdata/upstream/inih` at commit `26254ee` (release `r62`).
+The cJSON source is vendored under `testdata/upstream/cJSON` at tag `v1.7.19`.
+
+## Project translation
+
+For a compilation database, project mode emits one Elisa module per C source and
+an `elisa_project.elisa` manifest containing the shared runtime prelude:
+
+```sh
+./build/elisa-c-transpiler \
+  --compile-commands build/compile_commands.json \
+  --output-dir build/elisa-project
+```
+
+Each database entry retains its `directory` and `command`, so Clang sees the
+same working directory, include paths, defines, and other frontend options as
+the original build. Multiple direct input paths can also be supplied with
+`--output-dir`; a single input keeps the original stdout mode.

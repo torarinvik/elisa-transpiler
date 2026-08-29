@@ -1,0 +1,40 @@
+extend CTranslator:
+    # A place is the assignable side of a C expression. Keeping this decision
+    # separate from value emission prevents pointer-to-pointer slots, fields,
+    # and ordinary locals from accumulating unrelated assignment exceptions.
+    const enum TypedPlaceKind of i8:
+        Invalid
+        Name
+        Member
+        ArrayElement
+        NestedPointerSlot
+
+    struct TypedPlace:
+        kind: TypedPlaceKind
+        expression: i64
+        type_name: sview
+
+    def typed_classify_place(ctx: TypedContext&, index: i64) -> TypedPlace:
+        return TypedPlace{kind: TypedPlaceKind.Invalid, expression: index, type_name: sview("", 0, 0)} if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Name:
+            return TypedPlace{kind: TypedPlaceKind.Name, expression: index, type_name: expression.type_name}
+        if expression.kind == TypedExprKind.Member:
+            return TypedPlace{kind: TypedPlaceKind.Member, expression: index, type_name: expression.type_name}
+        if expression.kind == TypedExprKind.ArrayIndex:
+            place_kind: TypedPlaceKind = TypedPlaceKind.NestedPointerSlot if typed_is_nested_pointer_slot(ctx, index) else TypedPlaceKind.ArrayElement
+            return TypedPlace{kind: place_kind, expression: index, type_name: expression.type_name}
+        return TypedPlace{kind: TypedPlaceKind.Invalid, expression: index, type_name: expression.type_name}
+
+    def typed_emit_place_target(out: mutable darray[u8]&, ctx: TypedContext&, place: TypedPlace, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if place.kind == TypedPlaceKind.NestedPointerSlot:
+            typed_emit_nested_pointer_slot_target(out, ctx, place.expression, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
+        append_indent(out, level)
+        typed_emit_expr(out, ctx, place.expression) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_emit_place_value(out: mutable darray[u8]&, ctx: TypedContext&, place: TypedPlace, value_index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if place.kind == TypedPlaceKind.NestedPointerSlot:
+            typed_emit_nested_pointer_slot_value(out, ctx, value_index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
+        typed_emit_target_value(out, ctx, value_index, place.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

@@ -29,6 +29,47 @@ extend CTranslator:
         star: i64 = sview_find_byte(qual_type, 42)
         return string_view_prefix(qual_type, star) if star >= 0 else qual_type
 
+    def c_find_byte_from(value: sview, wanted: i64, start: i64) -> i64:
+        for index in start..<value.len |value, wanted, start|:
+            return index if string_view_index(value, index) == wanted
+        return -1
+
+    def c_find_last_byte(value: sview, wanted: i64) -> i64:
+        index: mutable i64 = value.len - 1
+        while index >= 0 |value, wanted, index|:
+            return index if string_view_index(value, index) == wanted
+            index <- index - 1
+        return -1
+
+    # Clang spells a C function pointer as `return (*)(params)`, optionally with
+    # a pointer in the return type (`void *(*)(size_t)`). The `(*` marker avoids
+    # confusing the return pointer with the function-pointer declarator.
+    def c_function_pointer_marker(qual_type: sview) -> i64:
+        for index in 0..<qual_type.len |qual_type|:
+            if string_view_index(qual_type, index) != 40:
+                continue
+            cursor: mutable i64 = index + 1
+            while cursor < qual_type.len and string_view_index(qual_type, cursor) == 32 |qual_type, cursor|:
+                cursor <- cursor + 1
+            return index if cursor < qual_type.len and string_view_index(qual_type, cursor) == 42
+        return -1
+
+    def c_type_is_function_pointer(qual_type: sview) -> bool:
+        return c_function_pointer_marker(qual_type) >= 0
+
+    def c_type_is_function(qual_type: sview) -> bool:
+        open_paren: i64 = sview_find_byte(qual_type, 40)
+        close_paren: i64 = c_find_last_byte(qual_type, 41)
+        return open_paren >= 0 and close_paren > open_paren
+
+    def c_trim_spaces(value: sview) -> sview:
+        result: mutable sview = value
+        while result.len > 0 and string_view_index(result, 0) == 32:
+            result <- string_view_suffix(result, 1)
+        while result.len > 0 and string_view_index(result, result.len - 1) == 32:
+            result <- string_view_prefix(result, result.len - 1)
+        return result
+
     def c_type_named_base(qual_type: sview) -> sview:
         base: mutable sview = c_type_without_qualifiers(c_type_pointer_base(qual_type))
         base <- sview_trim_trailing(base, 32)
@@ -40,8 +81,17 @@ extend CTranslator:
             return string_view_suffix(base, 5)
         return base
 
-    def append_elisa_type_name(out: mutable darray[u8]&, name: sview) -> void:
+    def c_type_abi_base(qual_type: sview) -> sview:
+        # These C spellings share one Elisa storage representation. Keeping the
+        # normalization here lets cast-elision recognize harmless signedness and
+        # typedef spelling changes while still distinguishing real void/record
+        # pointer reinterpretations.
+        base: sview = c_type_named_base(qual_type)
+        return sview("u8", 0, -1) if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("cc_t", 0, -1)) else sview("i8", 0, -1) if sview_eq(base, sview("signed char", 0, -1)) else sview("i16", 0, -1) if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) else sview("u16", 0, -1) if sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) else sview("i32", 0, -1) if sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) else sview("u32", 0, -1) if sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) else sview("i64", 0, -1) if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) else sview("u64", 0, -1) if sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) else sview("usize", 0, -1) if sview_eq(base, sview("size_t", 0, -1)) else sview("isize", 0, -1) if sview_eq(base, sview("ssize_t", 0, -1)) else sview("f32", 0, -1) if sview_eq(base, sview("float", 0, -1)) else sview("f64", 0, -1) if sview_eq(base, sview("double", 0, -1)) else base
+
+    def append_elisa_type_name(out: mutable darray[u8]&, name: mutable sview) -> void:
         return if name.len == 0
+        name <- safe_identifier(name)
         first: u8 = string_view_index(name, 0).u8()
         if first >= 97 and first <= 122:
             out.push(first - 32)
@@ -52,12 +102,6 @@ extend CTranslator:
             out.push(first)
         for index in 1..<name.len |out, name|:
             out.push(string_view_index(name, index).u8())
-
-    def append_elisa_helper_type(out: mutable darray[u8]&, name: sview) -> void:
-        if sview_eq(name, sview("u8", 0, -1)) or sview_eq(name, sview("i16", 0, -1)) or sview_eq(name, sview("i32", 0, -1)) or sview_eq(name, sview("u32", 0, -1)) or sview_eq(name, sview("i64", 0, -1)) or sview_eq(name, sview("u64", 0, -1)) or sview_eq(name, sview("usize", 0, -1)) or sview_eq(name, sview("isize", 0, -1)) or sview_eq(name, sview("void", 0, -1)):
-            append_view(out, name)
-        else:
-            append_elisa_type_name(out, name)
 
     def c_array_length(qual_type: sview) -> i64:
         open_bracket: i64 = sview_find_byte(qual_type, 91)
@@ -124,6 +168,54 @@ extend CTranslator:
             emitted <- emitted + 1
         append_view(out, sview("]", 0, -1))
 
+    def append_hex_digit(out: mutable darray[u8]&, value: i64) -> void:
+        out.push((48 + value).u8()) if value < 10
+        out.push((55 + value).u8()) if value >= 10
+
+    # Clang's JSON value keeps C's octal and hexadecimal escapes verbatim. Elisa
+    # intentionally has no octal string escapes, so canonicalize byte escapes to
+    # `\xNN` while preserving the ordinary Elisa-compatible escapes.
+    def append_elisa_string_literal(out: mutable darray[u8]&, literal: sview) -> void:
+        return if literal.len == 0
+        out.push(34)
+        index: mutable i64 = 1
+        end: i64 = literal.len - 1
+        while index < end |out, literal, index, end|:
+            value: i64 = string_view_index(literal, index)
+            index <- index + 1
+            if value != 92:
+                out.push(92) if value == 34
+                out.push(value.u8())
+                continue
+            break if index >= end
+            escaped: i64 = string_view_index(literal, index)
+            index <- index + 1
+            byte: mutable i64 = -1
+            digits: mutable i64 = 0
+            if escaped >= 48 and escaped <= 55:
+                byte <- escaped - 48
+                digits <- 1
+                while digits < 3 and index < end and string_view_index(literal, index) >= 48 and string_view_index(literal, index) <= 55 |literal, index, end, byte, digits|:
+                    byte <- byte * 8 + string_view_index(literal, index) - 48
+                    index <- index + 1
+                    digits <- digits + 1
+            elif escaped == 120:
+                byte <- 0
+                digits <- 0
+                while digits < 2 and index < end and c_hex_digit(string_view_index(literal, index)) >= 0 |literal, index, end, byte, digits|:
+                    byte <- byte * 16 + c_hex_digit(string_view_index(literal, index))
+                    index <- index + 1
+                    digits <- digits + 1
+            if byte >= 0:
+                out.push(92)
+                out.push(120)
+                append_hex_digit(out, (byte / 16) % 16)
+                append_hex_digit(out, byte % 16)
+            else:
+                out.push(92)
+                out.push(escaped.u8())
+        out.push(34)
+
     def c_type_is_const_pointer(qual_type: sview) -> bool:
         base: sview = c_type_pointer_base(qual_type)
         return sview_starts_with(base, sview("const ", 0, -1))
@@ -131,26 +223,87 @@ extend CTranslator:
     def c_type_pointer_optional(qual_type: sview) -> bool:
         # The optional marker belongs to the pointer value, not to an array
         # aggregate containing pointer elements.
-        if sview_find_byte(qual_type, 91) >= 0 or sview_find_byte(qual_type, 42) < 0:
+        if c_type_is_function(qual_type) or sview_find_byte(qual_type, 91) >= 0 or sview_find_byte(qual_type, 42) < 0:
             return false
         raw_base: sview = c_type_pointer_base(qual_type)
         base: sview = c_type_without_qualifiers(raw_base)
         pointer_count: mutable i64 = 0
         for index in 0..<qual_type.len |qual_type, pointer_count|:
             pointer_count <- pointer_count + 1 if string_view_index(qual_type, index) == 42
-        # `cstr` is a non-null string view in Elisa, so it cannot carry C's null
-        # pointer value directly. Keep string ABI parameters non-optional until a
-        # nullable C-string representation is added.
-        return false if pointer_count == 1 and c_type_is_const_pointer(qual_type)
-        return false if pointer_count >= 2 and sview_starts_with(base, sview("char", 0, -1))
         return true
+
+    def c_type_pointer_count(qual_type: sview) -> i64:
+        count: mutable i64 = 0
+        for index in 0..<qual_type.len |qual_type, count|:
+            count <- count + 1 if string_view_index(qual_type, index) == 42
+        return count
+
+    def c_type_is_char_pointer(qual_type: sview) -> bool:
+        base: sview = c_type_named_base(qual_type)
+        return sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("cc_t", 0, -1))
+
+    def c_function_pointer_params_start(qual_type: sview) -> i64:
+        marker: i64 = c_function_pointer_marker(qual_type)
+        close_marker: i64 = c_find_byte_from(qual_type, 41, marker + 1)
+        return c_find_byte_from(qual_type, 40, close_marker + 1) if marker >= 0 and close_marker >= 0 else -1
+
+    def c_function_parameter_type(function_type: sview, wanted: i64) -> sview:
+        params_start: i64 = c_function_pointer_params_start(function_type)
+        params_end: i64 = c_find_last_byte(function_type, 41)
+        if params_start < 0 or params_end <= params_start or wanted < 0:
+            return sview("", 0, 0)
+        start: mutable i64 = params_start + 1
+        parameter: mutable i64 = 0
+        depth: mutable i64 = 0
+        for index in (params_start + 1)..<params_end |function_type, wanted, start, parameter, depth|:
+            byte: i64 = string_view_index(function_type, index)
+            if byte == 40:
+                depth <- depth + 1
+            elif byte == 41:
+                depth <- depth - 1
+            elif byte == 44 and depth == 0:
+                return c_trim_spaces(string_view_prefix(string_view_suffix(function_type, start), index - start)) if parameter == wanted
+                parameter <- parameter + 1
+                start <- index + 1
+        return c_trim_spaces(string_view_prefix(string_view_suffix(function_type, start), params_end - start)) if parameter == wanted
+        return sview("", 0, 0)
+
+    def append_c_function_result(out: mutable darray[u8]&, return_type: sview) -> void:
+        append_view(out, sview("mutable ", 0, -1)) if sview_find_byte(return_type, 42) >= 0 and not c_type_is_const_pointer(return_type)
+        append_c_type(out, return_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(return_type)
+
+    def append_c_function_type(out: mutable darray[u8]&, function_type: sview) -> void:
+        marker: i64 = c_function_pointer_marker(function_type)
+        params_start: i64 = c_function_pointer_params_start(function_type)
+        params_end: i64 = c_find_last_byte(function_type, 41)
+        return_type: sview = c_trim_spaces(string_view_prefix(function_type, marker))
+        append_view(out, sview("fn(", 0, -1))
+        parameter: mutable i64 = 0
+        if params_start >= 0 and params_end > params_start:
+            for _index in 0..<64 |out, function_type, params_start, params_end, parameter|:
+                current: sview = c_function_parameter_type(function_type, parameter)
+                break if current.len == 0
+                append_view(out, sview(", ", 0, -1)) if parameter > 0
+                if sview_eq(current, sview("...", 0, -1)):
+                    append_view(out, sview("...", 0, -1))
+                else:
+                    append_view(out, sview("mutable ", 0, -1)) if sview_find_byte(current, 42) >= 0 and not c_type_is_function_pointer(current) and not c_type_is_const_pointer(current)
+                    append_c_type(out, current)
+                    append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(current)
+                parameter <- parameter + 1
+                break if c_function_parameter_type(function_type, parameter).len == 0
+        append_view(out, sview(") -> ", 0, -1))
+        append_c_function_result(out, return_type)
 
     def append_c_type(out: mutable darray[u8]&, qual_type: sview) -> void:
         # C pointer values are represented as Elisa references. The declaration
         # site supplies `mutable` when C allows writes through that pointer.
         open_bracket: i64 = sview_find_byte(qual_type, 91)
         close_bracket: i64 = sview_find_byte(qual_type, 93)
-        if open_bracket >= 0 and close_bracket > open_bracket:
+        if c_type_is_function_pointer(qual_type):
+            append_c_function_type(out, qual_type)
+        elif open_bracket >= 0 and close_bracket > open_bracket:
             append_view(out, sview("array[", 0, -1))
             element_type: sview = string_view_prefix(qual_type, open_bracket)
             append_c_type(out, element_type)
@@ -164,29 +317,35 @@ extend CTranslator:
             pointer_count: mutable i64 = 0
             for index in 0..<qual_type.len |qual_type, pointer_count|:
                 pointer_count <- pointer_count + 1 if string_view_index(qual_type, index) == 42
-            if pointer_count >= 2 and (sview_starts_with(base, sview("char", 0, -1)) or sview_starts_with(base, sview("const char", 0, -1))):
-                append_view(out, sview("cstr&&", 0, -1))
+            if pointer_count >= 2 and (sview_starts_with(base, sview("char", 0, -1)) or sview_starts_with(base, sview("const char", 0, -1)) or sview_starts_with(base, sview("unsigned char", 0, -1)) or sview_starts_with(base, sview("const unsigned char", 0, -1))):
+                append_view(out, sview("cstr&&", 0, -1)) if c_type_is_const_pointer(qual_type) else append_view(out, sview("u8&&", 0, -1))
             elif sview_find_byte(base, 40) >= 0:
                 append_view(out, sview("void&", 0, -1))
-            elif sview_starts_with(base, sview("char", 0, -1)) and c_type_is_const_pointer(qual_type):
-                append_view(out, sview("cstr", 0, -1))
             elif sview_starts_with(base, sview("char", 0, -1)) or sview_starts_with(base, sview("unsigned char", 0, -1)) or sview_starts_with(base, sview("cc_t", 0, -1)):
                 append_view(out, sview("u8&", 0, -1))
-            elif sview_starts_with(base, sview("int", 0, -1)):
+            elif sview_eq(base, sview("signed char", 0, -1)):
+                append_view(out, sview("i8&", 0, -1))
+            elif sview_eq(base, sview("float", 0, -1)):
+                append_view(out, sview("f32&", 0, -1))
+            elif sview_eq(base, sview("double", 0, -1)):
+                append_view(out, sview("f64&", 0, -1))
+            elif sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)):
                 append_view(out, sview("i32&", 0, -1))
-            elif sview_starts_with(base, sview("unsigned", 0, -1)):
+            elif sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)):
                 append_view(out, sview("u32&", 0, -1))
-            elif sview_starts_with(base, sview("short", 0, -1)):
+            elif sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)):
                 append_view(out, sview("i16&", 0, -1))
-            elif sview_starts_with(base, sview("long", 0, -1)):
+            elif sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)):
+                append_view(out, sview("u16&", 0, -1))
+            elif sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)):
                 append_view(out, sview("i64&", 0, -1))
-            elif sview_starts_with(base, sview("size_t", 0, -1)):
+            elif sview_eq(base, sview("size_t", 0, -1)):
                 append_view(out, sview("usize&", 0, -1))
-            elif sview_starts_with(base, sview("ssize_t", 0, -1)):
+            elif sview_eq(base, sview("ssize_t", 0, -1)):
                 append_view(out, sview("isize&", 0, -1))
-            elif sview_starts_with(base, sview("time_t", 0, -1)) or sview_starts_with(base, sview("__darwin_time_t", 0, -1)):
+            elif sview_eq(base, sview("time_t", 0, -1)) or sview_eq(base, sview("__darwin_time_t", 0, -1)):
                 append_view(out, sview("i64&", 0, -1))
-            elif sview_starts_with(base, sview("tcflag_t", 0, -1)) or sview_starts_with(base, sview("speed_t", 0, -1)):
+            elif sview_eq(base, sview("tcflag_t", 0, -1)) or sview_eq(base, sview("speed_t", 0, -1)):
                 append_view(out, sview("u64&", 0, -1))
             elif sview_eq(base, sview("FILE", 0, -1)):
                 append_view(out, sview("void&", 0, -1))
@@ -213,6 +372,8 @@ extend CTranslator:
             append_view(out, sview("u64", 0, -1))
         elif type_starts_with(qual_type, sview("unsigned char", 0, -1)) or type_starts_with(qual_type, sview("cc_t", 0, -1)):
             append_view(out, sview("u8", 0, -1))
+        elif type_starts_with(qual_type, sview("signed char", 0, -1)):
+            append_view(out, sview("i8", 0, -1))
         elif type_starts_with(qual_type, sview("char", 0, -1)):
             append_view(out, sview("u8", 0, -1))
         elif type_starts_with(qual_type, sview("unsigned short", 0, -1)):
@@ -243,220 +404,3 @@ extend CTranslator:
                 append_elisa_type_name(out, named)
             else:
                 append_view(out, sview("i32", 0, -1))
-
-    def c_type_is_array(qual_type: sview) -> bool:
-        return sview_find_byte(qual_type, 91) >= 0
-
-    def typed_record_index(ctx: TypedContext&, qual_type: sview) -> i64:
-        wanted: sview = c_type_named_base(qual_type)
-        for index in 0..<ctx.records.count |ctx, wanted|:
-            if sview_eq(ctx.records[index].name, wanted):
-                return index
-        return -1
-
-    def typed_collect_record(ctx: mutable TypedContext&, node: JsonValue) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        name: sview = ast_name(node)
-        if name.len == 0 or typed_record_index(ctx, name) >= 0:
-            return
-        fields_start: i64 = ctx.fields.count.i64()
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count |ctx, node|:
-                field: JsonValue = ast_child(node, index)
-                if sview_eq(ast_kind(field), sview("FieldDecl", 0, -1)):
-                    ctx.fields.push(TypedField{name: safe_identifier(ast_name(field)), type_name: ast_qual_type(field)})
-        ctx.records.push(TypedRecord{name: c_type_named_base(name), fields_start: fields_start, fields_count: ctx.fields.count.i64() - fields_start})
-
-    def typed_collect_enum(ctx: mutable TypedContext&, node: JsonValue) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        name: sview = ast_name(node)
-        if name.len == 0:
-            return
-        for index in 0..<ctx.enums.count |ctx, name|:
-            return if sview_eq(ctx.enums[index].name, name)
-        ctx.enums.push(TypedEnum{name: safe_identifier(name), underlying_type: sview("i32", 0, -1)})
-        previous: mutable i64 = -1
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count |ctx, node, name, previous|:
-                constant: JsonValue = ast_child(node, index)
-                if not sview_eq(ast_kind(constant), sview("EnumConstantDecl", 0, -1)):
-                    continue
-                value: i64 = ast_enum_value(constant, previous + 1)
-                previous <- value
-                ctx.enum_consts.push(TypedEnumConst{name: safe_identifier(ast_name(constant)), enum_name: safe_identifier(name), value: value})
-
-    def typed_collect_types(ctx: mutable TypedContext&, root: JsonValue, source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        count: i64 = ast_child_count(root)
-        if count < 0:
-            return
-        for index in 0..<count |ctx, root, source|:
-            declaration: JsonValue = ast_child(root, index)
-            name: sview = ast_name(declaration)
-            user: bool = ast_is_user_declaration(declaration, source)
-            if sview_eq(ast_kind(declaration), sview("RecordDecl", 0, -1)) and (user or sview_eq(name, sview("termios", 0, -1)) or sview_eq(name, sview("winsize", 0, -1))):
-                typed_collect_record(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            if sview_eq(ast_kind(declaration), sview("EnumDecl", 0, -1)) and user:
-                typed_collect_enum(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    def typed_collect_external_globals(ctx: mutable TypedContext&, node: JsonValue) -> void:
-        if sview_eq(ast_kind(node), sview("VarDecl", 0, -1)) and sview_eq(ast_string(ast_field(node, sview("storageClass", 0, -1))), sview("extern", 0, -1)) and ast_bool(ast_field(node, sview("isUsed", 0, -1))):
-            typed_add_external_global(ctx, ast_name(node), ast_qual_type(node))
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count:
-                typed_collect_external_globals(ctx, ast_child(node, index))
-
-    def typed_collect_user_functions(ctx: mutable TypedContext&, root: JsonValue, source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        count: i64 = ast_child_count(root)
-        if count < 0:
-            return
-        for index in 0..<count |ctx, root, source|:
-            declaration: JsonValue = ast_child(root, index)
-            if not sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)):
-                continue
-            if not ast_has_child(declaration, sview("CompoundStmt", 0, -1)) or not ast_is_user_declaration(declaration, source):
-                continue
-            name: sview = ast_name(declaration)
-            if typed_user_function_index(ctx, name) < 0:
-                ctx.user_function_names.push(name)
-
-    def ast_is_static_decl(node: JsonValue) -> bool:
-        return sview_eq(ast_string(ast_field(node, sview("storageClass", 0, -1))), sview("static", 0, -1))
-
-    def ast_contains_kind(node: JsonValue, wanted: sview) -> bool:
-        return true if sview_eq(ast_kind(node), wanted)
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count:
-                return true if ast_contains_kind(ast_child(node, index), wanted)
-        return false
-
-    def ast_contains_static_decl(node: JsonValue) -> bool:
-        return true if ast_is_static_decl(node)
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count:
-                return true if ast_contains_static_decl(ast_child(node, index))
-        return false
-
-    def ast_contains_varargs_builtin(node: JsonValue) -> bool:
-        if sview_eq(ast_kind(node), sview("CallExpr", 0, -1)) and ast_child_count(node) > 0:
-            callee: sview = ast_expr_name(ast_child(node, 0))
-            return true if sview_starts_with(callee, sview("__builtin_va_", 0, -1))
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count:
-                return true if ast_contains_varargs_builtin(ast_child(node, index))
-        return false
-
-    def append_i64(out: mutable darray[u8]&, value: i64) -> void:
-        magnitude: mutable i64 = value
-        if magnitude < 0:
-            out.push(45)
-            magnitude <- 0 - magnitude
-        if magnitude == 0:
-            out.push(48)
-            return
-        digits: mutable i64[24] = zeroed
-        count: mutable i64 = 0
-        while magnitude > 0 |magnitude, digits, count|:
-            digits[count] <- magnitude % 10
-            magnitude <- magnitude / 10
-            count <- count + 1
-        for index in 0..<count |out, digits, count|:
-            out.push((digits[count - index - 1] + 48).u8())
-
-    def append_function_return_type(out: mutable darray[u8]&, function_type: sview) -> void:
-        return_type: sview = c_function_return_type(function_type)
-        append_view(out, sview("mutable ", 0, -1)) if sview_find_byte(return_type, 42) >= 0 and not c_type_is_const_pointer(return_type)
-        append_c_type(out, return_type)
-        append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(return_type)
-
-    def c_function_return_type(function_type: sview) -> sview:
-        open_paren: i64 = sview_find_byte(function_type, 40)
-        return sview_trim_trailing(string_view_prefix(function_type, open_paren), 32) if open_paren > 0 else function_type
-
-    def append_external_bindings(out: mutable darray[u8]&, root: JsonValue) -> void:
-        # External signatures are collected from Clang FunctionDecl nodes while
-        # lowering calls. There are intentionally no translator-owned C bindings.
-        pass
-
-    def typed_emit_externals(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        append_view(out, sview("extern va_list\n\n@intrinsic(\"llvm.va_start\")\nextern llvm_va_start(storage: mutable void&) -> void\n\n@intrinsic(\"llvm.va_end\")\nextern llvm_va_end(storage: mutable void&) -> void\n\n", 0, -1))
-        for index in 0..<ctx.extern_globals.count |out, ctx|:
-            external_global: TypedExternGlobal = ctx.extern_globals[index.usize()]
-            if typed_global_index(ctx, external_global.name) < 0:
-                append_view(out, sview("@link_name(\"", 0, -1))
-                append_view(out, external_global.name)
-                append_view(out, sview("\")\nextern ", 0, -1))
-                typed_emit_external_alias(out, sview("__c_global_", 0, -1), index)
-                append_view(out, sview(": ", 0, -1))
-                append_view(out, sview("mutable ", 0, -1))
-                append_c_type(out, external_global.type_name)
-                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(external_global.type_name)
-                append_view(out, sview("\n", 0, -1))
-        append_view(out, sview("\n", 0, -1)) if ctx.extern_globals.count > 0
-        if ctx.externs.count > 0:
-            append_view(out, sview("# Discovered C ABI bindings.\n", 0, -1))
-        for index in 0..<ctx.externs.count |out, ctx|:
-            external: TypedExtern = ctx.externs[index.usize()]
-            append_view(out, sview("@link_name(\"", 0, -1))
-            append_view(out, external.name)
-            append_view(out, sview("\")\nextern ", 0, -1))
-            typed_emit_external_alias(out, sview("__c_ext_", 0, -1), index)
-            append_view(out, sview("(", 0, -1))
-            if external.params_count > 0:
-                for offset in 0..<external.params_count |out, ctx, external|:
-                    if offset > 0:
-                        append_view(out, sview(", ", 0, -1))
-                    parameter: TypedParam = ctx.extern_params[(external.params_start + offset).usize()]
-                    append_view(out, parameter.name)
-                    append_view(out, sview(": ", 0, -1))
-                    if parameter.is_mutable:
-                        append_view(out, sview("mutable ", 0, -1))
-                    append_c_type(out, parameter.type_name)
-                    append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(parameter.type_name)
-            if external.variadic:
-                append_view(out, sview(", ...", 0, -1)) if external.params_count > 0
-                append_view(out, sview("...", 0, -1)) if external.params_count == 0
-            append_view(out, sview(") -> ", 0, -1))
-            append_function_return_type(out, external.return_type)
-            append_view(out, sview("\n", 0, -1))
-        append_view(out, sview("\n", 0, -1)) if ctx.externs.count > 0
-
-    def typed_emit_types(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        for index in 0..<ctx.records.count |out, ctx|:
-            record: TypedRecord = ctx.records[index.usize()]
-            append_view(out, sview("struct ", 0, -1))
-            append_elisa_type_name(out, record.name)
-            append_view(out, sview(":\n", 0, -1))
-            if record.fields_count == 0:
-                append_view(out, sview("    pass\n", 0, -1))
-            else:
-                for offset in 0..<record.fields_count |out, ctx, record|:
-                    field: TypedField = ctx.fields[(record.fields_start + offset).usize()]
-                    append_view(out, sview("    ", 0, -1))
-                    append_view(out, field.name)
-                    append_view(out, sview(": mutable ", 0, -1))
-                    append_c_type(out, field.type_name)
-                    append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(field.type_name)
-                    append_view(out, sview("\n", 0, -1))
-            append_view(out, sview("\n", 0, -1))
-
-        for index in 0..<ctx.enums.count |out, ctx|:
-            enumeration: TypedEnum = ctx.enums[index.usize()]
-            append_view(out, sview("const enum ", 0, -1))
-            append_view(out, enumeration.name)
-            append_view(out, sview(" of i32:\n", 0, -1))
-            emitted: mutable i64 = 0
-            for constant_index in 0..<ctx.enum_consts.count |out, ctx, enumeration, emitted|:
-                constant: TypedEnumConst = ctx.enum_consts[constant_index.usize()]
-                if sview_eq(constant.enum_name, enumeration.name):
-                    append_view(out, sview("    ", 0, -1))
-                    append_view(out, constant.name)
-                    append_view(out, sview(" = ", 0, -1))
-                    append_i64(out, constant.value)
-                    append_view(out, sview("\n", 0, -1))
-                    emitted <- emitted + 1
-            append_view(out, sview("    pass\n", 0, -1)) if emitted == 0
-            append_view(out, sview("\n", 0, -1))

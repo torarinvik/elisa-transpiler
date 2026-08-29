@@ -1,0 +1,198 @@
+extend CTranslator:
+    def typed_expr_reads_global(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Name:
+            return typed_global_index(ctx, expression.text) >= 0 or typed_external_global_index(ctx, expression.text) >= 0
+        return true if typed_expr_reads_global(ctx, expression.lhs)
+        return true if typed_expr_reads_global(ctx, expression.rhs)
+        return true if typed_expr_reads_global(ctx, expression.third)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression|:
+                return true if typed_expr_reads_global(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        return false
+
+    def typed_stmt_reads_global(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return true if typed_expr_reads_global(ctx, statement.expr)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                return true if typed_stmt_reads_global(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_stmt_reads_global(ctx, statement.aux)
+            return typed_stmt_reads_global(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_reads_global(ctx, statement.children_start)
+            return true if typed_stmt_reads_global(ctx, statement.aux)
+            return typed_stmt_reads_global(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
+            return typed_stmt_reads_global(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_reads_global(ctx, switch_case.body)
+        return false
+
+    def typed_function_needs_global(ctx: TypedContext&, function: TypedFunction) -> bool:
+        return typed_function_needs_global_depth(ctx, function, 8)
+
+    def typed_function_needs_global_depth(ctx: TypedContext&, function: TypedFunction, depth: i64) -> bool:
+        return true if function.has_global_effect or typed_stmt_reads_global(ctx, function.body)
+        return false if depth <= 0
+        return typed_stmt_calls_global_depth(ctx, function.body, depth - 1)
+
+    def typed_type_uses_pointer(type_name: sview) -> bool:
+        return sview_find_byte(type_name, 42) >= 0 or c_type_is_function_pointer(type_name)
+
+    def typed_expr_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        return true if typed_type_uses_pointer(expression.type_name) and (expression.kind == TypedExprKind.Name or expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex)
+        return true if expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Member
+        return true if expression.kind == TypedExprKind.Unary and (sview_eq(expression.text, sview("&", 0, -1)) or sview_eq(expression.text, sview("*", 0, -1)))
+        return true if typed_expr_needs_unsafe(ctx, expression.lhs)
+        return true if typed_expr_needs_unsafe(ctx, expression.rhs)
+        return true if typed_expr_needs_unsafe(ctx, expression.third)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression|:
+                return true if typed_expr_needs_unsafe(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        return false
+
+    def typed_stmt_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return true if typed_expr_needs_unsafe(ctx, statement.expr)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                return true if typed_stmt_needs_unsafe(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_stmt_needs_unsafe(ctx, statement.aux)
+            return typed_stmt_needs_unsafe(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_needs_unsafe(ctx, statement.children_start)
+            return true if typed_stmt_needs_unsafe(ctx, statement.aux)
+            return typed_stmt_needs_unsafe(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
+            return typed_stmt_needs_unsafe(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_needs_unsafe(ctx, switch_case.body)
+        return false
+
+    def typed_function_direct_unsafe(ctx: TypedContext&, function: TypedFunction) -> bool:
+        return true if function.has_unsafe_effect or typed_type_uses_pointer(function.return_type)
+        for offset in 0..<function.params_count |ctx, function|:
+            return true if typed_type_uses_pointer(ctx.params[(function.params_start + offset).usize()].type_name)
+        return typed_stmt_needs_unsafe(ctx, function.body)
+
+    def typed_stmt_calls_global(ctx: TypedContext&, index: i64) -> bool:
+        return typed_stmt_calls_global_depth(ctx, index, 8)
+
+    def typed_stmt_calls_global_depth(ctx: TypedContext&, index: i64, depth: i64) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        if typed_expr_calls_global_depth(ctx, statement.expr, depth):
+            return true
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                return true if typed_stmt_calls_global_depth(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], depth)
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_stmt_calls_global_depth(ctx, statement.aux, depth)
+            return typed_stmt_calls_global_depth(ctx, statement.aux2, depth)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_calls_global_depth(ctx, statement.children_start, depth)
+            return true if typed_stmt_calls_global_depth(ctx, statement.aux, depth)
+            return typed_stmt_calls_global_depth(ctx, statement.aux2, depth)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
+            return typed_stmt_calls_global_depth(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr, depth)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_calls_global_depth(ctx, switch_case.body, depth)
+        return false
+
+    def typed_expr_calls_global(ctx: TypedContext&, index: i64) -> bool:
+        return typed_expr_calls_global_depth(ctx, index, 8)
+
+    def typed_expr_calls_global_depth(ctx: TypedContext&, index: i64, depth: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Call:
+            for function_index in 0..<ctx.functions.count |ctx, expression|:
+                function: TypedFunction = ctx.functions[function_index.usize()]
+                if sview_eq(function.name, expression.text):
+                    return true if function.has_global_effect or typed_stmt_reads_global(ctx, function.body)
+                    return true if depth > 0 and typed_stmt_calls_global_depth(ctx, function.body, depth - 1)
+        return true if typed_expr_calls_global_depth(ctx, expression.lhs, depth)
+        return true if typed_expr_calls_global_depth(ctx, expression.rhs, depth)
+        return true if typed_expr_calls_global_depth(ctx, expression.third, depth)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression|:
+                return true if typed_expr_calls_global_depth(ctx, ctx.expr_children[(expression.args_start + offset).usize()], depth)
+        return false
+
+    def typed_expr_calls_unsafe(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Call:
+            for function_index in 0..<ctx.functions.count |ctx, expression|:
+                function: TypedFunction = ctx.functions[function_index.usize()]
+                return true if sview_eq(function.name, expression.text) and typed_function_direct_unsafe(ctx, function)
+        return true if typed_expr_calls_unsafe(ctx, expression.lhs)
+        return true if typed_expr_calls_unsafe(ctx, expression.rhs)
+        return true if typed_expr_calls_unsafe(ctx, expression.third)
+        if expression.args_count > 0:
+            for offset in 0..<expression.args_count |ctx, expression|:
+                return true if typed_expr_calls_unsafe(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        return false
+
+    def typed_function_needs_unsafe(ctx: TypedContext&, function: TypedFunction) -> bool:
+        return typed_function_direct_unsafe(ctx, function) or typed_stmt_calls_unsafe(ctx, function.body)
+
+    def typed_stmt_calls_unsafe(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt = typed_stmt_at(ctx, index)
+        return true if typed_expr_calls_unsafe(ctx, statement.expr)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                return true if typed_stmt_calls_unsafe(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_stmt_calls_unsafe(ctx, statement.aux)
+            return typed_stmt_calls_unsafe(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_stmt_calls_unsafe(ctx, statement.children_start)
+            return true if typed_stmt_calls_unsafe(ctx, statement.aux)
+            return typed_stmt_calls_unsafe(ctx, statement.aux2)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
+            return typed_stmt_calls_unsafe(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
+        elif statement.kind == TypedStmtKind.Switch:
+            for offset in 0..<statement.children_count |ctx, statement|:
+                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                return true if typed_stmt_calls_unsafe(ctx, switch_case.body)
+        return false
+
+    def typed_emit_effect_list(out: mutable darray[u8]&, needs_global: bool, needs_unsafe: bool) -> void:
+        append_view(out, sview("Abort.Panic", 0, -1))
+        append_view(out, sview(", Global", 0, -1)) if needs_global
+        append_view(out, sview(", Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef", 0, -1)) if needs_unsafe
+
+    def typed_emit_function_effects(out: mutable darray[u8]&, ctx: TypedContext&, function: TypedFunction) -> i64:
+        needs_global: bool = typed_function_needs_global(ctx, function)
+        needs_unsafe: bool = typed_function_needs_unsafe(ctx, function) or (sview_eq(function.name, sview("main", 0, -1)) and typed_has_global_initializers(ctx))
+        if not needs_global and not needs_unsafe:
+            append_view(out, sview(":\n", 0, -1))
+            return 1
+        append_view(out, sview(" can[", 0, -1))
+        typed_emit_effect_list(out, needs_global, needs_unsafe)
+        append_view(out, sview("]:\n", 0, -1))
+        append_indent(out, 1)
+        append_view(out, sview("can ", 0, -1))
+        typed_emit_effect_list(out, needs_global, needs_unsafe)
+        append_view(out, sview(":\n", 0, -1))
+        if needs_unsafe:
+            append_indent(out, 2)
+            append_view(out, sview("trusted Unsafe.StaleRef:\n", 0, -1))
+            return 3
+        return 2
