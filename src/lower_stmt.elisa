@@ -176,7 +176,7 @@ extend CTranslator:
             return -1
         initialization: mutable i64 = -1
         declaration_type: sview = ast_c_type(node)
-        if not c_type_is_array(declaration_type) and ast_child_count(node) > 0:
+        if ast_child_count(node) > 0:
             for child_index in 0..<ast_child_count(node) |ctx, node, initialization|:
                 initializer_node: JsonValue = ast_child(node, child_index)
                 continue if ast_is_comment_node(initializer_node)
@@ -190,7 +190,7 @@ extend CTranslator:
             name: sview = safe_identifier(ast_name(node))
             if typed_global_index(ctx, name) < 0:
                 initializer: mutable i64 = -1
-                if ast_child_count(node) > 0 and not c_type_is_array(ast_c_type(node)):
+                if ast_child_count(node) > 0:
                     for child_index in 0..<ast_child_count(node) |ctx, node, initializer|:
                         initializer_node: JsonValue = ast_child(node, child_index)
                         continue if ast_is_comment_node(initializer_node)

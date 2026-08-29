@@ -526,6 +526,7 @@ module CTranslator:
     struct TypedDiagnostic:
         category: sview
         kind: sview
+        source: sview
         line: i64
         column: i64
 

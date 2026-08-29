@@ -35,17 +35,26 @@ The prototype currently covers the constructs needed by the acceptance target:
 - inferred local/parameter/field mutability, C integer promotions, boolean
   recovery, enum qualification, constant-condition cleanup, and complete
   zero-filled aggregate initializers
+- integer constant folding, canonical C `NULL` handling, ABI-aware cast
+  elision, direct function decay, and readable source-derived temporary names
+- idiomatic C `for`/`do`-`while` lowering, designated initializers, sparse array
+  initializers, dense switch ranges, and symbolic enum switch patterns
+- a final output formatter that removes trailing whitespace and normalizes
+  generated module boundaries
 - localized `trusted Unsafe.StaleRef` regions in idiomatic mode, with a
   `--fidelity` mode for broad source-faithful unsafe regions
 - typed non-null local function-pointer calls, source comments on translated
   declarations, demand-driven runtime helpers, and collision-safe project
   module names
+- source-qualified, de-duplicated diagnostics for unsupported constructs
 
 Switches are lowered to Elisa `match` statements. Adjacent C labels that share
-an arm become Elisa or-patterns such as `0 | 1:`, ordinary terminal `break`
-statements disappear because the arm naturally ends there, and a synthetic
-completion flag is retained only for conditional breaks whose fall-through
-path still has code to suppress.
+an arm become Elisa or-patterns such as `0 | 1:`; three or more consecutive
+integer labels can become a range such as `10..=12:`, and enum labels retain
+their qualified names when Clang proves the switch expression is that enum.
+Ordinary terminal `break` statements disappear because the arm naturally ends
+there, and a synthetic completion flag is retained only for conditional breaks
+whose fall-through path still has code to suppress.
 
 ## External C functions
 
@@ -74,6 +83,9 @@ source symbol, in which case a readable fallback is selected.
 Lowering is deliberately fail-closed: a construct outside this subset stops
 translation with a diagnostic instead of being replaced by a placeholder.
 
+The translator is generic; cJSON and Kilo are regression targets, not special
+cases in the emitter.
+
 It is intentionally not a general C translator yet. Macros as source
 constructs, full pointer arithmetic, `va_arg`, ownership/region inference,
 and broader library/runtime coverage
@@ -83,6 +95,12 @@ inferred soundly from syntax alone.
 C callback fields are emitted as nullable first-class function values, for
 example `(fn(usize) -> mutable void&?)?`, and guarded calls remain typed.
 C++ support comes after the C pipeline has a broader typed IR.
+
+The current work covers the high-value, backend-compatible portion of the
+translator improvement roadmap. The remaining deep items—full macro expansion,
+complete pointer arithmetic, `va_arg`, precise ownership inference, broad
+standard-library modeling, and large-unit compiler/backend capacity—are kept
+explicitly conservative rather than emitted as misleading Elisa.
 
 ## Requirements
 
@@ -99,13 +117,20 @@ From the repository root:
 sh scripts/test.sh
 ```
 
-The script builds the Elisa translator, translates the small local fixture,
-the pinned `inih` example, cJSON, and Kilo, then compiles all generated
-programs. It compares the `ini_dump` and cJSON smoke programs with native
-behavior and verifies Kilo's no-argument path, including direct Elisa varargs
-lowering with no adapter. It also verifies that library bindings are
-Clang-derived opaque aliases and checks that unsupported syntax receives a
-source-located diagnostic.
+The script builds the Elisa translator, translates the local fixtures, the
+pinned `inih` example, cJSON, and Kilo, then compiles all generated programs.
+It compares the executable fixtures with native behavior, checks constant
+folding, C loop lowering, designated/sparse initializers, switch ranges and
+enum patterns, direct Elisa varargs lowering, source comments, formatter
+invariants, and Clang-derived external bindings. It also checks that
+unsupported syntax receives a source-qualified diagnostic.
+
+The normal tests use the stage-0 Elisa compiler. The translator source itself
+can also be checked with the stage-1 compiler, but the current stage-1 backend
+may decline a large translation unit after semantic analysis. That is a
+compiler capacity/sound-subset boundary, not a successful translation: no
+linkable object is produced in that case. The acceptance suite remains the
+authoritative end-to-end check until stage-1 can compile the emitter as a whole.
 
 The upstream test source is vendored under
 `testdata/upstream/inih` at commit `26254ee` (release `r62`).

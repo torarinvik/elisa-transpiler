@@ -16,7 +16,12 @@ extend CTranslator:
         return typed_number(ast_field(begin, sview("col", 0, -1)))
 
     def typed_record_unsupported(ctx: mutable TypedContext&, node: JsonValue, category: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        ctx.diagnostics.push(TypedDiagnostic{category: category, kind: ast_kind(node), line: ast_location_line(node), column: ast_location_column(node)})
+        kind: sview = ast_kind(node)
+        line: i64 = ast_location_line(node)
+        column: i64 = ast_location_column(node)
+        for existing in ctx.diagnostics |ctx, category, kind, line, column|:
+            return if sview_eq(existing.category, category) and sview_eq(existing.kind, kind) and existing.line == line and existing.column == column
+        ctx.diagnostics.push(TypedDiagnostic{category: category, kind: kind, source: sview(ctx.source, 0, -1), line: line, column: column})
 
     def typed_push_expr(ctx: mutable TypedContext&, value: TypedExpr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         ctx.exprs.push(value)

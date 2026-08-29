@@ -21,6 +21,8 @@ clang -Wl,-dead_strip -o build/elisa-c-transpiler build/transpiler.o -lm
 rg -q '^def add\(left: i32, right: i32\) -> i32' build/simple.generated.elisa
 rg -q 'return \(left \+ right\)' build/simple.generated.elisa
 rg -q '^def main\(\) -> i32' build/simple.generated.elisa
+! rg -n '[[:blank:]]+$' build/simple.generated.elisa
+! rg -U -q '\n\n\n' build/simple.generated.elisa
 ! rg -q '^def elisa_nonnull' build/simple.generated.elisa
 ! rg -q '^extern va_list' build/simple.generated.elisa
 "$elisa_bin" -emit obj -O0 -o build/simple.generated.o build/simple.generated.elisa
@@ -68,6 +70,35 @@ integer_native_rc=$?
 integer_generated_rc=$?
 set -e
 [ "$integer_native_rc" -eq 0 ] && [ "$integer_generated_rc" -eq 0 ]
+
+./build/elisa-c-transpiler testdata/fixtures/constant_fold.c > build/constant_fold.generated.elisa
+rg -q '^def folded_value\(\) -> i32:' build/constant_fold.generated.elisa
+rg -q 'return 20' build/constant_fold.generated.elisa
+rg -q 'return 1' build/constant_fold.generated.elisa
+clang -std=c11 testdata/fixtures/constant_fold.c -o build/constant_fold.native
+"$elisa_bin" -emit obj -O0 -o build/constant_fold.generated.o build/constant_fold.generated.elisa
+clang -Wl,-dead_strip -o build/constant_fold.generated build/constant_fold.generated.o
+./build/constant_fold.native
+./build/constant_fold.generated
+
+./build/elisa-c-transpiler testdata/fixtures/for_loop.c > build/for_loop.generated.elisa
+rg -q 'while index < 5:' build/for_loop.generated.elisa
+rg -q 'index <- \(index \+ 1\)' build/for_loop.generated.elisa
+rg -q 'while true:' build/for_loop.generated.elisa
+clang -std=c11 testdata/fixtures/for_loop.c -o build/for_loop.native
+"$elisa_bin" -emit obj -O0 -o build/for_loop.generated.o build/for_loop.generated.elisa
+clang -Wl,-dead_strip -o build/for_loop.generated build/for_loop.generated.o
+./build/for_loop.native
+./build/for_loop.generated
+
+./build/elisa-c-transpiler testdata/fixtures/designated_init.c > build/designated_init.generated.elisa
+rg -q 'Pair\{first: 3, second: 7, third: zeroed\}' build/designated_init.generated.elisa
+rg -q 'values <- \[zeroed, zeroed, 7, zeroed, 9\]' build/designated_init.generated.elisa
+clang -std=c11 testdata/fixtures/designated_init.c -o build/designated_init.native
+"$elisa_bin" -emit obj -O0 -o build/designated_init.generated.o build/designated_init.generated.elisa
+clang -Wl,-dead_strip -o build/designated_init.generated build/designated_init.generated.o
+./build/designated_init.native
+./build/designated_init.generated
 
 ./build/elisa-c-transpiler testdata/fixtures/aggregate.c > build/aggregate.generated.elisa
 rg -q '# A small aggregate exercises C' build/aggregate.generated.elisa
@@ -177,6 +208,15 @@ switch_generated_rc=$?
 set -e
 [ "$switch_native_rc" -eq 0 ] && [ "$switch_generated_rc" -eq 0 ]
 
+./build/elisa-c-transpiler testdata/fixtures/switch_patterns.c > build/switch_patterns.generated.elisa
+rg -q '^[[:space:]]+10\.\.=12:' build/switch_patterns.generated.elisa
+rg -q 'Token\.TOKEN_ZERO[[:space:]]+\|[[:space:]]+Token\.TOKEN_ONE:' build/switch_patterns.generated.elisa
+clang -std=c11 testdata/fixtures/switch_patterns.c -o build/switch_patterns.native
+"$elisa_bin" -emit obj -O0 -o build/switch_patterns.generated.o build/switch_patterns.generated.elisa
+clang -Wl,-dead_strip -o build/switch_patterns.generated build/switch_patterns.generated.o
+./build/switch_patterns.native
+./build/switch_patterns.generated
+
 mkdir -p build/project-db
 ./build/elisa-c-transpiler --compile-commands testdata/fixtures/compile_commands.json \
     --output-dir build/project-db
@@ -264,6 +304,7 @@ rg -q 'item_cursor: mutable CJSON&\? = item' build/cjson.generated.elisa
 ! rg -q '_param|__c_ext_|__c_global_' build/cjson.generated.elisa
 rg -q 'size_of\[CJSON\]' build/cjson.generated.elisa
 rg -q 'size_of\[Printbuffer\] \* 1' build/cjson.generated.elisa
+! rg -q '\(null\)\.i32|\.i32\(\) == \(null\)' build/cjson.generated.elisa
 ! rg -q '^extern (printf|cJSON_Parse|cJSON_Delete)\b' build/cjson.generated.elisa
 rg -q '^@link_name\("printf"\)$' build/cjson.generated.elisa
 if [ "$optional_fn_supported" -eq 1 ]; then

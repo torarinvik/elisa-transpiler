@@ -135,15 +135,34 @@ extend CTranslator:
                         parameter: TypedParam = ctx.params[(function.params_start + offset).usize()]
                         return typed_parameter_is_mutable(ctx, function, parameter) if sview_eq(parameter.name, expression.text)
             return typed_stmt_declares_name_mutably(ctx, ctx.current_function_body, expression.text)
-        # A selected field/element may inherit an interior const qualifier that
-        # C's flattened type spelling does not expose as the base pointee const.
-        # Use the explicit ABI cast at this boundary; names retain the cheaper
-        # direct path when their declaration proves mutability.
-        return false if expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex
+        if expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex:
+            # A field's mutability is tracked from the complete translated
+            # program, so a mutable record field can flow directly into a
+            # non-null helper without an ABI-identical cast wrapper.
+            return typed_expr_field_is_mutable(ctx, index)
+        if expression.kind == TypedExprKind.Unary and sview_eq(expression.text, sview("&", 0, -1)):
+            # The address of a writable C object is writable even though the
+            # unary expression itself is not a named place. The resulting
+            # pointer type carries constness for genuinely const objects.
+            return not c_type_is_const_pointer(expression.type_name)
         return typed_expr_can_pass_mutable(ctx, expression.lhs) if expression.kind == TypedExprKind.Cast
         if expression.kind == TypedExprKind.Call:
             return c_type_pointer_count(expression.type_name) > 0 and not c_type_is_const_pointer(expression.type_name)
         return false
+
+    def typed_expr_field_is_mutable(ctx: TypedContext&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr = typed_expr_at(ctx, index)
+        base_index: mutable i64 = expression.lhs if expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex else -1
+        return false if base_index < 0
+        base: mutable TypedExpr = typed_expr_at(ctx, base_index)
+        while base.kind == TypedExprKind.Cast and base.lhs >= 0:
+            base_index <- base.lhs
+            base <- typed_expr_at(ctx, base_index)
+        return false if base.kind != TypedExprKind.Member
+        owner: TypedExpr = typed_expr_at(ctx, base.lhs)
+        record_index: i64 = typed_record_index(ctx, owner.type_name)
+        return record_index >= 0 and typed_record_field_is_mutable(ctx, record_index, base.text)
 
     def typed_name_matches_suffix(name: sview, prefix: sview, suffix: sview) -> bool:
         return false if name.len != prefix.len + suffix.len

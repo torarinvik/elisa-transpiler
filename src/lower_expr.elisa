@@ -174,11 +174,14 @@ extend CTranslator:
             return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Member, text: safe_identifier(name), type_name: type_name, lhs: base, rhs: -1, third: -1, args_start: -1, args_count: 0, value: arrow}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("InitListExpr", 0, -1)):
             lowered_args: mutable darray[i64] = []
-            count: i64 = ast_child_count(node)
+            count: mutable i64 = ast_initializer_child_count(node)
+            capacity: i64 = c_array_length(type_name) if c_type_is_array(type_name) else 0
+            count <- capacity if capacity > 0 and count > capacity
             if count >= 0:
                 for index in 0..<count |ctx, node, lowered_args|:
-                    continue if ast_is_comment_node(ast_child(node, index))
-                    child: i64 = typed_lower_expr(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    initializer_child: JsonValue = ast_initializer_child(node, index)
+                    continue if ast_is_comment_node(initializer_child)
+                    child: i64 = typed_lower_expr(ctx, initializer_child) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     if child < 0:
                         return -1
                     lowered_args.push(child)
@@ -431,7 +434,7 @@ extend CTranslator:
         count: i64 = ast_child_count(body)
         if count >= 0:
             index: mutable i64 = 0
-            while index < count |ctx, body, case_values, case_bodies, current_labels, current_body_nodes, current_is_default, default_body, subject, index|:
+            while index < count |ctx, body, current_labels, current_body_nodes, current_is_default, default_body, subject, index|:
                 child: JsonValue = ast_child(body, index)
                 kind: sview = ast_kind(child)
                 if sview_eq(kind, sview("CaseStmt", 0, -1)):

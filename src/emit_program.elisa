@@ -144,109 +144,6 @@
         typed_invalidate_nonnull_facts(ctx, expression.lhs) if expression.kind == TypedExprKind.Sequence
         typed_invalidate_nonnull_facts(ctx, expression.rhs) if expression.kind == TypedExprKind.Sequence
 
-    def typed_append_switch_done_name(out: mutable darray[u8]&, ctx: TypedContext&) -> void:
-        append_view(out, sview("switch_done_", 0, -1))
-        append_i64(out, ctx.current_switch_done_index)
-
-    def typed_stmt_contains_switch_break(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if statement.kind == TypedStmtKind.SwitchBreak
-        # A break in a nested switch belongs to that nested switch, not to the
-        # switch whose arm contains it.
-        return false if statement.kind == TypedStmtKind.Switch
-        if statement.kind == TypedStmtKind.Block:
-            for offset in 0..<statement.children_count |ctx, statement|:
-                return true if typed_stmt_contains_switch_break(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
-        elif statement.kind == TypedStmtKind.If:
-            return true if typed_stmt_contains_switch_break(ctx, statement.aux)
-            return typed_stmt_contains_switch_break(ctx, statement.aux2)
-        elif statement.kind == TypedStmtKind.For:
-            return true if typed_stmt_contains_switch_break(ctx, statement.children_start)
-            return true if typed_stmt_contains_switch_break(ctx, statement.aux)
-            return typed_stmt_contains_switch_break(ctx, statement.aux2)
-        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
-            return typed_stmt_contains_switch_break(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
-        return false
-
-    def typed_stmt_needs_switch_done(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return false if statement.kind == TypedStmtKind.SwitchBreak or statement.kind == TypedStmtKind.Switch
-        if statement.kind == TypedStmtKind.Block:
-            for offset in 0..<statement.children_count |ctx, statement|:
-                child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
-                child: TypedStmt = typed_stmt_at(ctx, child_index)
-                # A direct break naturally ends the emitted match arm. The
-                # flag is only required when a break is nested in another
-                # statement and later arm code may still need suppressing.
-                continue if child.kind == TypedStmtKind.SwitchBreak
-                return true if typed_stmt_needs_switch_done(ctx, child_index)
-                break if typed_switch_stmt_terminates(ctx, child_index)
-            return false
-        return typed_stmt_contains_switch_break(ctx, index)
-
-    def typed_switch_needs_done(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return false if statement.kind != TypedStmtKind.Switch
-        for offset in 0..<statement.children_count |ctx, statement|:
-            switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-            return true if typed_stmt_needs_switch_done(ctx, switch_case.body)
-        return false
-
-    def typed_emit_switch_case_sequence(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64, guarded: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        return if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        if statement.kind == TypedStmtKind.Block:
-            if statement.children_count == 0:
-                if guarded:
-                    append_indent(out, level)
-                    append_view(out, sview("if not ", 0, -1))
-                    typed_append_switch_done_name(out, ctx)
-                    append_view(out, sview(":\n", 0, -1))
-                    append_indent(out, level + 1)
-                    append_view(out, sview("pass\n", 0, -1))
-                else:
-                    append_indent(out, level)
-                    append_view(out, sview("pass\n", 0, -1))
-                return
-            for offset in 0..<statement.children_count |out, ctx, statement, level, guarded|:
-                child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
-                child: TypedStmt = typed_stmt_at(ctx, child_index)
-                if child.kind == TypedStmtKind.SwitchBreak:
-                    typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if guarded
-                    break
-                typed_emit_switch_case_sequence(out, ctx, child_index, level, guarded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            return
-        if statement.kind == TypedStmtKind.SwitchBreak:
-            typed_emit_stmt(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if guarded
-            return
-        if guarded:
-            append_indent(out, level)
-            append_view(out, sview("if not ", 0, -1))
-            typed_append_switch_done_name(out, ctx)
-            append_view(out, sview(":\n", 0, -1))
-            typed_emit_stmt(out, ctx, index, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        else:
-            typed_emit_stmt(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    def typed_emit_switch_case_body(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        initial_output_size: i64 = out.count.i64()
-        typed_emit_switch_case_sequence(out, ctx, index, level, typed_stmt_needs_switch_done(ctx, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        if out.count.i64() == initial_output_size:
-            append_indent(out, level)
-            append_view(out, sview("pass\n", 0, -1))
-
-    def typed_stmt_directly_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        if statement.kind == TypedStmtKind.Declaration:
-            return false
-        if statement.kind == TypedStmtKind.For:
-            return false
-        return typed_expr_needs_unsafe(ctx, statement.expr)
-
     def typed_emit_stmt_body(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         statement: TypedStmt = typed_stmt_at(ctx, index)
         typed_emit_callback_guards(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.expr >= 0
@@ -373,9 +270,11 @@
                 append_view(out, sview(":\n", 0, -1))
                 loop_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
                 typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                # A C `for` increment runs after each body iteration, not after
+                # the loop. `continue` already carries its increment in the
+                # lowered body, so this handles the fall-through path.
+                typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.aux2 >= 0 and not typed_stmt_guarantees_exit(ctx, statement.aux)
                 typed_pop_nonnull_facts(ctx, loop_facts)
-                if statement.aux2 >= 0:
-                    typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             TypedStmtKind.Break:
                 append_indent(out, level)
                 append_view(out, sview("break\n", 0, -1))
@@ -404,14 +303,12 @@
                         append_view(out, sview("_:\n", 0, -1))
                         has_default <- true
                     else:
-                        append_i64(out, switch_case.constant_value) if switch_case.is_constant else typed_emit_expr(out, ctx, switch_case.value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                         group_end: mutable i64 = offset + 1
                         while group_end < statement.children_count |ctx, statement, switch_case, group_end|:
                             next_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + group_end).usize()]
                             break if next_case.is_default or next_case.body != switch_case.body
-                            append_view(out, sview(" | ", 0, -1))
-                            append_i64(out, next_case.constant_value) if next_case.is_constant else typed_emit_expr(out, ctx, next_case.value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                             group_end <- group_end + 1
+                        typed_emit_switch_case_pattern(out, ctx, statement, offset, group_end) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                         offset <- group_end - 1
                         append_view(out, sview(":\n", 0, -1))
                     typed_emit_switch_case_body(out, ctx, switch_case.body, level + 2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -498,9 +395,10 @@
         append_view(out, sview(") -> ", 0, -1))
         append_function_return_type(out, function.return_type)
         body_level: i64 = typed_emit_function_effects(out, ctx, function)
-        saved_name_aliases: darray[TypedNameAlias] = ctx.current_name_aliases
-        saved_nonnull_names: darray[sview] = ctx.current_nonnull_names
-        saved_nonnull_exprs: darray[i64] = ctx.current_nonnull_exprs
+        # These are function-local emission facts. Function bodies are emitted
+        # sequentially, so clearing the context-owned arrays is both sufficient
+        # and stage-1-safe; copying auto-region darray values into a longer-lived
+        # context field is rejected as an escaping borrow by the backend.
         ctx.current_name_aliases <- []
         ctx.current_nonnull_names <- []
         ctx.current_nonnull_exprs <- []
@@ -541,9 +439,9 @@
         ctx.current_function_body <- saved_function_body
         ctx.current_switch_done_name <- sview("", 0, 0)
         ctx.current_switch_done_index <- -1
-        ctx.current_name_aliases <- saved_name_aliases
-        ctx.current_nonnull_names <- saved_nonnull_names
-        ctx.current_nonnull_exprs <- saved_nonnull_exprs
+        ctx.current_name_aliases <- []
+        ctx.current_nonnull_names <- []
+        ctx.current_nonnull_exprs <- []
         if (function.has_goto or not typed_stmt_guarantees_exit(ctx, function.body)) and not sview_starts_with(c_function_return_type(function.return_type), sview("void", 0, -1)):
             append_indent(out, body_level)
             append_view(out, sview("return null\n", 0, -1)) if sview_find_byte(c_function_return_type(function.return_type), 42) >= 0 else append_view(out, sview("return 0\n", 0, -1))
@@ -570,7 +468,7 @@
                 append_view(out, sview("        trusted Unsafe.StaleRef:\n            ", 0, -1))
                 append_view(out, typed_global.name)
                 append_view(out, sview(" <- ", 0, -1))
-                typed_emit_expr(out, ctx, typed_global.initializer) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_emit_initializer_value(out, ctx, typed_global.initializer, typed_global.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 append_view(out, sview("\n", 0, -1))
         append_view(out, sview("\n", 0, -1))
 
@@ -603,6 +501,8 @@
         append_view(out, sview(" ", 0, -1))
         append_view(out, diagnostic.kind)
         append_view(out, sview(" at ", 0, -1))
+        append_view(out, diagnostic.source)
+        append_view(out, sview(":", 0, -1)) if diagnostic.source.len > 0
         append_i64(out, diagnostic.line)
         append_view(out, sview(":", 0, -1))
         append_i64(out, diagnostic.column)
@@ -613,7 +513,7 @@
         parsed: JsonParseResult = json_parse_checked(&perm_arena, bytes_view(ast_bytes))
         if parsed.code != JsonErrorCode.OK:
             diagnostics: mutable darray[TypedDiagnostic] = []
-            diagnostics.push(TypedDiagnostic{category: sview("AST", 0, -1), kind: sview("invalid-json", 0, -1), line: 0, column: parsed.pos})
+            diagnostics.push(TypedDiagnostic{category: sview("AST", 0, -1), kind: sview("invalid-json", 0, -1), source: sview(source, 0, -1), line: 0, column: parsed.pos})
             return TypedTranslation{output: output, diagnostics: diagnostics, failed: true}
         context: mutable TypedContext = TypedContext{exprs: [], expr_children: [], stmts: [], stmt_children: [], params: [], current_name_aliases: [], current_nonnull_names: [], current_nonnull_exprs: [], extern_params: [], globals: [], functions: [], user_function_names: [], externs: [], extern_globals: [], fields: [], records: [], enums: [], enum_consts: [], labels: [], switch_cases: [], decl_infos: [], break_scopes: [], switch_depth: 0, current_for_increment: -1, current_return_type: sview("", 0, 0), current_has_goto: false, current_emit_has_goto: false, current_structured_break_label: -1, current_emit_goto_name: sview("", 0, 0), current_switch_done_name: sview("", 0, 0), current_switch_done_index: -1, current_function_body: -1, mode: mode, source: source, root: JsonValue.Null, diagnostics: []}
         root: JsonValue = parsed.value
@@ -645,6 +545,7 @@
         if context.diagnostics.count == 0:
             append_view(&output, sview("# Generated by the Elisa C translator.\n\n", 0, -1))
             typed_emit_program(&output, &context, with_prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            output <- typed_format_output(output)
         return TypedTranslation{output: output, diagnostics: context.diagnostics, failed: context.diagnostics.count > 0}
 
     def translate_ast_mode(ast_bytes: darray[u8], source: cstr, with_prelude: bool) -> TypedTranslation can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:

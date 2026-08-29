@@ -1,0 +1,36 @@
+extend CTranslator:
+    # Formatting is deliberately a final, syntax-preserving pass. Emitters can
+    # focus on semantics while this pass gives every translation the same
+    # whitespace policy, including output assembled by the CFG backend.
+    def typed_format_output(source: darray[u8]) -> darray[u8]:
+        result: mutable darray[u8] = []
+        pending_spaces: mutable i64 = 0
+        pending_newlines: mutable i64 = 0
+        for index in 0..<source.count.i64() |source, result, pending_spaces, pending_newlines|:
+            byte: u8 = source[index.usize()]
+            if byte == 13:
+                continue
+            if byte == 10:
+                pending_newlines <- pending_newlines + 1
+                pending_spaces <- 0
+                continue
+            while pending_newlines > 0 |result, pending_newlines|:
+                result.push(10) if pending_newlines <= 2
+                pending_newlines <- pending_newlines - 1
+            if byte == 32 or byte == 9:
+                pending_spaces <- pending_spaces + 1
+                continue
+            while pending_spaces > 0 |result, pending_spaces|:
+                result.push(32)
+                pending_spaces <- pending_spaces - 1
+            result.push(byte)
+        while pending_newlines > 0 |result, pending_newlines|:
+            result.push(10) if pending_newlines <= 2
+            pending_newlines <- pending_newlines - 1
+        while result.count > 0 and result[result.count - 1] == 32 |result|:
+            _ = result.pop()
+        while result.count > 0 and result[result.count - 1] == 9 |result|:
+            _ = result.pop()
+        if result.count > 0 and result[result.count - 1] != 10:
+            result.push(10)
+        return result

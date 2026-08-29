@@ -1,0 +1,17 @@
+extend CTranslator:
+    # Clang stores sparse/filler elements of an array initializer in a separate
+    # `array_filler` field instead of `inner`. The filler is already expanded to
+    # the complete C array width, so exposing it through the same small accessor
+    # keeps aggregate lowering independent of the initializer spelling.
+    def ast_initializer_child_count(node: JsonValue) -> i64:
+        count: i64 = ast_child_count(node)
+        return count if count >= 0 and count > 0
+        filler_count: i64 = json_array_len(ast_field(node, sview("array_filler", 0, -1)))
+        # The first JSON element is Clang's `array_filler` marker; the
+        # remaining entries are the expanded initializer slots.
+        return filler_count - 1 if filler_count > 0 else filler_count
+
+    def ast_initializer_child(node: JsonValue, index: i64) -> JsonValue:
+        count: i64 = ast_child_count(node)
+        return ast_child(node, index) if count > 0
+        return ast_array_item(ast_field(node, sview("array_filler", 0, -1)), index + 1)

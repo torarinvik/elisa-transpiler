@@ -1,0 +1,23 @@
+extend CTranslator:
+    def typed_call_parameter_type(ctx: TypedContext&, callee: sview, position: i64) -> sview:
+        for index in 0..<ctx.functions.count |ctx, callee, position|:
+            function: TypedFunction = ctx.functions[index.usize()]
+            if sview_eq(function.name, callee) and position < function.params_count:
+                return ctx.params[(function.params_start + position).usize()].type_name
+        for index in 0..<ctx.externs.count |ctx, callee, position|:
+            external: TypedExtern = ctx.externs[index.usize()]
+            if (sview_eq(external.name, callee) or sview_eq(external.link_name, callee)) and position < external.params_count:
+                return ctx.extern_params[(external.params_start + position).usize()].type_name
+        return sview("", 0, 0)
+
+    def typed_call_parameter_is_mutable(ctx: TypedContext&, callee: sview, position: i64) -> bool:
+        for index in 0..<ctx.functions.count |ctx, callee, position|:
+            function: TypedFunction = ctx.functions[index.usize()]
+            if sview_eq(function.name, callee) and position < function.params_count:
+                parameter: TypedParam = ctx.params[(function.params_start + position).usize()]
+                return typed_parameter_is_mutable(ctx, function, parameter)
+        for index in 0..<ctx.externs.count |ctx, callee, position|:
+            external: TypedExtern = ctx.externs[index.usize()]
+            if (sview_eq(external.name, callee) or sview_eq(external.link_name, callee)) and position < external.params_count:
+                return ctx.extern_params[(external.params_start + position).usize()].is_mutable
+        return false

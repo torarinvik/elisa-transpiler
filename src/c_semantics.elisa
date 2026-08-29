@@ -1,12 +1,19 @@
 extend CTranslator:
     def c_type_is_enum(qual_type: sview) -> bool:
+        return false if c_type_pointer_count(qual_type) > 0 or sview_find_byte(qual_type, 91) >= 0 or c_type_is_function(qual_type)
         return sview_starts_with(c_type_without_qualifiers(qual_type), sview("enum ", 0, -1))
 
     def c_type_is_integer(qual_type: sview) -> bool:
+        # `c_type_named_base` intentionally removes pointer syntax for ABI
+        # comparisons. Do the category check before using that normalized base;
+        # otherwise `unsigned char *` is misclassified as an integer and pointer
+        # comparisons acquire bogus `.i32()`/`.u32()` conversions.
+        return false if c_type_pointer_count(qual_type) > 0 or sview_find_byte(qual_type, 91) >= 0 or c_type_is_function(qual_type)
         base: sview = c_type_named_base(qual_type)
         return sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) or sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1))
 
     def c_type_is_unsigned_integer(qual_type: sview) -> bool:
+        return false if not c_type_is_integer(qual_type)
         base: sview = c_type_named_base(qual_type)
         return sview_starts_with(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("size_t", 0, -1))
 

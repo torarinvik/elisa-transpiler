@@ -47,7 +47,15 @@ extend CTranslator:
         return false if index < 0 or index >= ctx.exprs.count.i64()
         expression: TypedExpr = typed_expr_at(ctx, index)
         return true if expression.kind == TypedExprKind.Null
-        return expression.lhs >= 0 and typed_expr_is_null_value(ctx, expression.lhs) if expression.kind == TypedExprKind.Cast
+        # Clang commonly lowers the C `NULL` macro as a zero integer wrapped in
+        # one or more pointer casts. Treat that canonical null pointer constant
+        # as null all the way through the cast chain; otherwise the generated
+        # Elisa compares a reference-shaped value such as `(0).i32()`.
+        if expression.kind == TypedExprKind.Cast:
+            constant: mutable i64 = 0
+            if (sview_find_byte(expression.type_name, 42) >= 0 or c_type_is_function_pointer(expression.type_name)) and typed_eval_integer_constant(ctx, index, constant) and constant == 0:
+                return true
+            return expression.lhs >= 0 and typed_expr_is_null_value(ctx, expression.lhs)
         return false
 
     def typed_null_guard_name(ctx: TypedContext&, index: i64, wants_nonnull: bool) -> sview:
@@ -95,7 +103,7 @@ extend CTranslator:
         # that representation directly avoids a non-null assertion helper on
         # every side of ordinary C pointer equality and ordering expressions.
         expression: TypedExpr = typed_expr_at(ctx, index)
-        is_null: bool = expression.kind == TypedExprKind.Null or (expression.kind == TypedExprKind.Cast and expression.lhs >= 0 and typed_expr_at(ctx, expression.lhs).kind == TypedExprKind.Null)
+        is_null: bool = typed_expr_is_null_value(ctx, index)
         if is_null:
             append_view(out, sview("0", 0, -1))
         else:
@@ -106,6 +114,9 @@ extend CTranslator:
         expression: TypedExpr = typed_expr_at(ctx, index)
         if c_type_is_function_pointer(target_type):
             typed_emit_function_pointer_storage_value(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
+        if c_type_is_array(target_type) and expression.kind == TypedExprKind.Aggregate and expression.args_count == 0:
+            append_view(out, sview("zeroed", 0, -1))
             return
         element_type: sview = c_type_without_qualifiers(string_view_prefix(target_type, sview_find_byte(target_type, 91))) if c_type_is_array(target_type) else sview("", 0, 0)
         if expression.kind == TypedExprKind.String and c_type_is_array(target_type) and (sview_starts_with(element_type, sview("char", 0, -1)) or sview_starts_with(element_type, sview("unsigned char", 0, -1))):
@@ -208,7 +219,10 @@ extend CTranslator:
         # The local is important: a cast expression itself is not assignable in
         # Elisa, while a mutable view is.
         append_indent(out, level)
+        root_name: sview = typed_expr_root_name(ctx, expression.lhs)
         append_view(out, sview("pointer_slot_", 0, -1))
+        append_view(out, root_name) if root_name.len > 0 else append_view(out, sview("value", 0, -1))
+        append_view(out, sview("_", 0, -1))
         append_i64(out, index)
         append_view(out, sview(": mutable void&? = ", 0, -1))
         if c_type_pointer_optional(typed_expr_at(ctx, expression.lhs).type_name):
@@ -222,6 +236,8 @@ extend CTranslator:
         append_view(out, sview("\n", 0, -1))
         append_indent(out, level)
         append_view(out, sview("pointer_slot_", 0, -1))
+        append_view(out, root_name) if root_name.len > 0 else append_view(out, sview("value", 0, -1))
+        append_view(out, sview("_", 0, -1))
         append_i64(out, index)
 
     def typed_emit_nested_pointer_slot_value(out: mutable darray[u8]&, ctx: TypedContext&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
@@ -245,7 +261,14 @@ extend CTranslator:
             # enough context to prove a one-level cast is redundant.
             argument_base: sview = c_type_named_base(argument_type)
             target_base: sview = c_type_named_base(target_type)
-            return false if not sview_eq(argument_base, target_base)
+            # Clang exposes `char *` and `unsigned char *` as distinct C
+            # types, while this translator intentionally maps both to Elisa's
+            # byte-reference representation. Permit that one-level ABI
+            # equivalence here so external calls do not acquire needless casts;
+            # nested pointers remain exact because their slot layout and aliasing
+            # semantics differ.
+            same_abi_byte_shape: bool = c_type_pointer_count(argument_type) == 1 and c_type_pointer_count(target_type) == 1 and sview_eq(c_type_abi_base(argument_type), c_type_abi_base(target_type))
+            return false if not sview_eq(argument_base, target_base) and not same_abi_byte_shape
             return c_type_is_const_pointer(target_type) or not c_type_is_const_pointer(argument_type)
         return sview_eq(c_type_without_qualifiers(argument_type), c_type_without_qualifiers(target_type))
 
@@ -316,6 +339,15 @@ extend CTranslator:
 
     def typed_emit_expr(out: mutable darray[u8]&, ctx: TypedContext&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression: TypedExpr = typed_expr_at(ctx, index)
+        # Fold pure integer expressions at the final emission boundary. This
+        # preserves the typed IR used by analysis while removing C-only
+        # constant-expression scaffolding from generated Elisa. Pointer casts
+        # are excluded by the result-type check because their numeric spelling
+        # may represent an address rather than an integer value.
+        folded: mutable i64 = 0
+        if (expression.kind == TypedExprKind.Binary or expression.kind == TypedExprKind.Unary or expression.kind == TypedExprKind.Cast) and (c_type_is_integer(expression.type_name) or c_type_is_enum(expression.type_name)) and typed_eval_integer_constant(ctx, index, folded):
+            append_view(out, sview("true", 0, -1)) if typed_expr_is_boolean(ctx, index) else append_i64(out, folded)
+            return
         match expression.kind:
             TypedExprKind.Integer:
                 append_view(out, expression.text)
@@ -443,7 +475,7 @@ extend CTranslator:
                 append_view(out, sview(".", 0, -1))
                 append_view(out, expression.text)
             TypedExprKind.Cast:
-                if typed_expr_at(ctx, expression.lhs).kind == TypedExprKind.Null:
+                if typed_expr_is_null_value(ctx, expression.lhs):
                     append_view(out, sview("null", 0, -1))
                 elif c_type_is_array(typed_expr_at(ctx, expression.lhs).type_name):
                     append_view(out, sview("(&(", 0, -1))
@@ -454,6 +486,11 @@ extend CTranslator:
                         append_view(out, sview("mutable ", 0, -1)) if not c_type_is_const_pointer(expression.type_name)
                         append_c_type_contextual(out, ctx, expression.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                         append_view(out, sview("]", 0, -1))
+                elif c_type_is_function(typed_expr_at(ctx, expression.lhs).type_name) and c_type_is_function_pointer(expression.type_name) and typed_direct_function_matches_target(ctx, expression.lhs, expression.type_name):
+                    # Clang's FunctionToPointerDecay is implicit in C. Elisa
+                    # function names are already first-class values, so retain
+                    # the name and avoid manufacturing a same-signature cast.
+                    typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 elif c_type_call_compatible(typed_expr_at(ctx, expression.lhs).type_name, expression.type_name) or (c_type_pointer_count(typed_expr_at(ctx, expression.lhs).type_name) == c_type_pointer_count(expression.type_name) and sview_eq(c_type_abi_base(typed_expr_at(ctx, expression.lhs).type_name), c_type_abi_base(expression.type_name))):
                     typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 else:
@@ -469,6 +506,9 @@ extend CTranslator:
                     append_view(out, sview("]", 0, -1))
             TypedExprKind.Aggregate:
                 if c_type_is_array(expression.type_name):
+                    if expression.args_count == 0:
+                        append_view(out, sview("zeroed", 0, -1))
+                        return
                     append_view(out, sview("[", 0, -1))
                     element_type: sview = string_view_prefix(expression.type_name, sview_find_byte(expression.type_name, 91))
                     if expression.args_count > 0:
@@ -550,26 +590,3 @@ extend CTranslator:
                         append_view(out, sview("1", 0, -1))
             _:
                 append_view(out, sview("<invalid-ir>", 0, -1))
-
-    def typed_call_parameter_type(ctx: TypedContext&, callee: sview, position: i64) -> sview:
-        for index in 0..<ctx.functions.count |ctx, callee, position|:
-            function: TypedFunction = ctx.functions[index.usize()]
-            if sview_eq(function.name, callee) and position < function.params_count:
-                return ctx.params[(function.params_start + position).usize()].type_name
-        for index in 0..<ctx.externs.count |ctx, callee, position|:
-            external: TypedExtern = ctx.externs[index.usize()]
-            if (sview_eq(external.name, callee) or sview_eq(external.link_name, callee)) and position < external.params_count:
-                return ctx.extern_params[(external.params_start + position).usize()].type_name
-        return sview("", 0, 0)
-
-    def typed_call_parameter_is_mutable(ctx: TypedContext&, callee: sview, position: i64) -> bool:
-        for index in 0..<ctx.functions.count |ctx, callee, position|:
-            function: TypedFunction = ctx.functions[index.usize()]
-            if sview_eq(function.name, callee) and position < function.params_count:
-                parameter: TypedParam = ctx.params[(function.params_start + position).usize()]
-                return typed_parameter_is_mutable(ctx, function, parameter)
-        for index in 0..<ctx.externs.count |ctx, callee, position|:
-            external: TypedExtern = ctx.externs[index.usize()]
-            if (sview_eq(external.name, callee) or sview_eq(external.link_name, callee)) and position < external.params_count:
-                return ctx.extern_params[(external.params_start + position).usize()].is_mutable
-        return false
