@@ -2,8 +2,9 @@
 
 Snapshot taken 2026-09-29 for roadmap item B01. This is a preservation
 inventory, not a clean baseline: the translator checkout had accumulated
-uncommitted work before this snapshot. No files were reset, removed, staged or
-committed as part of the inventory.
+uncommitted work before this snapshot. No pre-existing files were reset or
+removed. After capturing the snapshot, only this new inventory document was
+staged and committed; all other dirty paths remained untouched.
 
 ## Translator checkout
 
