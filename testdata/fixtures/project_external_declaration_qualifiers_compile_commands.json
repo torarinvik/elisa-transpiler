@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_external_declaration_qualifiers/const_pointee.c","command":"clang -std=c11 -c testdata/fixtures/project_external_declaration_qualifiers/const_pointee.c"},
+  {"directory":".","file":"testdata/fixtures/project_external_declaration_qualifiers/mutable_pointee.c","command":"clang -std=c11 -c testdata/fixtures/project_external_declaration_qualifiers/mutable_pointee.c"}
+]

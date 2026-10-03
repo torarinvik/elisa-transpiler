@@ -1,14 +1,98 @@
 extend CTranslator:
+    def typed_emit_increment_helper[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, type_key: sview, mode: i64) -> void:
+        append_view(out, sview("def ", 0, -1))
+        typed_increment_helper_name(out, ctx, type_key, mode)
+        append_view(out, sview("(value: mutable ", 0, -1))
+        append_view(out, sview("u8", 0, -1)) if sview_eq(type_key, sview("bool", 0, -1)) else append_view(out, type_key)
+        append_view(out, sview("&) -> ", 0, -1))
+        append_view(out, type_key)
+        append_view(out, sview(":\n", 0, -1))
+        if mode == 1 or mode == 3:
+            if sview_eq(type_key, sview("bool", 0, -1)):
+                append_view(out, sview("    old: bool = value[0] != 0\n", 0, -1))
+            else:
+                append_view(out, sview("    old: ", 0, -1))
+                append_view(out, type_key)
+                append_view(out, sview(" = value[0]\n", 0, -1))
+        if sview_eq(type_key, sview("bool", 0, -1)):
+            if mode == 1 or mode == 2:
+                append_view(out, sview("    value[0] <- 1\n", 0, -1))
+            else:
+                append_view(out, sview("    value[0] <- 1 if value[0] == 0 else 0\n", 0, -1))
+        else:
+            append_view(out, sview("    value[0] += 1\n", 0, -1)) if mode == 1 or mode == 2 else append_view(out, sview("    value[0] -= 1\n", 0, -1))
+        if mode == 1 or mode == 3:
+            append_view(out, sview("    return old\n\n", 0, -1))
+        elif sview_eq(type_key, sview("bool", 0, -1)):
+            append_view(out, sview("    return value[0] != 0\n\n", 0, -1))
+        else:
+            append_view(out, sview("    return value[0]\n\n", 0, -1))
+    def typed_emit_increment_helpers[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, mask: i64) -> void:
+        return if mask == 0
+        for type_id in 0..<13 |out, ctx, mask|:
+            type_key: sview = typed_increment_type_name(type_id)
+            for mode in 1..<5 |out, ctx, mask, type_id, type_key|:
+                typed_emit_increment_helper(out, ctx, type_key, mode) if typed_increment_helper_is_used(mask, type_id, mode)
+    def typed_emit_assignment_value_helper_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&) -> void:
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        append_view(out, sview("__elisa_transpiler_assign_value_", 0, -1))
+        append_i64(out, hash.i64())
+    def typed_emit_assignment_value_helper[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&) -> void:
+        append_view(out, sview("def ", 0, -1))
+        typed_emit_assignment_value_helper_name(out, ctx)
+        append_view(out, sview("[T](place: mutable T&, value: T) -> T:\n", 0, -1))
+        append_view(out, sview("    place[0] <- value\n", 0, -1))
+        append_view(out, sview("    return value\n\n", 0, -1))
+    def typed_emit_compound_assignment_value_helper[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        assignment: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
+        update: TypedExpr[r] = typed_expr_at(ctx, assignment.rhs)
+        target_type: sview = typed_expr_at(ctx, assignment.lhs).type_name
+        value_type: sview = typed_expr_at(ctx, update.rhs).type_name
+        operator_id: i64 = expression.value - 6
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        source_hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        target_hash: u64 = hash_sview(target_type) & 0x7fffffffffffffff
+        value_hash: u64 = hash_sview(value_type) & 0x7fffffffffffffff
+        append_view(out, sview("def __elisa_transpiler_compound_", 0, -1))
+        append_view(out, typed_compound_assignment_value_name(operator_id))
+        append_view(out, sview("_", 0, -1))
+        append_i64(out, source_hash.i64())
+        append_view(out, sview("_", 0, -1))
+        append_i64(out, target_hash.i64())
+        append_view(out, sview("_", 0, -1))
+        append_i64(out, value_hash.i64())
+        append_view(out, sview("(place: mutable ", 0, -1))
+        append_c_type_contextual(out, ctx, target_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview("&, value: ", 0, -1))
+        append_c_type_contextual(out, ctx, value_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview(") -> ", 0, -1))
+        append_c_type_contextual(out, ctx, target_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview(":\n    place[0] ", 0, -1))
+        append_view(out, typed_compound_assignment_value_operator(operator_id))
+        append_view(out, sview(" ", 0, -1))
+        if typed_compound_assignment_value_requires_conversion(ctx, update.rhs, target_type):
+            append_view(out, sview("(value).", 0, -1))
+            append_view(out, clang_target_type_abi_base(ctx.target_abi, target_type))
+            append_view(out, sview("()", 0, -1))
+        else:
+            append_view(out, sview("value", 0, -1))
+        append_view(out, sview("\n    return place[0]\n\n", 0, -1))
+    def typed_emit_compound_assignment_value_helpers[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        for index in 0..<ctx.exprs.count.i64() |out, ctx|:
+            typed_emit_compound_assignment_value_helper(out, ctx, index) if typed_compound_assignment_value_helper_is_first(ctx, index)
+
     def typed_emit_runtime_prelude(out: mutable darray[u8]&, needs_nonnull: bool, needs_readonly_nonnull: bool, needs_varargs: bool) -> void:
         if needs_nonnull:
             append_view(out, sview("def elisa_nonnull[T](value: mutable T&?) -> mutable T&:\n", 0, -1))
             append_view(out, sview("    if value == null:\n", 0, -1))
-            append_view(out, sview("        return zeroed\n", 0, -1))
+            append_view(out, sview("        panic(\"C null pointer assertion failed\")\n", 0, -1))
             append_view(out, sview("    return value\n\n", 0, -1))
-            if needs_readonly_nonnull:
-                append_view(out, sview("def elisa_nonnull_readonly[T](value: T&?) -> T&:\n", 0, -1))
-                append_view(out, sview("    if value == null:\n", 0, -1))
-                append_view(out, sview("        return zeroed\n", 0, -1))
-                append_view(out, sview("    return value\n\n", 0, -1))
+        if needs_readonly_nonnull:
+            append_view(out, sview("def elisa_nonnull_readonly[T](value: T&?) -> T&:\n", 0, -1))
+            append_view(out, sview("    if value == null:\n", 0, -1))
+            append_view(out, sview("        panic(\"C null pointer assertion failed\")\n", 0, -1))
+            append_view(out, sview("    return value\n\n", 0, -1))
         if needs_varargs:
-            append_view(out, sview("extern va_list\n\n@intrinsic(\"llvm.va_start\")\nextern llvm_va_start(storage: mutable void&) -> void\n\n@intrinsic(\"llvm.va_end\")\nextern llvm_va_end(storage: mutable void&) -> void\n\n", 0, -1))
+            append_view(out, sview("extern va_list\n\nextern va_arg[T](storage: mutable void&) -> T\n\n@intrinsic(\"llvm.va_start\")\nextern llvm_va_start(storage: mutable void&) -> void\n\nextern llvm_va_copy(destination: mutable void&, source: mutable void&) -> void\n\n@intrinsic(\"llvm.va_end\")\nextern llvm_va_end(storage: mutable void&) -> void\n\n", 0, -1))

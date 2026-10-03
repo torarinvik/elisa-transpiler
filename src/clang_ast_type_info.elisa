@@ -1,0 +1,24 @@
+# Keep Clang's source spelling, desugared ABI spelling and typedef identity
+# together. Consumers can choose the appropriate view without throwing away
+# the other facts at the AST boundary.
+extend CTranslator:
+    struct ClangTypeView[@r]:
+        spelling: sview @r
+        desugared_spelling: sview @r
+        type_alias_decl_id: sview @r
+
+    def clang_type_view_field[@r](node: JsonValueHandle[r], key: sview) -> JsonValueHandle[r]:
+        return try json_handle_get(node, key) else json_handle_null(node)
+
+    def clang_type_view_string[@r](node: JsonValueHandle[r], key: sview) -> sview @r:
+        return try json_handle_as_string(clang_type_view_field(node, key)) else sview("", 0, 0)
+
+    def clang_type_view_from_type_node[@r](type_node: JsonValueHandle[r]) -> ClangTypeView[r]:
+        return ClangTypeView[r]{
+            spelling: clang_type_view_string(type_node, sview("qualType", 0, -1)),
+            desugared_spelling: clang_type_view_string(type_node, sview("desugaredQualType", 0, -1)),
+            type_alias_decl_id: clang_type_view_string(type_node, sview("typeAliasDeclId", 0, -1))
+        }
+
+    def clang_type_view_of_decl[@r](declaration: JsonValueHandle[r]) -> ClangTypeView[r]:
+        return clang_type_view_from_type_node(clang_type_view_field(declaration, sview("type", 0, -1)))

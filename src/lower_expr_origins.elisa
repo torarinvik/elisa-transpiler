@@ -1,0 +1,15 @@
+extend CTranslator:
+    def typed_set_expr_source_origin[@r](ctx: mutable TypedContext[r]&, index: i64, node: JsonValueHandle[r], reason: sview) -> void:
+        return if not ctx.source_mapping_enabled or index < 0 or index >= ctx.expr_source_origins.count.i64()
+        origin: TypedIRSourceOrigin[r] = ctx.expr_source_origins[index.usize()]
+        ctx.expr_source_origins[index.usize()] <- typed_ir_source_origin(node, reason) if json_handle_is_null(origin.node)
+
+    def typed_lower_expr[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        start: i64 = ctx.exprs.count.i64()
+        result: i64 = typed_lower_expr_impl(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return result if not ctx.source_mapping_enabled
+        end: i64 = ctx.exprs.count.i64()
+        for index in start..<end |ctx, node, start, end|:
+            reason: sview = sview("synthesized while lowering parent Clang expression", 0, -1) if index != result else sview("", 0, 0)
+            typed_set_expr_source_origin(ctx, index, node, reason)
+        return result

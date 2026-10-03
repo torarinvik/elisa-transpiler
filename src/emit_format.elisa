@@ -68,7 +68,7 @@ extend CTranslator:
                 for _indent in 0..<(line_indent + 1) |result, line_indent|:
                     append_view(result, sview("    ", 0, -1))
                     line_width <- line_width + 4
-            elif line_width > 120 and (paren_depth > 0 or bracket_depth > 0 or brace_depth > 0) and ((byte == 100 and index >= 3 and source[(index - 1).usize()] == 110 and source[(index - 2).usize()] == 97 and not typed_format_is_identifier_byte(source[(index - 3).usize()])) or (byte == 114 and index >= 2 and source[(index - 1).usize()] == 111 and not typed_format_is_identifier_byte(source[(index - 2).usize()]))):
+            elif line_width > 120 and (paren_depth > 0 or bracket_depth > 0 or brace_depth > 0) and ((byte == 100 and index >= 3 and source[(index - 1).usize()] == 110 and source[(index - 2).usize()] == 97 and not typed_format_is_identifier_byte(source[(index - 3).usize()]) and (index + 1 >= source.count.i64() or not typed_format_is_identifier_byte(source[(index + 1).usize()]))) or (byte == 114 and index >= 2 and source[(index - 1).usize()] == 111 and not typed_format_is_identifier_byte(source[(index - 2).usize()]) and (index + 1 >= source.count.i64() or not typed_format_is_identifier_byte(source[(index + 1).usize()])))):
                 result.push(10)
                 line_width <- 0
                 for _indent in 0..<(line_indent + 1) |result, line_indent|:

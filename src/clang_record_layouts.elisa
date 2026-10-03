@@ -1,0 +1,201 @@
+extend CTranslator:
+    def typed_record_layout_is_unsupported_node[@r](node: JsonValueHandle[r]) -> bool:
+        return true if ast_has_child_kind(node, sview("PackedAttr", 0, -1)) or ast_has_child_kind(node, sview("MaxFieldAlignmentAttr", 0, -1)) or ast_has_child_kind(node, sview("AlignedAttr", 0, -1)) or ast_has_child_kind(node, sview("MSStructAttr", 0, -1)) or ast_has_child_kind(node, sview("RandomizeLayoutAttr", 0, -1)) or ast_has_child_kind(node, sview("CXXBaseSpecifier", 0, -1))
+        if sview_eq(ast_kind(node), sview("CXXRecordDecl", 0, -1)):
+            count: i64 = ast_child_count(node)
+            if count >= 0:
+                for index in 0..<count |node|:
+                    member: JsonValueHandle[r] = ast_child(node, index)
+                    member_kind: sview = ast_kind(member)
+                    is_method: bool = sview_eq(member_kind, sview("CXXMethodDecl", 0, -1)) or sview_eq(member_kind, sview("CXXConstructorDecl", 0, -1)) or sview_eq(member_kind, sview("CXXDestructorDecl", 0, -1))
+                    return true if is_method and not ast_bool(ast_field(member, sview("isImplicit", 0, -1)))
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node|:
+                field: JsonValueHandle[r] = ast_child(node, index)
+                if sview_eq(ast_kind(field), sview("FieldDecl", 0, -1)):
+                    return true if ast_bool(ast_field(field, sview("isBitfield", 0, -1))) or ast_has_child_kind(field, sview("PackedAttr", 0, -1)) or ast_has_child_kind(field, sview("AlignedAttr", 0, -1)) or ast_has_child_kind(field, sview("NoUniqueAddressAttr", 0, -1))
+        return false
+
+    def typed_mark_record_layout_unsupported[@r](ctx: mutable TypedContext[r]&, record_name: sview) -> void can[Memory.Allocate]:
+        return if record_name.len == 0
+        for unsupported_name in ctx.layout_unsupported_record_names |record_name|:
+            return if unsupported_name == record_name
+        ctx.layout_unsupported_record_names.push(record_name)
+
+    def typed_record_layout_is_unsupported[@r](ctx: TypedContext[r]&, record_name: sview) -> bool:
+        return true if typed_record_name_is_packed(ctx, record_name)
+        for unsupported_name in ctx.layout_unsupported_record_names |record_name|:
+            return true if unsupported_name == record_name
+        return false
+
+    def typed_record_validate_array_field[@r](ctx: mutable TypedContext[r]&, field: JsonValueHandle[r], field_type: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if c_type_is_incomplete_array(field_type):
+            typed_record_unsupported(ctx, field, sview("flexible array member layout/lifetime", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif c_type_has_zero_array_bound(field_type):
+            typed_record_unsupported(ctx, field, sview("zero-length array member layout/lifetime", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def clang_record_layout_decimal(value: sview, result: mutable i64&) -> bool:
+        return false if value.len == 0
+        parsed: mutable i64 = 0
+        for index in 0..<value.len |value, parsed|:
+            digit: i64 = string_view_index(value, index) - 48
+            return false if digit < 0 or digit > 9 or parsed > (9223372036854775807 - digit) / 10
+            parsed <- parsed * 10 + digit
+        result[0] <- parsed
+        return true
+
+    def clang_record_layout_offsets(value: sview, offsets: mutable darray[i64]&) -> bool can[Memory.Allocate]:
+        open_bracket: i64 = sview_find_byte(value, 91)
+        close_bracket: i64 = c_find_last_byte(value, 93)
+        return false if open_bracket < 0 or close_bracket < open_bracket
+        cursor: mutable i64 = open_bracket + 1
+        while cursor < close_bracket |value, cursor, offsets|:
+            while cursor < close_bracket and (string_view_index(value, cursor) == 32 or string_view_index(value, cursor) == 9 or string_view_index(value, cursor) == 44):
+                cursor <- cursor + 1
+            break if cursor >= close_bracket
+            start: i64 = cursor
+            while cursor < close_bracket and string_view_index(value, cursor) >= 48 and string_view_index(value, cursor) <= 57:
+                cursor <- cursor + 1
+            parsed: mutable i64 = 0
+            return false if not clang_record_layout_decimal(string_view_slice(value, start, cursor), &parsed)
+            offsets.push(parsed)
+            while cursor < close_bracket and (string_view_index(value, cursor) == 32 or string_view_index(value, cursor) == 9):
+                cursor <- cursor + 1
+            if cursor < close_bracket:
+                return false if string_view_index(value, cursor) != 44
+                cursor <- cursor + 1
+        return true
+
+    def typed_add_clang_record_layout_for_index[@r](ctx: mutable TypedContext[r]&, record_index: i64, size_bytes: i64, alignment_bytes: i64, converted_offsets: darray[i64]) -> void can[Memory.Allocate]:
+        return if record_index < 0 or record_index >= ctx.records.count.i64()
+        record: TypedRecord[r] = ctx.records[record_index.usize()]
+        return if record.fields_count != converted_offsets.count.i64() or typed_record_layout_is_unsupported(ctx, record.name)
+        for index in 0..<ctx.record_layouts.count |ctx, record_index, size_bytes, alignment_bytes, converted_offsets|:
+            existing: TypedRecordLayout = ctx.record_layouts[index]
+            continue if existing.record_index != record_index
+            consistent: mutable bool = existing.size_bytes == size_bytes and existing.alignment_bytes == alignment_bytes and existing.field_offsets_count == converted_offsets.count.i64()
+            if consistent:
+                for offset in 0..<converted_offsets.count.i64() |ctx, existing, converted_offsets, consistent|:
+                    consistent <- false if ctx.record_layout_field_offsets[(existing.field_offsets_start + offset).usize()] != converted_offsets[offset.usize()]
+            if not consistent:
+                ctx.record_layouts[index] <- TypedRecordLayout{record_index: record_index, size_bytes: -1, alignment_bytes: -1, field_offsets_start: -1, field_offsets_count: 0}
+            return
+        offsets_start: i64 = ctx.record_layout_field_offsets.count.i64()
+        for offset in converted_offsets |ctx|:
+            ctx.record_layout_field_offsets.push(offset)
+        ctx.record_layouts.push(TypedRecordLayout{record_index: record_index, size_bytes: size_bytes, alignment_bytes: alignment_bytes, field_offsets_start: offsets_start, field_offsets_count: converted_offsets.count.i64()})
+
+    def typed_add_clang_record_layout[@r](ctx: mutable TypedContext[r]&, type_name: sview, size_bits: i64, alignment_bits: i64, field_offsets_bits: darray[i64]) -> void can[Memory.Allocate]:
+        return if sview_starts_with(type_name, sview("union ", 0, -1))
+        bits_per_byte: i64 = ctx.target_abi.char_bits
+        return if bits_per_byte != 8 or size_bits <= 0 or alignment_bits <= 0 or size_bits % bits_per_byte != 0 or alignment_bits % bits_per_byte != 0
+        record_index: i64 = typed_record_layout_unique_index(ctx, type_name)
+        return if record_index < 0 or record_index >= ctx.records.count.i64()
+        return if ctx.records[record_index.usize()].is_union
+        converted_offsets: mutable darray[i64] = []
+        for offset_bits in field_offsets_bits |converted_offsets, size_bits, bits_per_byte|:
+            return if offset_bits < 0 or offset_bits >= size_bits or offset_bits % bits_per_byte != 0
+            converted_offsets.push(offset_bits / bits_per_byte)
+        size_bytes: i64 = size_bits / bits_per_byte
+        alignment_bytes: i64 = alignment_bits / bits_per_byte
+        record: TypedRecord[r] = ctx.records[record_index.usize()]
+        if record.decl_id.len == 0:
+            typed_add_clang_record_layout_for_index(ctx, record_index, size_bytes, alignment_bytes, converted_offsets) can Memory.Allocate
+            return
+        for index in 0..<ctx.records.count |ctx, record, size_bytes, alignment_bytes, converted_offsets|:
+            candidate: TypedRecord[r] = ctx.records[index]
+            if sview_eq(candidate.decl_id, record.decl_id):
+                typed_add_clang_record_layout_for_index(ctx, index.i64(), size_bytes, alignment_bytes, converted_offsets) can Memory.Allocate
+
+    def typed_parse_clang_record_layouts[@r](ctx: mutable TypedContext[r]&, dump: sview) -> void can[Memory.Allocate]:
+        type_name: mutable sview = sview("", 0, 0)
+        size_bits: mutable i64 = -1
+        alignment_bits: mutable i64 = -1
+        field_offsets: mutable darray[i64] = []
+        field_offsets_seen: mutable bool = false
+        layout_valid: mutable bool = true
+        line_start: mutable i64 = 0
+        while line_start < dump.len |ctx, dump, type_name, size_bits, alignment_bits, field_offsets, field_offsets_seen, layout_valid, line_start|:
+            line_end: mutable i64 = line_start
+            while line_end < dump.len |dump, line_end|:
+                break if string_view_index(dump, line_end) == 10
+                line_end <- line_end + 1
+            line: sview = c_trim_spaces(string_view_slice(dump, line_start, line_end))
+            if sview_starts_with(line, sview("Type: ", 0, -1)):
+                if type_name.len > 0 and size_bits > 0 and alignment_bits > 0 and field_offsets_seen and layout_valid:
+                    typed_add_clang_record_layout(ctx, type_name, size_bits, alignment_bits, field_offsets) can Memory.Allocate
+                type_name <- c_trim_spaces(string_view_suffix(line, 6))
+                size_bits <- -1
+                alignment_bits <- -1
+                field_offsets.count <- 0.usize()
+                field_offsets_seen <- false
+                layout_valid <- true
+            elif sview_starts_with(line, sview("Size:", 0, -1)):
+                parsed_size: mutable i64 = -1
+                size_value: sview = c_trim_spaces(string_view_suffix(line, 5))
+                size_bits <- parsed_size if clang_record_layout_decimal(size_value, &parsed_size) else -1
+            elif sview_starts_with(line, sview("Alignment:", 0, -1)):
+                parsed_alignment: mutable i64 = -1
+                alignment_value: sview = c_trim_spaces(string_view_suffix(line, 10))
+                alignment_bits <- parsed_alignment if clang_record_layout_decimal(alignment_value, &parsed_alignment) else -1
+            elif sview_starts_with(line, sview("FieldOffsets:", 0, -1)):
+                field_offsets.count <- 0.usize()
+                field_offsets_seen <- true
+                layout_valid <- clang_record_layout_offsets(line, &field_offsets)
+            line_start <- line_end + 1
+        if type_name.len > 0 and size_bits > 0 and alignment_bits > 0 and field_offsets_seen and layout_valid:
+            typed_add_clang_record_layout(ctx, type_name, size_bits, alignment_bits, field_offsets) can Memory.Allocate
+
+    def typed_record_layout_size_bytes[@r](ctx: TypedContext[r]&, record_type: sview) -> i64:
+        record_index: i64 = typed_record_index(ctx, record_type)
+        return -1 if record_index < 0 or record_index >= ctx.records.count.i64()
+        record: TypedRecord[r] = ctx.records[record_index.usize()]
+        return -1 if typed_record_layout_is_unsupported(ctx, record.name)
+        for layout in ctx.record_layouts |record_index|:
+            return layout.size_bytes if layout.record_index == record_index
+        return -1
+
+    def typed_record_layout_alignment_bytes[@r](ctx: TypedContext[r]&, record_type: sview) -> i64:
+        record_index: i64 = typed_record_index(ctx, record_type)
+        return -1 if record_index < 0 or record_index >= ctx.records.count.i64()
+        record: TypedRecord[r] = ctx.records[record_index.usize()]
+        return -1 if typed_record_layout_is_unsupported(ctx, record.name)
+        for layout in ctx.record_layouts |record_index|:
+            return layout.alignment_bytes if layout.record_index == record_index
+        return -1
+
+    def typed_record_layout_query_index[@r](ctx: TypedContext[r]&, type_name: sview) -> i64:
+        return -1 if c_type_pointer_count(type_name) > 0 or c_type_is_function(type_name)
+        base_type: sview = c_trim_spaces(c_array_base_type(type_name)) if c_type_is_array(type_name) else type_name
+        return typed_record_index(ctx, base_type)
+
+    def typed_clang_sizeof_bytes[@r](ctx: TypedContext[r]&, type_name: sview) -> i64:
+        if c_type_pointer_count(type_name) > 0 or c_type_is_function_pointer(type_name):
+            return clang_target_type_size_bytes(ctx.target_abi, type_name)
+        if c_type_is_array(type_name):
+            base_type: sview = c_trim_spaces(c_array_base_type(type_name))
+            element_size: i64 = typed_clang_sizeof_bytes(ctx, base_type)
+            return -1 if element_size < 0
+            dimensions: i64 = c_array_dimension_count(type_name)
+            count: mutable i64 = 1
+            for dimension_index in 0..<dimensions |type_name, count|:
+                open_bracket: i64 = c_array_open_at(type_name, dimension_index)
+                close_bracket: i64 = c_array_close_after(type_name, open_bracket)
+                parsed_dimension: mutable i64 = 0
+                dimension: sview = string_view_slice(type_name, open_bracket + 1, close_bracket)
+                return -1 if not clang_record_layout_decimal(dimension, &parsed_dimension)
+                return -1 if parsed_dimension > 0 and count > 9223372036854775807 / parsed_dimension
+                count <- count * parsed_dimension
+            return -1 if element_size > 0 and count > 9223372036854775807 / element_size
+            return element_size * count
+        enum_index: i64 = typed_enum_index(ctx, type_name)
+        return clang_target_type_size_bytes(ctx.target_abi, ctx.enums[enum_index.usize()].underlying_type) if enum_index >= 0
+        record_index: i64 = typed_record_layout_query_index(ctx, type_name)
+        return typed_record_layout_size_bytes(ctx, type_name) if record_index >= 0
+        return clang_target_type_size_bytes(ctx.target_abi, type_name)
+
+    def typed_clang_alignof_bytes[@r](ctx: TypedContext[r]&, type_name: sview) -> i64:
+        record_index: i64 = typed_record_layout_query_index(ctx, type_name)
+        return typed_record_layout_alignment_bytes(ctx, c_trim_spaces(c_array_base_type(type_name)) if c_type_is_array(type_name) else type_name) if record_index >= 0
+        return -1

@@ -1,65 +1,427 @@
 extend CTranslator:
-    def ast_location_line(node: JsonValue) -> i64:
-        location: JsonValue = ast_field(node, sview("loc", 0, -1))
-        line: i64 = typed_number(ast_field(location, sview("line", 0, -1)))
+    def typed_decl_index_empty_slot[@r](owner: JsonValueHandle[r]) -> TypedDeclIndexSlot[r]:
+        return TypedDeclIndexSlot[r]{id: sview("", 0, 0), previous_id: sview("", 0, 0), canonical_id: sview("", 0, 0), declaration: json_handle_null(owner), complete_record: json_handle_null(owner)}
+    def typed_decl_index_place[@r](ctx: mutable TypedContext[r]&, entry: TypedDeclIndexSlot[r]) -> void:
+        capacity: usize = ctx.declaration_index.count.usize()
+        return if capacity == 0 or entry.id.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(entry.id).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: mutable TypedDeclIndexSlot[r] = ctx.declaration_index[slot]
+            if existing.id.len == 0:
+                ctx.declaration_index[slot] <- entry
+                ctx.declaration_index_count <- ctx.declaration_index_count + 1
+                return
+            if sview_eq(existing.id, entry.id):
+                if json_handle_is_null(existing.complete_record) and not json_handle_is_null(entry.complete_record):
+                    existing.complete_record <- entry.complete_record
+                    ctx.declaration_index[slot] <- existing
+                return
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+    def typed_decl_index_grow[@r](ctx: mutable TypedContext[r]&) -> void can[Memory.Allocate, Abort.Panic]:
+        old_entries: mutable darray[TypedDeclIndexSlot[r]] = ctx.declaration_index
+        old_capacity: usize = old_entries.count.usize()
+        new_capacity: usize = 64.usize() if old_capacity == 0 else old_capacity * 2.usize()
+        ctx.declaration_index <- []
+        for index in 0..<new_capacity |ctx|:
+            ctx.declaration_index.push(typed_decl_index_empty_slot(ctx.root))
+        ctx.declaration_index_count <- 0
+        if old_capacity > 0:
+            for index in 0..<old_capacity |ctx, old_entries|:
+                entry: TypedDeclIndexSlot[r] = old_entries[index]
+                typed_decl_index_place(ctx, entry) if entry.id.len > 0
+    def typed_decl_index_find_slot[@r](ctx: TypedContext[r]&, wanted: sview) -> i64:
+        capacity: usize = ctx.declaration_index.count.usize()
+        return -1 if capacity == 0 or wanted.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(wanted).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            entry: TypedDeclIndexSlot[r] = ctx.declaration_index[slot]
+            return -1 if entry.id.len == 0
+            return slot.i64() if sview_eq(entry.id, wanted)
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+        return -1
+    def typed_decl_index_add[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic]:
+        identifier: sview = ast_string(ast_field(node, sview("id", 0, -1)))
+        return if identifier.len == 0
+        capacity: usize = ctx.declaration_index.count.usize()
+        typed_decl_index_grow(ctx) can Memory.Allocate, Abort.Panic if capacity == 0 or (ctx.declaration_index_count + 1).usize() * 2.usize() >= capacity
+        previous_id: sview = ast_string(ast_field(node, sview("previousDecl", 0, -1)))
+        canonical_id: mutable sview = identifier
+        previous_slot: i64 = typed_decl_index_find_slot(ctx, previous_id) if previous_id.len > 0 else -1
+        if previous_slot >= 0:
+            previous: TypedDeclIndexSlot[r] = ctx.declaration_index[previous_slot.usize()]
+            canonical_id <- previous.canonical_id if previous.canonical_id.len > 0
+        elif previous_id.len > 0:
+            canonical_id <- previous_id
+        kind: sview = ast_kind(node)
+        is_record: bool = sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1))
+        complete_record: JsonValueHandle[r] = node if is_record and ast_child_count(node) > 0 else json_handle_null(node)
+        typed_decl_index_place(ctx, TypedDeclIndexSlot[r]{id: identifier, previous_id: previous_id, canonical_id: canonical_id, declaration: node, complete_record: complete_record})
+    def typed_decl_index_collect[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic]:
+        typed_decl_index_add(ctx, node) can Memory.Allocate, Abort.Panic
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                typed_decl_index_collect(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic
+    def typed_decl_index_build[@r](ctx: mutable TypedContext[r]&, root: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic]:
+        typed_decl_index_grow(ctx) can Memory.Allocate, Abort.Panic
+        typed_decl_index_collect(ctx, root) can Memory.Allocate, Abort.Panic
+        # Resolve links whose preceding declaration was not in traversal order.
+        for index in 0..<ctx.declaration_index.count.i64() |ctx|:
+            entry: mutable TypedDeclIndexSlot[r] = ctx.declaration_index[index.usize()]
+            continue if entry.id.len == 0 or entry.previous_id.len == 0
+            previous_slot: i64 = typed_decl_index_find_slot(ctx, entry.previous_id)
+            if previous_slot >= 0:
+                previous: TypedDeclIndexSlot[r] = ctx.declaration_index[previous_slot.usize()]
+                entry.canonical_id <- previous.canonical_id if previous.canonical_id.len > 0
+                ctx.declaration_index[index.usize()] <- entry
+    def typed_decl_lookup[@r](ctx: TypedContext[r]&, wanted: sview) -> JsonValueHandle[r]:
+        slot: i64 = typed_decl_index_find_slot(ctx, wanted)
+        return json_handle_null(ctx.root) if slot < 0
+        return ctx.declaration_index[slot.usize()].declaration
+    def typed_record_lookup[@r](ctx: TypedContext[r]&, wanted: sview) -> JsonValueHandle[r]:
+        slot: i64 = typed_decl_index_find_slot(ctx, wanted)
+        return json_handle_null(ctx.root) if slot < 0
+        return ctx.declaration_index[slot.usize()].complete_record
+    def typed_decl_canonical_id[@r](ctx: TypedContext[r]&, wanted: sview) -> sview @r:
+        slot: i64 = typed_decl_index_find_slot(ctx, wanted)
+        return sview("", 0, 0) if slot < 0
+        return ctx.declaration_index[slot.usize()].canonical_id
+    def typed_decl_identity[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r]) -> sview @r:
+        identifier: sview = ast_string(ast_field(node, sview("id", 0, -1)))
+        return sview("", 0, 0) if identifier.len == 0
+        canonical: sview = typed_decl_canonical_id(ctx, identifier)
+        return canonical if canonical.len > 0 else identifier
+    def typed_find_type_decl_id_through_alias[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], wanted: sview) -> sview @r:
+        direct: sview = ast_find_type_decl_id(node, wanted)
+        return direct if direct.len > 0
+        type_view: ClangTypeView[r] = clang_type_view_of_decl(node)
+        alias_id: sview = type_view.type_alias_decl_id
+        return sview("", 0, 0) if alias_id.len == 0
+        alias: JsonValueHandle[r] = typed_decl_lookup(ctx, alias_id)
+        return sview("", 0, 0) if json_handle_is_null(alias)
+        return typed_find_type_decl_id_through_alias(ctx, alias, wanted)
+    def ast_is_extern_decl[@r](node: JsonValueHandle[r]) -> bool:
+        return sview_eq(ast_string(ast_field(node, sview("storageClass", 0, -1))), sview("extern", 0, -1))
+    def ast_location_line[@r](node: JsonValueHandle[r]) -> i64:
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        line: mutable i64 = typed_number(ast_field(location, sview("line", 0, -1)))
         return line if line > 0
-        range: JsonValue = ast_field(node, sview("range", 0, -1))
-        begin: JsonValue = ast_field(range, sview("begin", 0, -1))
+        range: JsonValueHandle[r] = ast_field(node, sview("range", 0, -1))
+        begin: JsonValueHandle[r] = ast_field(range, sview("begin", 0, -1))
+        line <- typed_number(ast_field(ast_field(begin, sview("expansionLoc", 0, -1)), sview("line", 0, -1)))
+        return line if line > 0
+        line <- typed_number(ast_field(ast_field(begin, sview("spellingLoc", 0, -1)), sview("line", 0, -1)))
+        return line if line > 0
         return typed_number(ast_field(begin, sview("line", 0, -1)))
-
-    def ast_location_column(node: JsonValue) -> i64:
-        location: JsonValue = ast_field(node, sview("loc", 0, -1))
-        column: i64 = typed_number(ast_field(location, sview("col", 0, -1)))
+    def ast_location_column[@r](node: JsonValueHandle[r]) -> i64:
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        column: mutable i64 = typed_number(ast_field(location, sview("col", 0, -1)))
         return column if column > 0
-        range: JsonValue = ast_field(node, sview("range", 0, -1))
-        begin: JsonValue = ast_field(range, sview("begin", 0, -1))
+        range: JsonValueHandle[r] = ast_field(node, sview("range", 0, -1))
+        begin: JsonValueHandle[r] = ast_field(range, sview("begin", 0, -1))
+        column <- typed_number(ast_field(ast_field(begin, sview("expansionLoc", 0, -1)), sview("col", 0, -1)))
+        return column if column > 0
+        column <- typed_number(ast_field(ast_field(begin, sview("spellingLoc", 0, -1)), sview("col", 0, -1)))
+        return column if column > 0
         return typed_number(ast_field(begin, sview("col", 0, -1)))
 
-    def typed_record_unsupported(ctx: mutable TypedContext&, node: JsonValue, category: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        kind: sview = ast_kind(node)
-        line: i64 = ast_location_line(node)
+    # Keep source spelling for display, but retain a physical identity for
+    # diagnostics so relative paths and symlink aliases can be compared.
+    def typed_canonical_source_path(path: sview, working_directory: sview) -> sview can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return sview("", 0, 0) if path.len == 0
+        resolved: mutable darray[u8] = []
+        found: bool = ast_json_resolve_path(path, working_directory, &resolved) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return sview("", 0, 0) if not found
+        copied: cstr = string_view_copy(bytes_view(resolved)) can Memory.Allocate, Abort.Panic
+        return sview(copied, 0, -1)
+
+    def typed_diagnostic_source_identity_equal(left: sview, left_canonical: sview, right: sview, right_canonical: sview) -> bool:
+        return sview_eq(left_canonical, right_canonical) if left_canonical.len > 0 and right_canonical.len > 0
+        return sview_eq(left, right)
+
+    def typed_record_diagnostic_with_capability[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], category: sview, kind: sview, required_capability: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        range_start_offset: i64 = ast_range_endpoint_offset(node, sview("begin", 0, -1), false)
+        line: mutable i64 = ast_location_line(node)
+        if line <= 0 and range_start_offset >= 0:
+            line <- typed_source_line_for_offset(ctx, ast_location_source_file(node), range_start_offset) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
         column: i64 = ast_location_column(node)
-        for existing in ctx.diagnostics |ctx, category, kind, line, column|:
-            return if sview_eq(existing.category, category) and sview_eq(existing.kind, kind) and existing.line == line and existing.column == column
-        ctx.diagnostics.push(TypedDiagnostic{category: category, kind: kind, source: sview(ctx.source, 0, -1), line: line, column: column})
-
-    def typed_push_expr(ctx: mutable TypedContext&, value: TypedExpr) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        subject_type_view: sview = ast_qual_type(node)
+        spelling_line: i64 = ast_macro_origin_coordinate(node, sview("spellingLoc", 0, -1), sview("line", 0, -1))
+        spelling_column: i64 = ast_macro_origin_coordinate(node, sview("spellingLoc", 0, -1), sview("col", 0, -1))
+        expansion_line: i64 = ast_macro_origin_coordinate(node, sview("expansionLoc", 0, -1), sview("line", 0, -1))
+        expansion_column: i64 = ast_macro_origin_coordinate(node, sview("expansionLoc", 0, -1), sview("col", 0, -1))
+        range_end_offset: i64 = ast_range_endpoint_offset(node, sview("end", 0, -1), true)
+        spelling_origin: JsonValueHandle[r] = ast_macro_origin_location(node, sview("spellingLoc", 0, -1))
+        expansion_origin: JsonValueHandle[r] = ast_macro_origin_location(node, sview("expansionLoc", 0, -1))
+        source_view: sview = sview(ctx.source, 0, -1)
+        spelling_source_view: mutable sview = ast_string(ast_field(spelling_origin, sview("file", 0, -1)))
+        expansion_source_view: mutable sview = ast_string(ast_field(expansion_origin, sview("file", 0, -1)))
+        spelling_included_from_view: sview = ast_macro_origin_included_from(node, sview("spellingLoc", 0, -1))
+        expansion_included_from_view: sview = ast_macro_origin_included_from(node, sview("expansionLoc", 0, -1))
+        spelling_source_view <- source_view if spelling_source_view.len == 0 and spelling_line > 0
+        expansion_source_view <- source_view if expansion_source_view.len == 0 and expansion_line > 0
+        primary_source_view: sview = expansion_source_view if expansion_line > 0 and expansion_source_view.len > 0 else source_view
+        spelling_canonical_view: mutable sview = sview("", 0, 0)
+        expansion_canonical_view: mutable sview = sview("", 0, 0)
+        spelling_included_from_canonical_view: mutable sview = sview("", 0, 0)
+        expansion_included_from_canonical_view: mutable sview = sview("", 0, 0)
+        spelling_canonical_view <- ctx.canonical_source if spelling_source_view.len > 0 and sview_eq(spelling_source_view, source_view)
+        expansion_canonical_view <- ctx.canonical_source if expansion_source_view.len > 0 and sview_eq(expansion_source_view, source_view)
+        spelling_included_from_canonical_view <- ctx.canonical_source if spelling_included_from_view.len > 0 and sview_eq(spelling_included_from_view, source_view)
+        expansion_included_from_canonical_view <- ctx.canonical_source if expansion_included_from_view.len > 0 and sview_eq(expansion_included_from_view, source_view)
+        for existing in ctx.diagnostics |ctx, spelling_source_view, expansion_source_view, spelling_canonical_view, expansion_canonical_view, spelling_included_from_view, expansion_included_from_view, spelling_included_from_canonical_view, expansion_included_from_canonical_view|:
+            if spelling_canonical_view.len == 0 and spelling_source_view.len > 0:
+                if sview_eq(existing.spelling_source, spelling_source_view):
+                    spelling_canonical_view <- existing.spelling_canonical_source
+                elif sview_eq(existing.expansion_source, spelling_source_view):
+                    spelling_canonical_view <- existing.expansion_canonical_source
+                elif sview_eq(existing.source, spelling_source_view):
+                    spelling_canonical_view <- existing.canonical_source
+            if expansion_canonical_view.len == 0 and expansion_source_view.len > 0:
+                if sview_eq(existing.spelling_source, expansion_source_view):
+                    expansion_canonical_view <- existing.spelling_canonical_source
+                elif sview_eq(existing.expansion_source, expansion_source_view):
+                    expansion_canonical_view <- existing.expansion_canonical_source
+                elif sview_eq(existing.source, expansion_source_view):
+                    expansion_canonical_view <- existing.canonical_source
+            if spelling_included_from_canonical_view.len == 0 and spelling_included_from_view.len > 0:
+                if sview_eq(existing.spelling_included_from, spelling_included_from_view):
+                    spelling_included_from_canonical_view <- existing.spelling_included_from_canonical
+                elif sview_eq(existing.expansion_included_from, spelling_included_from_view):
+                    spelling_included_from_canonical_view <- existing.expansion_included_from_canonical
+                elif sview_eq(existing.spelling_source, spelling_included_from_view):
+                    spelling_included_from_canonical_view <- existing.spelling_canonical_source
+                elif sview_eq(existing.expansion_source, spelling_included_from_view):
+                    spelling_included_from_canonical_view <- existing.expansion_canonical_source
+                elif sview_eq(existing.source, spelling_included_from_view):
+                    spelling_included_from_canonical_view <- existing.canonical_source
+            if expansion_included_from_canonical_view.len == 0 and expansion_included_from_view.len > 0:
+                if sview_eq(existing.spelling_included_from, expansion_included_from_view):
+                    expansion_included_from_canonical_view <- existing.spelling_included_from_canonical
+                elif sview_eq(existing.expansion_included_from, expansion_included_from_view):
+                    expansion_included_from_canonical_view <- existing.expansion_included_from_canonical
+                elif sview_eq(existing.spelling_source, expansion_included_from_view):
+                    expansion_included_from_canonical_view <- existing.spelling_canonical_source
+                elif sview_eq(existing.expansion_source, expansion_included_from_view):
+                    expansion_included_from_canonical_view <- existing.expansion_canonical_source
+                elif sview_eq(existing.source, expansion_included_from_view):
+                    expansion_included_from_canonical_view <- existing.canonical_source
+        # Reuse a canonical identity already computed for an equal path before
+        # asking the filesystem resolver to canonicalize it again.
+        spelling_canonical_view <- typed_canonical_source_path(spelling_source_view, ctx.source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast if spelling_source_view.len > 0 and spelling_canonical_view.len == 0
+        expansion_canonical_view <- typed_canonical_source_path(expansion_source_view, ctx.source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast if expansion_source_view.len > 0 and expansion_canonical_view.len == 0
+        spelling_included_from_canonical_view <- typed_canonical_source_path(spelling_included_from_view, ctx.source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast if spelling_included_from_view.len > 0 and spelling_included_from_canonical_view.len == 0
+        expansion_included_from_canonical_view <- typed_canonical_source_path(expansion_included_from_view, ctx.source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast if expansion_included_from_view.len > 0 and expansion_included_from_canonical_view.len == 0
+        primary_canonical_view: sview = expansion_canonical_view if expansion_line > 0 and expansion_source_view.len > 0 else ctx.canonical_source
+        for existing in ctx.diagnostics |ctx, category, kind, subject_type_view, required_capability, range_start_offset, range_end_offset, line, column, spelling_source_view, expansion_source_view, primary_source_view, spelling_included_from_view, expansion_included_from_view|:
+            same_primary: bool = typed_diagnostic_source_identity_equal(existing.source, existing.canonical_source, primary_source_view, primary_canonical_view)
+            same_spelling: bool = typed_diagnostic_source_identity_equal(existing.spelling_source, existing.spelling_canonical_source, spelling_source_view, spelling_canonical_view)
+            same_expansion: bool = typed_diagnostic_source_identity_equal(existing.expansion_source, existing.expansion_canonical_source, expansion_source_view, expansion_canonical_view)
+            same_spelling_include: bool = typed_diagnostic_source_identity_equal(existing.spelling_included_from, existing.spelling_included_from_canonical, spelling_included_from_view, spelling_included_from_canonical_view)
+            same_expansion_include: bool = typed_diagnostic_source_identity_equal(existing.expansion_included_from, existing.expansion_included_from_canonical, expansion_included_from_view, expansion_included_from_canonical_view)
+            return if sview_eq(existing.category, category) and sview_eq(existing.kind, kind) and sview_eq(existing.subject_type, subject_type_view) and sview_eq(existing.required_capability, required_capability) and existing.range_start_offset == range_start_offset and existing.range_end_offset == range_end_offset and same_primary and same_spelling and same_expansion and same_spelling_include and same_expansion_include and existing.line == line and existing.column == column and existing.spelling_line == spelling_line and existing.spelling_column == spelling_column and existing.expansion_line == expansion_line and existing.expansion_column == expansion_column
+        category_copy: sview @r = typed_copy_view_to_region(category) can Memory.Allocate, Abort.Panic
+        kind_copy: sview @r = typed_copy_view_to_region(kind) can Memory.Allocate, Abort.Panic
+        subject_type_copy: sview @r = typed_copy_view_to_region(subject_type_view) can Memory.Allocate, Abort.Panic
+        required_capability_copy: sview @r = typed_copy_view_to_region(required_capability) can Memory.Allocate, Abort.Panic
+        source_copy: sview @r = typed_copy_view_to_region(primary_source_view) can Memory.Allocate, Abort.Panic
+        canonical_source_copy: sview @r = typed_copy_view_to_region(primary_canonical_view) can Memory.Allocate, Abort.Panic
+        spelling_source_copy: sview @r = typed_copy_view_to_region(spelling_source_view) can Memory.Allocate, Abort.Panic
+        spelling_canonical_source_copy: sview @r = typed_copy_view_to_region(spelling_canonical_view) can Memory.Allocate, Abort.Panic
+        spelling_included_from_copy: sview @r = typed_copy_view_to_region(spelling_included_from_view) can Memory.Allocate, Abort.Panic
+        spelling_included_from_canonical_copy: sview @r = typed_copy_view_to_region(spelling_included_from_canonical_view) can Memory.Allocate, Abort.Panic
+        expansion_source_copy: sview @r = typed_copy_view_to_region(expansion_source_view) can Memory.Allocate, Abort.Panic
+        expansion_canonical_source_copy: sview @r = typed_copy_view_to_region(expansion_canonical_view) can Memory.Allocate, Abort.Panic
+        expansion_included_from_copy: sview @r = typed_copy_view_to_region(expansion_included_from_view) can Memory.Allocate, Abort.Panic
+        expansion_included_from_canonical_copy: sview @r = typed_copy_view_to_region(expansion_included_from_canonical_view) can Memory.Allocate, Abort.Panic
+        ctx.diagnostics.push(TypedDiagnostic{category: category_copy, kind: kind_copy, subject_type: subject_type_copy, required_capability: required_capability_copy, source: source_copy, canonical_source: canonical_source_copy, spelling_source: spelling_source_copy, spelling_canonical_source: spelling_canonical_source_copy, spelling_included_from: spelling_included_from_copy, spelling_included_from_canonical: spelling_included_from_canonical_copy, expansion_source: expansion_source_copy, expansion_canonical_source: expansion_canonical_source_copy, expansion_included_from: expansion_included_from_copy, expansion_included_from_canonical: expansion_included_from_canonical_copy, range_start_offset: range_start_offset, range_end_offset: range_end_offset, line: line, column: column, spelling_line: spelling_line, spelling_column: spelling_column, expansion_line: expansion_line, expansion_column: expansion_column})
+    def typed_record_diagnostic[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], category: sview, kind: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        typed_record_diagnostic_with_capability(ctx, node, category, kind, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_record_unsupported[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], requested_capability: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        kind: sview = ast_kind(node)
+        semantic_category: sview = typed_diagnostic_semantic_category(kind)
+        capability: sview = sview("", 0, 0) if sview_eq(requested_capability, sview("expression", 0, -1)) or sview_eq(requested_capability, sview("statement", 0, -1)) or sview_eq(requested_capability, sview("declaration", 0, -1)) else requested_capability
+        typed_record_diagnostic_with_capability(ctx, node, semantic_category, kind, capability) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_record_missing_declaration_dependency[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], name: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        kind: mutable darray[u8] = []
+        append_view(&kind, sview("missing-declaration-dependency:", 0, -1))
+        if ctx.current_function_name.len > 0:
+            append_view(&kind, ctx.current_function_name)
+            append_view(&kind, sview(" -> ", 0, -1))
+        append_view(&kind, name)
+        typed_record_diagnostic(ctx, node, sview("declaration", 0, -1), bytes_view(kind)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_push_expr[@r](ctx: mutable TypedContext[r]&, value: TypedExpr[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         ctx.exprs.push(value)
+        empty_origin: TypedSourceRange[r] = TypedSourceRange{file: sview("", 0, 0), included_from: sview("", 0, 0), start_offset: -1, end_offset: -1}
+        ctx.expr_source_origins.push(TypedIRSourceOrigin[r]{node: json_handle_null(ctx.root), source: empty_origin, spelling: empty_origin, expansion: empty_origin, synthesized_reason: sview("", 0, 0)}) if ctx.source_mapping_enabled
         return ctx.exprs.count.i64() - 1
-
-    def typed_push_stmt(ctx: mutable TypedContext&, value: TypedStmt) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    # Expressions and their optional provenance rows are parallel indexed
+    # tables. Lowering may discard speculative nodes after constant/effect
+    # analysis; rewind both tables together so later IR indices cannot inherit
+    # stale origins from discarded expressions.
+    def typed_truncate_exprs[@r](ctx: mutable TypedContext[r]&, count: usize) -> void:
+        ctx.exprs.count <- count
+        ctx.expr_source_origins.count <- count if ctx.source_mapping_enabled
+    def typed_push_stmt[@r](ctx: mutable TypedContext[r]&, value: TypedStmt[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         ctx.stmts.push(value)
+        empty_origin: TypedSourceRange[r] = TypedSourceRange{file: sview("", 0, 0), included_from: sview("", 0, 0), start_offset: -1, end_offset: -1}
+        ctx.stmt_source_origins.push(TypedIRSourceOrigin[r]{node: json_handle_null(ctx.root), source: empty_origin, spelling: empty_origin, expansion: empty_origin, synthesized_reason: sview("", 0, 0)}) if ctx.source_mapping_enabled
         return ctx.stmts.count.i64() - 1
-
-    def typed_push_function(ctx: mutable TypedContext&, value: TypedFunction) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_push_function[@r](ctx: mutable TypedContext[r]&, value: TypedFunction[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         ctx.functions.push(value)
         return ctx.functions.count.i64() - 1
-
-    def typed_global_index(ctx: TypedContext&, name: sview) -> i64:
+    def typed_global_index[@r](ctx: TypedContext[r]&, name: sview) -> i64:
         for index in 0..<ctx.globals.count |ctx, name|:
             if sview_eq(ctx.globals[index].name, name):
                 return index
         return -1
-
-    def typed_user_function_index(ctx: TypedContext&, name: sview) -> i64:
+    def typed_global_declaration_index[@r](ctx: TypedContext[r]&, declaration_id: sview) -> i64:
+        return -1 if declaration_id.len == 0
+        for index in 0..<ctx.globals.count |ctx, declaration_id|:
+            return index if sview_eq(ctx.globals[index].declaration_id, declaration_id)
+        return -1
+    def typed_user_function_index[@r](ctx: TypedContext[r]&, name: sview) -> i64:
         for index in 0..<ctx.user_function_names.count |ctx, name|:
             if sview_eq(ctx.user_function_names[index], name):
                 return index
         return -1
+    def typed_user_function_has_signature[@r](ctx: TypedContext[r]&, declaration_id: sview, name: sview, function_type: sview) -> bool:
+        return false if name.len == 0 or function_type.len == 0
+        if declaration_id.len > 0:
+            for index in 0..<ctx.user_function_signatures.count |ctx, declaration_id|:
+                return true if sview_eq(ctx.user_function_signatures[index].declaration_id, declaration_id)
+            return false
+        normalized: sview = c_type_without_qualifiers(function_type)
+        candidate: mutable i64 = -1
+        for index in 0..<ctx.user_function_signatures.count |ctx, name, normalized|:
+            signature: TypedUserFunctionSignature[r] = ctx.user_function_signatures[index]
+            if sview_eq(signature.name, name) and sview_eq(c_type_without_qualifiers(signature.type_name), normalized):
+                return false if candidate >= 0
+                candidate <- index
+        return candidate >= 0
+    def typed_user_function_signature_index[@r](ctx: TypedContext[r]&, declaration_id: sview, name: sview, function_type: sview) -> i64:
+        return -1 if name.len == 0 or function_type.len == 0
+        if declaration_id.len > 0:
+            for index in 0..<ctx.user_function_signatures.count |ctx, declaration_id|:
+                return index if sview_eq(ctx.user_function_signatures[index].declaration_id, declaration_id)
+            return -1
+        normalized: sview = c_type_without_qualifiers(function_type)
+        candidate: mutable i64 = -1
+        for index in 0..<ctx.user_function_signatures.count |ctx, name, normalized|:
+            signature: TypedUserFunctionSignature[r] = ctx.user_function_signatures[index]
+            if sview_eq(signature.name, name) and sview_eq(c_type_without_qualifiers(signature.type_name), normalized):
+                return -1 if candidate >= 0
+                candidate <- index
+        return candidate
+    def typed_user_function_signature_count[@r](ctx: TypedContext[r]&, name: sview) -> i64:
+        count: mutable i64 = 0
+        for index in 0..<ctx.user_function_signatures.count |ctx, name, count|:
+            count <- count + 1 if sview_eq(ctx.user_function_signatures[index].name, name)
+        return count
 
-    def typed_enum_const_name(ctx: TypedContext&, name: sview) -> sview:
+    def typed_project_type_seen(name: sview) -> bool:
+        for index in 0..<translator_project_state.types_count |name|:
+            existing: TypedProjectSymbol = translator_project_state.types[index.usize()]
+            return true if sview_eq(existing.name, name)
+        return false
+
+    def typed_project_mark_type(name: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if name.len == 0 or typed_project_type_seen(name)
+        return if translator_project_state.types_count >= 4096
+        copied: cstr = string_view_copy(name) can Memory.Allocate
+        _ = arena_da_append(&translator_project_arena, &translator_project_state.types, TypedProjectSymbol{name: sview(copied, 0, -1), arity: 0, variadic: false}) can Memory.Allocate, Abort.Panic
+        translator_project_state.types_count <- translator_project_state.types_count + 1
+
+    def typed_project_function_seen(name: sview, arity: i64, variadic: bool) -> bool:
+        for index in 0..<translator_project_state.functions_count |name, arity, variadic|:
+            existing: TypedProjectSymbol = translator_project_state.functions[index.usize()]
+            return true if sview_eq(existing.name, name) and existing.arity == arity and existing.variadic == variadic
+        return false
+
+    def typed_project_mark_function(name: sview, arity: i64, variadic: bool) -> void can[Memory.Allocate, Abort.Panic]:
+        return if name.len == 0 or typed_project_function_seen(name, arity, variadic)
+        return if translator_project_state.functions_count >= 4096
+        copied: cstr = string_view_copy(name) can Memory.Allocate
+        _ = arena_da_append(&translator_project_arena, &translator_project_state.functions, TypedProjectSymbol{name: sview(copied, 0, -1), arity: arity, variadic: variadic}) can Memory.Allocate, Abort.Panic
+        translator_project_state.functions_count <- translator_project_state.functions_count + 1
+
+    def typed_project_extern_seen(link_name: sview) -> bool:
+        for index in 0..<translator_project_state.externs_count |link_name|:
+            existing: TypedProjectSymbol = translator_project_state.externs[index.usize()]
+            return true if sview_eq(existing.name, link_name)
+        return false
+
+    def typed_project_mark_extern(link_name: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if link_name.len == 0 or typed_project_extern_seen(link_name)
+        return if translator_project_state.externs_count >= 4096
+        copied: cstr = string_view_copy(link_name) can Memory.Allocate
+        _ = arena_da_append(&translator_project_arena, &translator_project_state.externs, TypedProjectSymbol{name: sview(copied, 0, -1), arity: 0, variadic: false}) can Memory.Allocate, Abort.Panic
+        translator_project_state.externs_count <- translator_project_state.externs_count + 1
+
+    def typed_project_global_seen(name: sview) -> bool:
+        for index in 0..<translator_project_state.globals_count |name|:
+            existing: TypedProjectSymbol = translator_project_state.globals[index.usize()]
+            return true if sview_eq(existing.name, name)
+        return false
+
+    def typed_project_mark_global(name: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if name.len == 0 or typed_project_global_seen(name)
+        return if translator_project_state.globals_count >= 4096
+        copied: cstr = string_view_copy(name) can Memory.Allocate
+        _ = arena_da_append(&translator_project_arena, &translator_project_state.globals, TypedProjectSymbol{name: sview(copied, 0, -1), arity: 0, variadic: false}) can Memory.Allocate, Abort.Panic
+        translator_project_state.globals_count <- translator_project_state.globals_count + 1
+
+    def typed_project_record_field_type(record_name: sview, field_name: sview) -> sview:
+        for index in 0..<translator_project_state.fields_count |record_name, field_name|:
+            field: TypedProjectField = translator_project_state.fields[index.usize()]
+            return field.type_name if sview_eq(field.record_name, record_name) and sview_eq(field.field_name, field_name)
+        return sview("", 0, 0)
+    def typed_project_mark_record_fields[@r](ctx: TypedContext[r]&, record: TypedRecord[r]) -> void can[Memory.Allocate, Abort.Panic]:
+        return if record.name.len == 0
+        for offset in 0..<record.fields_count |ctx, record|:
+            field: TypedField[r] = ctx.fields[(record.fields_start + offset).usize()]
+            continue if typed_project_record_field_type(record.name, field.name).len > 0
+            return if translator_project_state.fields_count >= 32768
+            record_copy: cstr = string_view_copy(record.name) can Memory.Allocate
+            field_copy: cstr = string_view_copy(field.name) can Memory.Allocate
+            type_copy: cstr = string_view_copy(field.type_name) can Memory.Allocate
+            _ = arena_da_append(&translator_project_arena, &translator_project_state.fields, TypedProjectField{record_name: sview(record_copy, 0, -1), field_name: sview(field_copy, 0, -1), type_name: sview(type_copy, 0, -1)}) can Memory.Allocate, Abort.Panic
+            translator_project_state.fields_count <- translator_project_state.fields_count + 1
+
+    def typed_project_external_global_seen(name: sview) -> bool:
+        for index in 0..<translator_project_state.external_globals_count |name|:
+            existing: TypedProjectSymbol = translator_project_state.external_globals[index.usize()]
+            return true if sview_eq(existing.name, name)
+        return false
+
+    def typed_project_mark_external_global(name: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if name.len == 0 or typed_project_external_global_seen(name)
+        return if translator_project_state.external_globals_count >= 4096
+        copied: cstr = string_view_copy(name) can Memory.Allocate
+        _ = arena_da_append(&translator_project_arena, &translator_project_state.external_globals, TypedProjectSymbol{name: sview(copied, 0, -1), arity: 0, variadic: false}) can Memory.Allocate, Abort.Panic
+        translator_project_state.external_globals_count <- translator_project_state.external_globals_count + 1
+    def typed_enum_const_name[@r](ctx: TypedContext[r]&, name: sview) -> sview @r:
         for index in 0..<ctx.enum_consts.count |ctx, name|:
-            constant: TypedEnumConst = ctx.enum_consts[index]
+            constant: TypedEnumConst[r] = ctx.enum_consts[index]
             if sview_eq(constant.name, name):
                 return safe_identifier(constant.enum_name)
         return sview("", 0, 0)
-
-    def typed_enum_const_value(ctx: TypedContext&, name: sview) -> i64:
+    def typed_enum_const_value[@r](ctx: TypedContext[r]&, name: sview) -> i64:
         for index in 0..<ctx.enum_consts.count |ctx, name|:
-            constant: TypedEnumConst = ctx.enum_consts[index]
+            constant: TypedEnumConst[r] = ctx.enum_consts[index]
             if sview_eq(constant.name, name):
                 return constant.value
         return -1
+    def typed_enum_const_known[@r](ctx: TypedContext[r]&, name: sview) -> bool:
+        for index in 0..<ctx.enum_consts.count |ctx, name|:
+            return true if sview_eq(ctx.enum_consts[index].name, name)
+        return false
 
     def external_parameter_name(ordinal: i64) -> sview:
         return sview("parameter_1", 0, -1) if ordinal == 0
@@ -74,74 +436,81 @@ extend CTranslator:
         return sview("parameter_10", 0, -1) if ordinal == 9
         return sview("parameter", 0, -1)
 
-    def typed_binary_assignment_opcode(opcode: sview) -> sview:
-        return sview("+", 0, -1) if sview_eq(opcode, sview("+=", 0, -1))
-        return sview("-", 0, -1) if sview_eq(opcode, sview("-=", 0, -1))
-        return sview("*", 0, -1) if sview_eq(opcode, sview("*=", 0, -1))
-        return sview("/", 0, -1) if sview_eq(opcode, sview("/=", 0, -1))
-        return sview("%", 0, -1) if sview_eq(opcode, sview("%=", 0, -1))
-        return sview("&", 0, -1) if sview_eq(opcode, sview("&=", 0, -1))
-        return sview("|", 0, -1) if sview_eq(opcode, sview("|=", 0, -1))
-        return sview("^", 0, -1) if sview_eq(opcode, sview("^=", 0, -1))
-        return sview("<<", 0, -1) if sview_eq(opcode, sview("<<=", 0, -1))
-        return sview(">>", 0, -1) if sview_eq(opcode, sview(">>=", 0, -1))
-        return sview("", 0, 0)
-
     def typed_surface_opcode(opcode: sview) -> sview:
         return sview("and", 0, -1) if sview_eq(opcode, sview("&&", 0, -1))
         return sview("or", 0, -1) if sview_eq(opcode, sview("||", 0, -1))
         return opcode
-
-    def typed_callee_name(node: JsonValue) -> sview:
+    def typed_callee_name[@r](node: JsonValueHandle[r]) -> sview @r:
         return ast_expr_name(node)
-
-    def ast_callee_is_named_function(node: JsonValue) -> bool:
+    def ast_callee_is_named_function[@r](node: JsonValueHandle[r]) -> bool:
         kind: sview = ast_kind(node)
         if sview_eq(kind, sview("DeclRefExpr", 0, -1)):
-            referenced: JsonValue = ast_field(node, sview("referencedDecl", 0, -1))
+            referenced: JsonValueHandle[r] = ast_field(node, sview("referencedDecl", 0, -1))
             return sview_eq(ast_kind(referenced), sview("FunctionDecl", 0, -1))
         if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
             return ast_child_count(node) > 0 and ast_callee_is_named_function(ast_child(node, 0))
         return false
-
-    def ast_find_function(node: JsonValue, wanted: sview) -> JsonValue:
+    def ast_callee_referenced_decl[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r]:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("DeclRefExpr", 0, -1)):
+            return ast_field(node, sview("referencedDecl", 0, -1))
+        if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
+            return ast_callee_referenced_decl(ast_child(node, 0)) if ast_child_count(node) > 0 else json_handle_null(node)
+        return json_handle_null(node)
+    def ast_callee_is_header_inline[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], source: cstr) -> bool:
+        referenced: JsonValueHandle[r] = ast_callee_referenced_decl(node)
+        identifier: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
+        declaration: JsonValueHandle[r] = typed_decl_lookup(ctx, identifier)
+        return not json_handle_is_null(declaration) and not ast_is_static_decl(declaration) and ast_is_header_inline_definition(declaration, source)
+    def ast_find_function[@r](node: JsonValueHandle[r], wanted: sview) -> JsonValueHandle[r]:
         if sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1)) and sview_eq(ast_name(node), wanted):
             return node
         count: i64 = ast_child_count(node)
         if count >= 0:
             for index in 0..<count:
-                found: JsonValue = ast_find_function(ast_child(node, index), wanted)
-                return found if found != JsonValue.Null
-        return JsonValue.Null
-
-    def ast_function_has_named_parameters(node: JsonValue) -> bool:
+                found: JsonValueHandle[r] = ast_find_function(ast_child(node, index), wanted)
+                return found if not json_handle_is_null(found)
+        return json_handle_null(node)
+    def ast_function_has_named_parameters[@r](node: JsonValueHandle[r]) -> bool:
         return false if not sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1))
         count: i64 = ast_child_count(node)
         if count >= 0:
             for index in 0..<count:
-                parameter: JsonValue = ast_child(node, index)
+                parameter: JsonValueHandle[r] = ast_child(node, index)
                 return true if sview_eq(ast_kind(parameter), sview("ParmVarDecl", 0, -1)) and ast_name(parameter).len > 0
         return false
-
-    def ast_find_function_with_named_parameters(node: JsonValue, wanted: sview) -> JsonValue:
+    def ast_find_function_with_named_parameters[@r](node: JsonValueHandle[r], wanted: sview) -> JsonValueHandle[r]:
         if sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1)) and sview_eq(ast_name(node), wanted) and ast_function_has_named_parameters(node):
             return node
         count: i64 = ast_child_count(node)
         if count >= 0:
             for index in 0..<count:
-                found: JsonValue = ast_find_function_with_named_parameters(ast_child(node, index), wanted)
-                return found if found != JsonValue.Null
-        return JsonValue.Null
-
-    def typed_external_index(ctx: TypedContext&, name: sview) -> i64:
+                found: JsonValueHandle[r] = ast_find_function_with_named_parameters(ast_child(node, index), wanted)
+                return found if not json_handle_is_null(found)
+        return json_handle_null(node)
+    def typed_external_index[@r](ctx: TypedContext[r]&, name: sview) -> i64:
         for index in 0..<ctx.externs.count |ctx, name|:
             if sview_eq(ctx.externs[index].name, name) or sview_eq(ctx.externs[index].link_name, name):
                 return index
         return -1
-
-    def typed_external_global_index(ctx: TypedContext&, name: sview) -> i64:
+    def typed_external_signature_index[@r](ctx: TypedContext[r]&, name: sview, function_type: sview, declaration_id: sview) -> i64:
+        return -1 if name.len == 0 or function_type.len == 0
+        if declaration_id.len > 0:
+            for index in 0..<ctx.externs.count.i64() |ctx, declaration_id|:
+                return index if sview_eq(ctx.externs[index.usize()].declaration_id, declaration_id)
+            return -1
+        normalized: sview = c_type_without_qualifiers(function_type)
+        binding_name: sview = external_binding_name(name)
+        candidate: mutable i64 = -1
+        for index in 0..<ctx.externs.count |ctx, name, normalized, binding_name|:
+            external: TypedExtern[r] = ctx.externs[index.usize()]
+            if (sview_eq(external.name, binding_name) or sview_eq(external.link_name, name)) and sview_eq(c_type_without_qualifiers(external.return_type), normalized):
+                return -1 if candidate >= 0
+                candidate <- index
+        return candidate
+    def typed_external_global_index[@r](ctx: TypedContext[r]&, name: sview) -> i64:
         for index in 0..<ctx.extern_globals.count |ctx, name|:
-            if sview_eq(ctx.extern_globals[index].name, name):
+            if sview_eq(ctx.extern_globals[index].name, name) or sview_eq(ctx.extern_globals[index].link_name, name):
                 return index
         return -1
 
@@ -151,49 +520,70 @@ extend CTranslator:
         # scattering special cases through expression lowering.
         return sview("c_memset", 0, -1) if sview_eq(name, sview("memset", 0, -1)) else sview("", 0, 0)
 
+    def external_link_name(name: sview) -> sview:
+        # Clang exposes calls synthesized by libc/libc++ headers under
+        # implementation spellings such as `__builtin_sinf` and
+        # `__libcpp_wcschr`. Those are wrappers around ordinary C library
+        # symbols, not symbols that a linker can resolve literally. Keep true
+        # compiler intrinsics out of this normalization list: they are lowered
+        # as expressions or need a dedicated compatibility implementation.
+        return name if sview_eq(name, sview("__builtin_expect", 0, -1)) or sview_eq(name, sview("__builtin_object_size", 0, -1)) or sview_eq(name, sview("__builtin_add_overflow", 0, -1)) or sview_eq(name, sview("__builtin_mul_overflow", 0, -1)) or sview_eq(name, sview("__builtin_bswap32", 0, -1)) or sview_eq(name, sview("__builtin_clz", 0, -1)) else string_view_suffix(name, 10) if sview_starts_with(name, sview("__builtin_", 0, -1)) else string_view_suffix(name, 9) if sview_starts_with(name, sview("__libcpp_", 0, -1)) else name
+
     def external_binding_name(name: sview) -> sview:
         runtime_name: sview = external_runtime_collision_name(name)
         return runtime_name if runtime_name.len > 0 else safe_identifier(name)
-
-    def external_global_binding_name(name: sview) -> sview:
-        return safe_identifier(name)
-
-    def typed_emit_external_alias(out: mutable darray[u8]&, ctx: TypedContext&, binding_kind: TypedBindingKind, index: i64) -> void:
-        if binding_kind == TypedBindingKind.ExternalGlobal:
-            append_view(out, ctx.extern_globals[index.usize()].name)
-        else:
-            append_view(out, ctx.externs[index.usize()].name)
-
-    def typed_add_external_global(ctx: mutable TypedContext&, name: sview, type_name: sview) -> void:
+    def external_declaration_link_name[@r](name: sview, declaration: JsonValueHandle[r]) -> sview @r:
+        return external_link_name(name) if sview_starts_with(name, sview("__builtin_", 0, -1)) or sview_starts_with(name, sview("__libcpp_", 0, -1))
+        declared_link_name: sview = ast_function_link_name(declaration)
+        return declared_link_name if declared_link_name.len > 0 else external_link_name(name)
+    def typed_add_external_global[@r](ctx: mutable TypedContext[r]&, name: sview, type_name: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return if name.len == 0 or typed_external_global_index(ctx, name) >= 0
-        ctx.extern_globals.push(TypedExternGlobal{name: external_global_binding_name(name), link_name: name, type_name: type_name})
-
-    def typed_add_external(ctx: mutable TypedContext&, name: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        return if name.len == 0 or typed_user_function_index(ctx, name) >= 0 or typed_external_index(ctx, name) >= 0
+        binding_name: sview = external_global_binding_name(name) can Memory.Allocate
+        ctx.extern_globals.push(TypedExternGlobal[r]{name: binding_name, link_name: name, type_name: type_name, is_mutable: not c_type_is_const_object(type_name)})
+    def typed_add_external[@r](ctx: mutable TypedContext[r]&, name: sview, call_type: sview, referenced: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if name.len == 0
         return if sview_starts_with(name, sview("__builtin_va_", 0, -1))
-        declaration: mutable JsonValue = ast_find_function_with_named_parameters(ctx.root, name)
-        declaration <- ast_find_function(ctx.root, name) if declaration == JsonValue.Null
-        function_type: mutable sview = ast_qual_type(declaration)
+        declaration: mutable JsonValueHandle[r] = referenced
+        referenced_id: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
+        declaration_id: sview = typed_decl_identity(ctx, referenced)
+        resolved: JsonValueHandle[r] = typed_decl_lookup(ctx, referenced_id) if referenced_id.len > 0 else json_handle_null(ctx.root)
+        declaration <- resolved if not json_handle_is_null(resolved)
+        declaration <- ast_find_function_with_named_parameters(ctx.root, name) if json_handle_is_null(declaration)
+        declaration <- ast_find_function(ctx.root, name) if json_handle_is_null(declaration)
+        function_type: mutable sview = typed_c_type(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if not json_handle_is_null(declaration) else call_type
+        function_type <- call_type if function_type.len == 0
+        return if typed_user_function_has_signature(ctx, declaration_id, name, function_type)
+        return if typed_external_signature_index(ctx, name, function_type, declaration_id) >= 0
+        # Same-name overloads may coexist when Clang gives us a signature.
+        return if call_type.len == 0 and typed_user_function_index(ctx, name) >= 0
         if function_type.len == 0:
-            function_type <- sview("int (...) ", 0, -1)
+            typed_record_missing_declaration_dependency(ctx, referenced, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
         params_start: i64 = ctx.extern_params.count.i64()
         parameter_count: i64 = ast_child_count(declaration)
-        if declaration != JsonValue.Null and parameter_count >= 0:
+        if not json_handle_is_null(declaration) and parameter_count >= 0:
             ordinal: mutable i64 = 0
             for index in 0..<parameter_count |ctx, declaration, params_start, ordinal|:
-                parameter: JsonValue = ast_child(declaration, index)
+                parameter: JsonValueHandle[r] = ast_child(declaration, index)
                 if sview_eq(ast_kind(parameter), sview("ParmVarDecl", 0, -1)):
                     parameter_name: mutable sview = safe_identifier(ast_name(parameter))
                     if parameter_name.len == 0:
                         parameter_name <- external_parameter_name(ordinal)
                     if ast_name(parameter).len == 0 or sview_eq(parameter_name, sview("arg", 0, -1)):
-                        # Clang may use the same synthetic spelling for several
-                        # unnamed parameters. The ordinal keeps emitted names unique.
                         parameter_name <- external_parameter_name(ordinal)
                     spelled_parameter_type: sview = ast_qual_type(parameter)
-                    parameter_type: sview = spelled_parameter_type if sview_eq(spelled_parameter_type, sview("va_list", 0, -1)) or sview_eq(spelled_parameter_type, sview("__builtin_va_list", 0, -1)) else ast_abi_qual_type(parameter)
-                    is_va_list: bool = sview_eq(parameter_type, sview("va_list", 0, -1)) or sview_eq(parameter_type, sview("__builtin_va_list", 0, -1))
-                    ctx.extern_params.push(TypedParam{name: parameter_name, type_name: parameter_type, is_mutable: c_type_pointer_count(parameter_type) > 0 and c_type_pointer_can_write(parameter_type)})
+                    parameter_type: sview = spelled_parameter_type if sview_eq(spelled_parameter_type, sview("va_list", 0, -1)) or sview_eq(spelled_parameter_type, sview("__builtin_va_list", 0, -1)) else typed_c_type(ctx, parameter) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    ctx.extern_params.push(TypedParam[r]{name: parameter_name, type_name: parameter_type, is_mutable: (c_type_pointer_count(parameter_type) > 0 or c_type_reference_count(parameter_type) > 0) and c_type_pointer_can_write(parameter_type)})
                     ordinal <- ordinal + 1
-        variadic: bool = sview_find_byte(function_type, 46) >= 0
-        ctx.externs.push(TypedExtern{name: external_binding_name(name), link_name: name, return_type: function_type, params_start: params_start, params_count: ctx.extern_params.count.i64() - params_start, variadic: variadic})
+        # Recover fixed ABI parameters omitted from the bounded projection.
+        if ctx.extern_params.count.i64() == params_start:
+            fallback_ordinal: mutable i64 = 0
+            for _index in 0..<64 |ctx, function_type, params_start, fallback_ordinal|:
+                parameter_type: sview = c_function_parameter_type(function_type, fallback_ordinal)
+                break if parameter_type.len == 0 or sview_eq(parameter_type, sview("...", 0, -1))
+                break if fallback_ordinal == 0 and sview_eq(c_trim_spaces(parameter_type), sview("void", 0, -1))
+                ctx.extern_params.push(TypedParam[r]{name: external_parameter_name(fallback_ordinal), type_name: parameter_type, is_mutable: (c_type_pointer_count(parameter_type) > 0 or c_type_reference_count(parameter_type) > 0) and c_type_pointer_can_write(parameter_type)})
+                fallback_ordinal <- fallback_ordinal + 1
+        variadic: bool = ast_bool(ast_field(declaration, sview("variadic", 0, -1))) if not json_handle_is_null(declaration) else sview_find_byte(function_type, 46) >= 0
+        result_type: sview = typed_resolve_type_aliases(ctx, c_function_return_type(function_type)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        ctx.externs.push(TypedExtern[r]{name: external_binding_name(name), link_name: external_declaration_link_name(name, declaration), declaration_id: declaration_id, return_type: function_type, result_type: result_type, params_start: params_start, params_count: ctx.extern_params.count.i64() - params_start, variadic: variadic})

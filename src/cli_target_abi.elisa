@@ -1,0 +1,21 @@
+extend CTranslator:
+    def cli_target_abi_load(macros: darray[u8], succeeded: bool, source: sview) -> ClangTargetABI can[Console, Unsafe.PointerCast]:
+        return cli_target_abi_load_with_options(macros, succeeded, source, false)
+
+    def cli_target_abi_load_with_options(macros: darray[u8], succeeded: bool, source: sview, short_enums: bool) -> ClangTargetABI can[Console, Unsafe.PointerCast]:
+        abi: ClangTargetABI = clang_target_abi_load_with_options(macros, succeeded, short_enums)
+        return abi if abi.valid
+        emit_view_fd(sview("elisa-c-transpiler: could not establish a supported ABI from Clang's target macros for ", 0, -1), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(source, 2) can Console, Unsafe.PointerCast
+        emit_view_fd(sview(" (CHAR_BIT=", 0, -1), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(clang_target_macro_value(macros, sview("__CHAR_BIT__", 0, -1)), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(sview(", int=", 0, -1), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(clang_target_macro_value(macros, sview("__SIZEOF_INT__", 0, -1)), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(sview(", long=", 0, -1), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(clang_target_macro_value(macros, sview("__SIZEOF_LONG__", 0, -1)), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(sview(", pointer=", 0, -1), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(clang_target_macro_value(macros, sview("__SIZEOF_POINTER__", 0, -1)), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(sview(", size-type=", 0, -1), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(clang_target_macro_value(macros, sview("__SIZE_TYPE__", 0, -1)), 2) can Console, Unsafe.PointerCast
+        emit_view_fd(sview(")\n", 0, -1), 2) can Console, Unsafe.PointerCast
+        return abi

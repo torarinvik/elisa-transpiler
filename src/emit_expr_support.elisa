@@ -1,23 +1,133 @@
 extend CTranslator:
-    def typed_call_parameter_type(ctx: TypedContext&, callee: sview, position: i64) -> sview:
+    def typed_function_prefix_matches[@r](ctx: TypedContext[r]&, left: TypedFunction[r], right: TypedFunction[r]) -> bool:
+        return false if left.params_count == right.params_count or left.params_count == 0 or right.params_count == 0
+        shorter: i64 = left.params_count if left.params_count < right.params_count else right.params_count
+        for offset in 0..<shorter |ctx, left, right|:
+            left_type: sview = ctx.params[(left.params_start + offset).usize()].type_name
+            right_type: sview = ctx.params[(right.params_start + offset).usize()].type_name
+            return false if not sview_eq(c_type_without_qualifiers(left_type), c_type_without_qualifiers(right_type))
+        return true
+
+    def typed_project_function_has_arity(name: sview, arity: i64) -> bool:
+        for index in 0..<translator_project_state.functions_count |name, arity|:
+            function: TypedProjectSymbol = translator_project_state.functions[index.usize()]
+            return true if sview_eq(function.name, name) and function.arity == arity
+        return false
+
+    def typed_project_function_needs_arity_name(name: sview, arity: i64) -> bool:
+        return false if not typed_project_function_has_arity(name, arity)
+        for index in 0..<translator_project_state.functions_count |name, arity|:
+            function: TypedProjectSymbol = translator_project_state.functions[index.usize()]
+            return true if sview_eq(function.name, name) and function.arity != arity
+        return false
+    def typed_function_needs_arity_name[@r](ctx: TypedContext[r]&, name: sview, arity: i64) -> bool:
+        current_index: mutable i64 = -1
+        for index in 0..<ctx.functions.count |ctx, name, arity, current_index|:
+            function: TypedFunction[r] = ctx.functions[index.usize()]
+            if sview_eq(function.name, name) and function.params_count == arity:
+                current_index <- index
+                break
+        return typed_project_function_needs_arity_name(name, arity) if current_index < 0
+        current: TypedFunction[r] = ctx.functions[current_index.usize()]
+        for index in 0..<ctx.functions.count |ctx, name, arity, current|:
+            other: TypedFunction[r] = ctx.functions[index.usize()]
+            return true if index != current_index and sview_eq(other.name, name) and typed_function_prefix_matches(ctx, current, other)
+        return false
+    def typed_user_function_has_arity[@r](ctx: TypedContext[r]&, name: sview, arity: i64) -> bool:
+        for index in 0..<ctx.functions.count |ctx, name, arity|:
+            function: TypedFunction[r] = ctx.functions[index]
+            return true if sview_eq(function.name, name) and function.params_count == arity
+        return typed_project_function_has_arity(name, arity)
+    def typed_internal_function_index[@r](ctx: TypedContext[r]&, name: sview, arity: i64) -> i64:
+        found: mutable i64 = -1
+        for index in 0..<ctx.functions.count |ctx, name, arity, found|:
+            function: TypedFunction[r] = ctx.functions[index]
+            continue if not function.internal_linkage or not sview_eq(function.name, name) or (arity >= 0 and function.params_count != arity)
+            return -2 if found >= 0
+            found <- index
+        return found
+    def typed_internal_function_type_index[@r](ctx: TypedContext[r]&, name: sview, function_type: sview) -> i64:
+        found: mutable i64 = -1
+        normalized_type: sview = c_type_without_qualifiers(function_type)
+        for index in 0..<ctx.functions.count |ctx, name, normalized_type, found|:
+            function: TypedFunction[r] = ctx.functions[index]
+            continue if not function.internal_linkage or not sview_eq(function.name, name) or not sview_eq(c_type_without_qualifiers(function.return_type), normalized_type)
+            return -2 if found >= 0
+            found <- index
+        return found
+    def typed_emit_internal_function_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, function: TypedFunction[r]) -> void:
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        unit_hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        signature_hash: u64 = hash_sview(function.return_type) & 0x7fffffffffffffff
+        append_view(out, sview("__elisa_internal_", 0, -1))
+        append_i64(out, unit_hash.i64())
+        append_view(out, sview("_", 0, -1))
+        append_view(out, function.name)
+        append_view(out, sview("__arity_", 0, -1))
+        append_i64(out, function.params_count)
+        append_view(out, sview("__type_", 0, -1))
+        append_i64(out, signature_hash.i64())
+    def typed_emit_project_global_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, declaration: TypedGlobal[r]) -> void:
+        if not ctx.project_mode:
+            # Preserve a source name in the ordinary single-definition case,
+            # but do not collapse distinct block-scope statics that happen to
+            # share a spelling. C permits `first::value` and `second::value`
+            # to coexist; Elisa's module scope does not. The same stable
+            # identity path is used for the collision case and for projects.
+            same_name_count: mutable i64 = 0
+            for index in 0..<ctx.globals.count |ctx, declaration, same_name_count|:
+                other: TypedGlobal[r] = ctx.globals[index.usize()]
+                if other.project_private and sview_eq(other.name, declaration.name):
+                    same_name_count <- same_name_count + 1
+            if same_name_count <= 1:
+                append_view(out, declaration.name)
+                return
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        unit_hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        append_view(out, sview("__elisa_internal_", 0, -1))
+        append_i64(out, unit_hash.i64())
+        append_view(out, sview("_", 0, -1))
+        append_view(out, declaration.name)
+        append_view(out, sview("__global_", 0, -1))
+        append_i64(out, declaration.identity_hash)
+    def typed_emit_function_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, name: sview, arity: i64) -> void:
+        internal_index: i64 = typed_internal_function_index(ctx, name, arity)
+        if ctx.project_mode and internal_index >= 0:
+            typed_emit_internal_function_name(out, ctx, ctx.functions[internal_index.usize()])
+            return
+        append_view(out, name)
+        if typed_function_needs_arity_name(ctx, name, arity):
+            append_view(out, sview("__arity_", 0, -1))
+            append_i64(out, arity)
+
+    def typed_emit_header_inline_function_name(out: mutable darray[u8]&, name: sview, arity: i64) -> void:
+        append_view(out, name)
+        append_view(out, sview("__inline_", 0, -1))
+        append_i64(out, arity)
+
+    def typed_function_is_header_inline[@r](function: TypedFunction[r]) -> bool:
+        return function.label_count < 0
+
+    def typed_function_label_count[@r](function: TypedFunction[r]) -> i64:
+        return -1 - function.label_count if function.label_count < 0 else function.label_count
+    def typed_call_parameter_type[@r](ctx: TypedContext[r]&, callee: sview, position: i64) -> sview @r:
         for index in 0..<ctx.functions.count |ctx, callee, position|:
-            function: TypedFunction = ctx.functions[index.usize()]
+            function: TypedFunction[r] = ctx.functions[index.usize()]
             if sview_eq(function.name, callee) and position < function.params_count:
                 return ctx.params[(function.params_start + position).usize()].type_name
         for index in 0..<ctx.externs.count |ctx, callee, position|:
-            external: TypedExtern = ctx.externs[index.usize()]
+            external: TypedExtern[r] = ctx.externs[index.usize()]
             if (sview_eq(external.name, callee) or sview_eq(external.link_name, callee)) and position < external.params_count:
                 return ctx.extern_params[(external.params_start + position).usize()].type_name
         return sview("", 0, 0)
-
-    def typed_call_parameter_is_mutable(ctx: TypedContext&, callee: sview, position: i64) -> bool:
+    def typed_call_parameter_is_mutable[@r](ctx: TypedContext[r]&, callee: sview, position: i64) -> bool:
         for index in 0..<ctx.functions.count |ctx, callee, position|:
-            function: TypedFunction = ctx.functions[index.usize()]
+            function: TypedFunction[r] = ctx.functions[index.usize()]
             if sview_eq(function.name, callee) and position < function.params_count:
-                parameter: TypedParam = ctx.params[(function.params_start + position).usize()]
+                parameter: TypedParam[r] = ctx.params[(function.params_start + position).usize()]
                 return typed_parameter_is_mutable(ctx, function, parameter)
         for index in 0..<ctx.externs.count |ctx, callee, position|:
-            external: TypedExtern = ctx.externs[index.usize()]
+            external: TypedExtern[r] = ctx.externs[index.usize()]
             if (sview_eq(external.name, callee) or sview_eq(external.link_name, callee)) and position < external.params_count:
                 return ctx.extern_params[(external.params_start + position).usize()].is_mutable
         return false

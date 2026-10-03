@@ -1,0 +1,12 @@
+struct CP_itemtype:
+    active: mutable i16
+    string: mutable array[u8, 36]
+    routine: mutable (fn(i32) -> i32)?
+
+global mutable MainMenu: array[CP_itemtype, 9] = zeroed
+
+def CP_NewGame(_: i32) -> i32:
+    return 0
+
+def init() -> void:
+    MainMenu <- [CP_itemtype{active: 1, string: [78, 101, 119, 32, 71, 97, 109, 101], routine: CP_NewGame}, CP_itemtype{active: 0, string: [81, 117, 105, 116], routine: null}]

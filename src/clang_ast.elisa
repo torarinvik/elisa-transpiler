@@ -1,164 +1,75 @@
-module CTranslator:
-    @link_name("popen")
-    extern popen(command: cstr, mode: cstr) -> mutable heap void&?
-    @link_name("pclose")
-    extern pclose(stream: void&) -> int
-    @link_name("fread")
-    extern fread(buffer: mutable void&, size: usize, count: usize, stream: void&) -> usize
-    @link_name("fopen")
-    extern c_fopen(path: cstr, mode: cstr) -> mutable heap void&?
-    @link_name("fwrite")
-    extern c_fwrite(buffer: void&, size: usize, count: usize, stream: void&) -> usize
-    @link_name("fclose")
-    extern c_fclose(stream: void&) -> int
-
-    def append_cstr(out: mutable darray[u8]&, value: cstr) -> void:
-        index: mutable usize = 0.usize()
-        while true |out, index, value|:
-            byte: u8 = string_index(value, index.i64()).u8()
-            break if byte == 0
-            out.push(byte)
-            index <- index + 1.usize()
-
-    def append_literal(out: mutable darray[u8]&, value: sview) -> void:
-        for index in 0..<value.len |out, value|:
-            out.push(string_view_index(value, index).u8())
-
-    # Quote one path for the shell command passed to popen. Single-quoted shell
-    # strings are literal; an embedded quote is represented as '\''.
-    def append_shell_quoted_view(out: mutable darray[u8]&, value: sview) -> void:
-        out.push(39)
-        index: mutable usize = 0.usize()
-        while index < value.len.usize() |out, index, value|:
-            byte: u8 = string_view_index(value, index.i64()).u8()
-            if byte == 39:
-                out.push(39)
-                out.push(92)
-                out.push(39)
-                out.push(39)
-            else:
-                out.push(byte)
-            index <- index + 1.usize()
-        out.push(39)
-
-    def append_shell_quoted(out: mutable darray[u8]&, value: cstr) -> void:
-        append_shell_quoted_view(out, value[0:value.len])
-
-    def run_command_output(command: cstr) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
-        stream: mutable heap void&? = popen(command, "r")
-        if stream == null:
-            return []
-        handle: mutable heap void& = stream
-        output: mutable darray[u8] = []
-        chunk: mutable u8[8192] = zeroed
-        while true |output, chunk, handle|:
-            count: usize = fread((&chunk[0]).cast[mutable void&], 1.usize(), 8192.usize(), handle)
-            break if count == 0.usize()
-            for index in 0..<count |output, chunk|:
-                output.push(chunk[index])
-        _ = pclose(handle)
-        return output
-
-    def run_clang_ast(path: cstr) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
-        command: mutable darray[u8] = []
-        append_literal(&command, "clang -std=c11 -D_DEFAULT_SOURCE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -Wno-everything -Xclang -fparse-all-comments -Xclang -ast-dump=json -fsyntax-only ")
-        append_shell_quoted(&command, path)
-        command.push(0)
-        stream: mutable heap void&? = popen((&command[0]).cast[cstr], "r")
-        if stream == null:
-            return []
-        handle: mutable heap void& = stream
-        ast: mutable darray[u8] = []
-        chunk: mutable u8[8192] = zeroed
-        while true |ast, chunk, handle|:
-            count: usize = fread((&chunk[0]).cast[mutable void&], 1.usize(), 8192.usize(), handle)
-            break if count == 0.usize()
-            for index in 0..<count |ast, chunk|:
-                ast.push(chunk[index])
-        _ = pclose(handle)
-        return ast
-
-    def run_clang_ast_command(directory: sview, compile_command: sview) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
-        command: mutable darray[u8] = []
-        if directory.len > 0:
-            append_literal(&command, "cd ")
-            append_shell_quoted_view(&command, directory)
-            append_literal(&command, " && ")
-        append_view(&command, compile_command)
-        append_literal(&command, " -Wno-unused-command-line-argument -Xclang -fparse-all-comments -Xclang -ast-dump=json -fsyntax-only")
-        command.push(0)
-        return run_command_output((&command[0]).cast[cstr])
-
-    def ast_field(node: JsonValue, key: sview) -> JsonValue:
-        match node:
-            JsonValue.Object(members_bits, count):
-                for index in 0..<count:
-                    member: JsonMember = json_member_copy(members_bits, index)
-                    return member.value if sview_eq(json_member_key_view(member), key)
-            _:
-                pass
-        return JsonValue.Null
-
-    def ast_array_item(value: JsonValue, index: i64) -> JsonValue:
-        match value:
-            JsonValue.Array(items_bits, count):
-                return json_value_copy(items_bits, index) if index >= 0 and index < count
-            _:
-                pass
-        return JsonValue.Null
-
-    def ast_string(value: JsonValue) -> sview:
-        trusted Unsafe.PointerCast:
-            match value:
-                JsonValue.String(data_bits, length):
-                    return StringView{data: data_bits.cast[u8&], len: length}
-                _:
-                    return sview("", 0, 0)
-
-    def ast_kind(node: JsonValue) -> sview:
+extend CTranslator:
+    def ast_field[@r](node: JsonValueHandle[r], key: sview) -> JsonValueHandle[r]:
+        return try json_handle_get(node, key) else json_handle_null(node)
+    def ast_array_item[@r](value: JsonValueHandle[r], index: i64) -> JsonValueHandle[r]:
+        return try json_handle_at(value, index) else json_handle_null(value)
+    def ast_string[@r](value: JsonValueHandle[r]) -> sview @r:
+        return try json_handle_as_string(value) else sview("", 0, 0)
+    def ast_kind[@r](node: JsonValueHandle[r]) -> sview @r:
         return ast_string(ast_field(node, sview("kind", 0, -1)))
-
-    def ast_name(node: JsonValue) -> sview:
+    def ast_name[@r](node: JsonValueHandle[r]) -> sview @r:
         return ast_string(ast_field(node, sview("name", 0, -1)))
 
-    def ast_qual_type(node: JsonValue) -> sview:
-        type_node: JsonValue = ast_field(node, sview("type", 0, -1))
-        return ast_string(ast_field(type_node, sview("qualType", 0, -1)))
-
-    def ast_type_object_c_type(type_node: JsonValue) -> sview:
-        spelled: sview = ast_string(ast_field(type_node, sview("qualType", 0, -1)))
-        desugared: sview = ast_string(ast_field(type_node, sview("desugaredQualType", 0, -1)))
-        return spelled if sview_eq(spelled, sview("va_list", 0, -1)) or sview_eq(spelled, sview("__builtin_va_list", 0, -1)) else desugared if desugared.len > 0 else spelled
-
-    def ast_abi_qual_type(node: JsonValue) -> sview:
+    # Clang's JSON AST carries the ABI spelling separately from the source name.
+    # On Darwin the JSON spelling includes the object-file underscore prefix
+    # (`_foo`, `__Z3fooi`), while Elisa's @link_name expects the linker-facing
+    # name before that platform prefix (`foo`, `_Z3fooi`). On ELF the ordinary
+    # C name has no prefix and the Itanium C++ spelling already starts at `_Z`.
+    # Normalize only the unambiguous leading forms; keep other ABI spellings
+    # lossless for targets such as MSVC.
+    def ast_declaration_link_name[@r](node: JsonValueHandle[r]) -> sview @r:
+        mangled: sview = ast_string(ast_field(node, sview("mangledName", 0, -1)))
+        return ast_name(node) if mangled.len == 0 else string_view_suffix(mangled, 1) if sview_starts_with(mangled, sview("__Z", 0, -1)) else string_view_suffix(mangled, 1) if sview_starts_with(mangled, sview("_", 0, -1)) and not sview_starts_with(mangled, sview("_Z", 0, -1)) else mangled
+    def ast_function_link_name[@r](node: JsonValueHandle[r]) -> sview @r:
+        return ast_declaration_link_name(node)
+    def ast_qual_type[@r](node: JsonValueHandle[r]) -> sview @r:
+        type_view: ClangTypeView[r] = clang_type_view_of_decl(node)
+        return type_view.spelling
+    def ast_type_object_c_type[@r](type_node: JsonValueHandle[r]) -> sview @r:
+        type_view: ClangTypeView[r] = clang_type_view_from_type_node(type_node)
+        return type_view.spelling if sview_eq(type_view.spelling, sview("va_list", 0, -1)) or sview_eq(type_view.spelling, sview("__builtin_va_list", 0, -1)) else type_view.desugared_spelling if type_view.desugared_spelling.len > 0 else type_view.spelling
+    def ast_abi_qual_type[@r](node: JsonValueHandle[r]) -> sview @r:
         # Clang keeps typedef spelling in qualType, while desugaredQualType
         # carries the ABI shape needed for pointer and function-pointer lowering.
         return ast_type_object_c_type(ast_field(node, sview("type", 0, -1)))
-
-    def ast_c_type(node: JsonValue) -> sview:
+    def ast_c_type[@r](node: JsonValueHandle[r]) -> sview @r:
         # Keep va_list's spelling: its platform-specific desugared array shape is
         # intentionally represented by Elisa's dedicated va_list ABI type. For
         # ordinary typedefs, use Clang's desugared spelling so anonymous records
         # and aliases such as `error` retain their actual struct shape.
-        spelled: sview = ast_qual_type(node)
-        return spelled if sview_eq(spelled, sview("va_list", 0, -1)) or sview_eq(spelled, sview("__builtin_va_list", 0, -1)) else ast_abi_qual_type(node)
-
-    def ast_children(node: JsonValue) -> JsonValue:
+        type_view: ClangTypeView[r] = clang_type_view_of_decl(node)
+        return type_view.spelling if sview_eq(type_view.spelling, sview("va_list", 0, -1)) or sview_eq(type_view.spelling, sview("__builtin_va_list", 0, -1)) else type_view.desugared_spelling if type_view.desugared_spelling.len > 0 else type_view.spelling
+    def ast_children[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r]:
         return ast_field(node, sview("inner", 0, -1))
-
-    def ast_child_count(node: JsonValue) -> i64:
-        return json_array_len(ast_children(node))
-
-    def ast_child(node: JsonValue, index: i64) -> JsonValue:
+    def ast_child_count[@r](node: JsonValueHandle[r]) -> i64:
+        return json_handle_array_len(ast_children(node))
+    def ast_child[@r](node: JsonValueHandle[r], index: i64) -> JsonValueHandle[r]:
         return ast_array_item(ast_children(node), index)
 
-    def ast_is_comment_node(node: JsonValue) -> bool:
+    # Declaration attributes live in the same `inner` array as fields. Keep
+    # this small structural query beside the AST accessors so frontends can
+    # recognize ABI-relevant attributes without depending on child ordering.
+    def ast_has_child_kind[@r](node: JsonValueHandle[r], wanted: sview) -> bool:
+        count: i64 = ast_child_count(node)
+        if count > 0:
+            for index in 0..<count |node, wanted|:
+                return true if sview_eq(ast_kind(ast_child(node, index)), wanted)
+        return false
+    def ast_is_comment_node[@r](node: JsonValueHandle[r]) -> bool:
         # With `-fparse-all-comments`, Clang attaches documentation trees to
         # declarations and occasionally exposes a FullComment alongside body
         # statements. They are metadata, never executable expressions.
         return sview_eq(ast_kind(node), sview("FullComment", 0, -1))
-
-    def ast_comment_text(node: JsonValue) -> sview:
+    def ast_is_type_declaration[@r](node: JsonValueHandle[r]) -> bool:
+        # Type-only children can appear inside a function body (for example a
+        # C++ local `typedef struct { ... } name`). They are collected into the
+        # translation unit's type table and must not be lowered as statements.
+        kind: sview = ast_kind(node)
+        return sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1)) or ast_is_type_alias_declaration(node)
+    def ast_is_type_alias_declaration[@r](node: JsonValueHandle[r]) -> bool:
+        kind: sview = ast_kind(node)
+        return sview_eq(kind, sview("TypedefDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasDecl", 0, -1))
+    def ast_comment_text[@r](node: JsonValueHandle[r]) -> sview @r:
         if sview_eq(ast_kind(node), sview("TextComment", 0, -1)):
             return ast_string(ast_field(node, sview("text", 0, -1)))
         count: i64 = ast_child_count(node)
@@ -167,68 +78,74 @@ module CTranslator:
                 comment: sview = ast_comment_text(ast_child(node, index))
                 return comment if comment.len > 0
         return sview("", 0, 0)
-
-    def ast_find_child(node: JsonValue, wanted: sview) -> JsonValue:
+    def ast_find_child[@r](node: JsonValueHandle[r], wanted: sview) -> JsonValueHandle[r]:
         count: i64 = ast_child_count(node)
         if count >= 0:
             for index in 0..<count:
-                child: JsonValue = ast_child(node, index)
+                child: JsonValueHandle[r] = ast_child(node, index)
                 return child if sview_eq(ast_kind(child), wanted)
-        return JsonValue.Null
-
-    def ast_find_record_by_id(node: JsonValue, wanted: sview) -> JsonValue:
-        if sview_eq(ast_kind(node), sview("RecordDecl", 0, -1)) and sview_eq(ast_string(ast_field(node, sview("id", 0, -1))), wanted) and ast_child_count(node) > 0:
-            return node
+        return json_handle_null(node)
+    def ast_find_type_decl_id[@r](node: JsonValueHandle[r], wanted: sview) -> sview @r:
+        # Typedef declarations wrap their underlying RecordType/EnumType in
+        # ElaboratedType nodes. Search the complete type subtree instead of
+        # assuming that the type node is an immediate child.
+        if sview_eq(ast_kind(node), wanted):
+            declaration: JsonValueHandle[r] = ast_field(node, sview("decl", 0, -1))
+            identifier: sview = ast_string(ast_field(declaration, sview("id", 0, -1)))
+            return identifier if identifier.len > 0 else ast_string(ast_field(node, sview("ownedTagDecl", 0, -1)))
         count: i64 = ast_child_count(node)
         if count >= 0:
             for index in 0..<count:
-                found: JsonValue = ast_find_record_by_id(ast_child(node, index), wanted)
-                return found if found != JsonValue.Null
-        return JsonValue.Null
-
-    def ast_find_decl_by_id(node: JsonValue, wanted: sview) -> JsonValue:
-        if wanted.len > 0 and sview_eq(ast_string(ast_field(node, sview("id", 0, -1))), wanted):
-            return node
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count:
-                found: JsonValue = ast_find_decl_by_id(ast_child(node, index), wanted)
-                return found if found != JsonValue.Null
-        return JsonValue.Null
-
-    def ast_has_child(node: JsonValue, wanted: sview) -> bool:
-        return ast_find_child(node, wanted) != JsonValue.Null
-
-    def ast_location_file(node: JsonValue) -> sview:
-        location: JsonValue = ast_field(node, sview("loc", 0, -1))
+                found: sview = ast_find_type_decl_id(ast_child(node, index), wanted)
+                return found if found.len > 0
+        return sview("", 0, 0)
+    def ast_has_child[@r](node: JsonValueHandle[r], wanted: sview) -> bool:
+        return not json_handle_is_null(ast_find_child(node, wanted))
+    def ast_location_file[@r](node: JsonValueHandle[r]) -> sview @r:
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
         direct: mutable sview = ast_string(ast_field(location, sview("file", 0, -1)))
         return direct if direct.len > 0
         spelling: mutable sview = ast_string(ast_field(ast_field(location, sview("spellingLoc", 0, -1)), sview("file", 0, -1)))
         return spelling if spelling.len > 0
         expansion: sview = ast_string(ast_field(ast_field(location, sview("expansionLoc", 0, -1)), sview("file", 0, -1)))
         return expansion if expansion.len > 0
-        range: JsonValue = ast_field(node, sview("range", 0, -1))
-        begin: JsonValue = ast_field(range, sview("begin", 0, -1))
+        range: JsonValueHandle[r] = ast_field(node, sview("range", 0, -1))
+        begin: JsonValueHandle[r] = ast_field(range, sview("begin", 0, -1))
         direct <- ast_string(ast_field(begin, sview("file", 0, -1)))
         return direct if direct.len > 0
         spelling <- ast_string(ast_field(ast_field(begin, sview("spellingLoc", 0, -1)), sview("file", 0, -1)))
         return spelling if spelling.len > 0
         return ast_string(ast_field(ast_field(begin, sview("expansionLoc", 0, -1)), sview("file", 0, -1)))
 
-    def ast_included_from_file(node: JsonValue) -> sview:
-        location: JsonValue = ast_field(node, sview("loc", 0, -1))
-        included_from: JsonValue = ast_field(location, sview("includedFrom", 0, -1))
+    # Clang omits line/column fields for some source declarations in JSON AST
+    # output, especially declarations reached through a macro or a repeated
+    # header reference. The byte offset is still present and is a stable
+    # translation-unit identity component, so callers that need declaration
+    # identity can use it as a lossless fallback.
+    def ast_location_offset[@r](node: JsonValueHandle[r]) -> i64:
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        offset: mutable i64 = typed_number(ast_field(location, sview("offset", 0, -1)))
+        return offset if offset >= 0
+        range: JsonValueHandle[r] = ast_field(node, sview("range", 0, -1))
+        begin: JsonValueHandle[r] = ast_field(range, sview("begin", 0, -1))
+        offset <- typed_number(ast_field(ast_field(begin, sview("expansionLoc", 0, -1)), sview("offset", 0, -1)))
+        return offset if offset >= 0
+        offset <- typed_number(ast_field(ast_field(begin, sview("spellingLoc", 0, -1)), sview("offset", 0, -1)))
+        return offset if offset >= 0
+        return typed_number(ast_field(begin, sview("offset", 0, -1)))
+    def ast_included_from_file[@r](node: JsonValueHandle[r]) -> sview @r:
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        included_from: JsonValueHandle[r] = ast_field(location, sview("includedFrom", 0, -1))
         direct: mutable sview = ast_string(ast_field(included_from, sview("file", 0, -1)))
         return direct if direct.len > 0
-        spelling: JsonValue = ast_field(location, sview("spellingLoc", 0, -1))
+        spelling: JsonValueHandle[r] = ast_field(location, sview("spellingLoc", 0, -1))
         direct <- ast_string(ast_field(ast_field(spelling, sview("includedFrom", 0, -1)), sview("file", 0, -1)))
         return direct if direct.len > 0
-        expansion: JsonValue = ast_field(location, sview("expansionLoc", 0, -1))
+        expansion: JsonValueHandle[r] = ast_field(location, sview("expansionLoc", 0, -1))
         return ast_string(ast_field(ast_field(expansion, sview("includedFrom", 0, -1)), sview("file", 0, -1)))
-
-    def ast_location_has_origin(node: JsonValue) -> bool:
-        location: JsonValue = ast_field(node, sview("loc", 0, -1))
-        return ast_field(location, sview("spellingLoc", 0, -1)) != JsonValue.Null or ast_field(location, sview("expansionLoc", 0, -1)) != JsonValue.Null
+    def ast_location_has_origin[@r](node: JsonValueHandle[r]) -> bool:
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        return not json_handle_is_null(ast_field(location, sview("spellingLoc", 0, -1))) or not json_handle_is_null(ast_field(location, sview("expansionLoc", 0, -1)))
 
     def ast_same_source_directory(file: sview, source: sview) -> bool:
         file_slash: mutable i64 = -1
@@ -239,15 +156,26 @@ module CTranslator:
             source_slash <- index if string_view_index(source, index) == 47
         return file_slash >= 0 and file_slash == source_slash and sview_eq(string_view_prefix(file, file_slash), string_view_prefix(source, source_slash))
 
-    def ast_is_embedded_user_record(node: JsonValue, source: cstr) -> bool:
-        return false if not sview_eq(ast_kind(node), sview("RecordDecl", 0, -1)) or ast_name(node).len == 0
+    def ast_is_relative_path(path: sview) -> bool:
+        return path.len > 0 and string_view_index(path, 0) != 47 and string_view_index(path, 0) != 60
+    def ast_is_project_local_declaration[@r](node: JsonValueHandle[r]) -> bool:
+        # Compile databases commonly make Clang report project headers with
+        # relative spellings such as `./include/game.h`. System headers are
+        # absolute (or angle-bracket pseudo paths), so this accepts the former
+        # without embedding any project- or library-specific paths.
+        file: sview = ast_location_file(node)
+        return true if ast_is_relative_path(file)
+        included_from: sview = ast_included_from_file(node)
+        return file.len == 0 and ast_is_relative_path(included_from)
+    def ast_is_embedded_user_record[@r](node: JsonValueHandle[r], source: cstr) -> bool:
+        kind: sview = ast_kind(node)
+        return false if (not sview_eq(kind, sview("RecordDecl", 0, -1)) and not sview_eq(kind, sview("CXXRecordDecl", 0, -1))) or ast_name(node).len == 0
         return false if sview_starts_with(ast_name(node), sview("__", 0, -1))
         file: sview = ast_location_file(node)
         included_from: sview = ast_included_from_file(node)
         source_view: sview = sview(source, 0, -1)
         return file.len == 0 and (sview_eq(included_from, source_view) or ast_same_source_directory(included_from, source_view)) and ast_child_count(node) > 0
-
-    def ast_is_embedded_user_declaration(node: JsonValue, source: cstr) -> bool:
+    def ast_is_embedded_user_declaration[@r](node: JsonValueHandle[r], source: cstr) -> bool:
         # When a C implementation is included with `#include "foo.c"`, Clang
         # reports the including source as `includedFrom` for the implementation
         # declarations. The same provenance is also used for some declarations
@@ -263,11 +191,83 @@ module CTranslator:
             return ast_has_child(node, sview("CompoundStmt", 0, -1))
         if sview_eq(kind, sview("VarDecl", 0, -1)):
             return true
-        if sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1)) or sview_eq(kind, sview("TypedefDecl", 0, -1)):
+        if sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1)) or ast_is_type_alias_declaration(node):
             return ast_child_count(node) > 0
         return false
+    def ast_is_macro_expanded_source_function[@r](node: JsonValueHandle[r]) -> bool:
+        # Public C APIs are often declared with an export macro. Clang then
+        # gives the FunctionDecl an expansion offset in the main file but no
+        # direct file on `loc`; requiring `inline`/`isUsed` would silently drop
+        # unreferenced library entry points. Keep named source-local function
+        # declarations and definitions, while excluding header-origin nodes.
+        return false if not sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1))
+        return false if ast_name(node).len == 0 or sview_starts_with(ast_name(node), sview("__", 0, -1))
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        return false if ast_location_file(node).len > 0 or ast_included_from_file(node).len > 0
+        range: JsonValueHandle[r] = ast_field(node, sview("range", 0, -1))
+        begin: JsonValueHandle[r] = ast_field(range, sview("begin", 0, -1))
+        expansion: JsonValueHandle[r] = ast_field(begin, sview("expansionLoc", 0, -1))
+        return not json_handle_is_null(location) and not json_handle_is_null(expansion) and not json_handle_is_null(ast_field(expansion, sview("offset", 0, -1)))
+    def ast_is_project_local_inline_definition[@r](node: JsonValueHandle[r]) -> bool:
+        # Header-only helpers are real source definitions, not externals. Keep
+        # them when Clang reports a relative project header as the origin; the
+        # inline/static requirement prevents this from pulling ordinary libc or
+        # SDL declarations into every translation unit.
+        return false if not sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1))
+        return false if ast_name(node).len == 0 or sview_starts_with(ast_name(node), sview("__", 0, -1))
+        return false if not ast_bool(ast_field(node, sview("inline", 0, -1))) and not sview_eq(ast_string(ast_field(node, sview("storageClass", 0, -1))), sview("static", 0, -1))
+        return false if not ast_has_child(node, sview("CompoundStmt", 0, -1))
+        file: sview = ast_location_file(node)
+        included_from: sview = ast_included_from_file(node)
+        return ast_is_relative_path(file) or (file.len == 0 and ast_is_relative_path(included_from))
 
-    def ast_is_user_declaration(node: JsonValue, source: cstr) -> bool:
+    def ast_is_project_path(path: sview, source: cstr) -> bool:
+        # Clang may spell project headers either relative to the compile
+        # database or as absolute paths. System headers are absolute too, so
+        # an absolute path is project-local only when it is the source itself
+        # or lives beside that source. This keeps inline implementations from
+        # libc/libc++ out of generated Elisa while retaining ordinary project
+        # headers regardless of how the compile command spells them.
+        return false if path.len == 0
+        return true if ast_is_relative_path(path)
+        source_view: sview = sview(source, 0, -1)
+        return true if sview_eq(path, source_view)
+        return ast_same_source_directory(path, source_view)
+
+    def ast_is_project_header_path(path: sview, source: cstr) -> bool:
+        # A definition in the main source file is not a header-inline
+        # definition, even when it is static. Header paths may be relative or
+        # absolute, but must not be the source file itself.
+        return false if path.len == 0
+        source_view: sview = sview(source, 0, -1)
+        return false if sview_eq(path, source_view)
+        return true if ast_is_relative_path(path)
+        return ast_same_source_directory(path, source_view)
+    def ast_is_header_inline_definition[@r](node: JsonValueHandle[r], source: cstr) -> bool:
+        # Header inline definitions have internal or inline linkage in the
+        # including translation unit. They must get a private Elisa spelling
+        # when a separate source file also provides the external definition.
+        # Use provenance and ordinary header suffixes, never a project/library
+        # name, so this applies equally to every C/C++ project.
+        return false if not sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1))
+        return false if ast_name(node).len == 0 or sview_starts_with(ast_name(node), sview("__", 0, -1))
+        # The C++ standard library exposes placement allocation/deallocation
+        # definitions as inline functions in system headers. They are runtime
+        # ABI declarations, not source-level helpers, and emitting them both
+        # creates invalid Elisa operator names and duplicates the host runtime.
+        return false if sview_eq(ast_name(node), sview("operator new", 0, -1)) or sview_eq(ast_name(node), sview("operator new[]", 0, -1)) or sview_eq(ast_name(node), sview("operator delete", 0, -1)) or sview_eq(ast_name(node), sview("operator delete[]", 0, -1))
+        # C/C++ static and inline definitions have translation-unit-local
+        # ownership in the generated project. This also covers inline helpers
+        # whose Clang location only retains `includedFrom: <source>` rather
+        # than the original header filename.
+        return false if not ast_bool(ast_field(node, sview("inline", 0, -1))) and not sview_eq(ast_string(ast_field(node, sview("storageClass", 0, -1))), sview("static", 0, -1))
+        return false if not ast_has_child(node, sview("CompoundStmt", 0, -1))
+        file: sview = ast_location_file(node)
+        included_from: sview = ast_included_from_file(node)
+        return true if ast_is_project_header_path(file, source)
+        return true if ast_is_project_path(included_from, source)
+        return false
+    def ast_is_user_declaration[@r](node: JsonValueHandle[r], source: cstr) -> bool:
         file: sview = ast_location_file(node)
         included_from: sview = ast_included_from_file(node)
         source_view: sview = sview(source, 0, -1)
@@ -278,317 +278,264 @@ module CTranslator:
         # with only `includedFrom` pointing at the source is still a header
         # declaration; accepting it would pull in incomplete system-only records
         # such as Darwin's opaque `fssearchblock` and `searchstate` structs.
-        return sview_eq(file, source_view) or ast_same_source_directory(file, source_view) or ast_is_embedded_user_declaration(node, source) or (file.len == 0 and included_from.len == 0 and not ast_location_has_origin(node))
+        return true if ast_is_macro_expanded_source_function(node)
+        return true if ast_is_header_inline_definition(node, source)
+        return true if ast_is_project_local_inline_definition(node)
+        return sview_eq(file, source_view) or ast_same_source_directory(file, source_view) or ast_is_embedded_user_declaration(node, source) or (file.len == 0 and included_from.len == 0 and not ast_location_has_origin(node) and not json_handle_is_null(ast_field(ast_field(ast_field(node, sview("range", 0, -1)), sview("begin", 0, -1)), sview("offset", 0, -1))))
+    def ast_is_declaration_scope[@r](node: JsonValueHandle[r]) -> bool:
+        # Clang nests declarations in these transparent containers. In
+        # particular, an `extern "C" { ... }` block is a LinkageSpecDecl, so
+        # walking only TranslationUnitDecl's direct children silently drops
+        # otherwise ordinary C definitions. Namespaces are included for the
+        # C++-that-is-still-C subset without treating class members as free
+        # functions.
+        kind: sview = ast_kind(node)
+        return sview_eq(kind, sview("LinkageSpecDecl", 0, -1)) or sview_eq(kind, sview("NamespaceDecl", 0, -1)) or sview_eq(kind, sview("ExternCContextDecl", 0, -1))
+    def ast_is_user_type_declaration[@r](node: JsonValueHandle[r], source: cstr) -> bool:
+        # Project headers contribute layouts and aliases, but their inline
+        # function bodies must not be emitted into every translation unit. Keep
+        # the broader source test for declarations in the main file and add the
+        # relative-header rule only for declarations that define a type.
+        return true if ast_bool(ast_field(node, sview("elisaDependency", 0, -1)))
+        return true if ast_is_user_declaration(node, source)
+        return false if not ast_is_project_local_declaration(node)
+        kind: sview = ast_kind(node)
+        return sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1)) or ast_is_type_alias_declaration(node)
 
     def safe_identifier(name: sview) -> sview:
-        # Elisa reserves a few ordinary C identifiers. Prefixing only collisions
-        # keeps the generated source close to the original C.
-        if sview_eq(name, sview("error", 0, -1)):
-            return sview("c_error", 0, -1)
-        if sview_eq(name, sview("match", 0, -1)):
-            return sview("c_match", 0, -1)
-        if sview_eq(name, sview("pass", 0, -1)):
-            return sview("c_pass", 0, -1)
-        if sview_eq(name, sview("return", 0, -1)):
-            return sview("c_return", 0, -1)
-        if sview_eq(name, sview("new", 0, -1)):
-            return sview("c_new", 0, -1)
-        if sview_eq(name, sview("null", 0, -1)):
-            return sview("c_null", 0, -1)
+        # C permits identifiers that are reserved words in Elisa. Prefix every
+        # language keyword at this single boundary so declarations, references,
+        # fields, and generated parameter names stay consistent.
+        if sview_eq(name, sview("as", 0, -1)): return sview("c_as", 0, -1)
+        if sview_eq(name, sview("if", 0, -1)): return sview("c_if", 0, -1)
+        if sview_eq(name, sview("in", 0, -1)): return sview("c_in", 0, -1)
+        if sview_eq(name, sview("or", 0, -1)): return sview("c_or", 0, -1)
+        if sview_eq(name, sview("is", 0, -1)): return sview("c_is", 0, -1)
+        if sview_eq(name, sview("to", 0, -1)): return sview("c_to", 0, -1)
+        if sview_eq(name, sview("and", 0, -1)): return sview("c_and", 0, -1)
+        if sview_eq(name, sview("def", 0, -1)): return sview("c_def", 0, -1)
+        if sview_eq(name, sview("not", 0, -1)): return sview("c_not", 0, -1)
+        if sview_eq(name, sview("try", 0, -1)): return sview("c_try", 0, -1)
+        if sview_eq(name, sview("elif", 0, -1)): return sview("c_elif", 0, -1)
+        if sview_eq(name, sview("else", 0, -1)): return sview("c_else", 0, -1)
+        if sview_eq(name, sview("enum", 0, -1)): return sview("c_enum", 0, -1)
+        if sview_eq(name, sview("heap", 0, -1)): return sview("c_heap", 0, -1)
+        if sview_eq(name, sview("null", 0, -1)): return sview("c_null", 0, -1)
+        if sview_eq(name, sview("pass", 0, -1)): return sview("c_pass", 0, -1)
+        if sview_eq(name, sview("repr", 0, -1)): return sview("c_repr", 0, -1)
+        if sview_eq(name, sview("tail", 0, -1)): return sview("c_tail", 0, -1)
+        if sview_eq(name, sview("true", 0, -1)): return sview("c_true", 0, -1)
+        if sview_eq(name, sview("with", 0, -1)): return sview("c_with", 0, -1)
+        if sview_eq(name, sview("break", 0, -1)): return sview("c_break", 0, -1)
+        if sview_eq(name, sview("catch", 0, -1)): return sview("c_catch", 0, -1)
+        if sview_eq(name, sview("const", 0, -1)): return sview("c_const", 0, -1)
+        if sview_eq(name, sview("error", 0, -1)): return sview("c_error", 0, -1)
+        if sview_eq(name, sview("false", 0, -1)): return sview("c_false", 0, -1)
+        if sview_eq(name, sview("match", 0, -1)): return sview("c_match", 0, -1)
+        if sview_eq(name, sview("panic", 0, -1)): return sview("c_panic", 0, -1)
+        if sview_eq(name, sview("raise", 0, -1)): return sview("c_raise", 0, -1)
+        if sview_eq(name, sview("stack", 0, -1)): return sview("c_stack", 0, -1)
+        if sview_eq(name, sview("while", 0, -1)): return sview("c_while", 0, -1)
+        if sview_eq(name, sview("export", 0, -1)): return sview("c_export", 0, -1)
+        if sview_eq(name, sview("extern", 0, -1)): return sview("c_extern", 0, -1)
+        if sview_eq(name, sview("global", 0, -1)): return sview("c_global", 0, -1)
+        if sview_eq(name, sview("packed", 0, -1)): return sview("c_packed", 0, -1)
+        if sview_eq(name, sview("return", 0, -1)): return sview("c_return", 0, -1)
+        if sview_eq(name, sview("sizeof", 0, -1)): return sview("c_sizeof", 0, -1)
+        if sview_eq(name, sview("size_of", 0, -1)): return sview("c_size_of", 0, -1)
+        if sview_eq(name, sview("static", 0, -1)): return sview("c_static", 0, -1)
+        if sview_eq(name, sview("struct", 0, -1)): return sview("c_struct", 0, -1)
+        if sview_eq(name, sview("zeroed", 0, -1)): return sview("c_zeroed", 0, -1)
+        if sview_eq(name, sview("alignof", 0, -1)): return sview("c_alignof", 0, -1)
+        if sview_eq(name, sview("align_of", 0, -1)): return sview("c_align_of", 0, -1)
+        if sview_eq(name, sview("mutable", 0, -1)): return sview("c_mutable", 0, -1)
+        if sview_eq(name, sview("lmut", 0, -1)): return sview("c_lmut", 0, -1)
+        if sview_eq(name, sview("continue", 0, -1)): return sview("c_continue", 0, -1)
+        if sview_eq(name, sview("offsetof", 0, -1)): return sview("c_offsetof", 0, -1)
+        if sview_eq(name, sview("offset_of", 0, -1)): return sview("c_offset_of", 0, -1)
+        if sview_eq(name, sview("region", 0, -1)): return sview("c_region", 0, -1)
+        if sview_eq(name, sview("new", 0, -1)): return sview("c_new", 0, -1)
+        if sview_eq(name, sview("from", 0, -1)): return sview("c_from", 0, -1)
+        if sview_eq(name, sview("for", 0, -1)): return sview("c_for", 0, -1)
+        if sview_eq(name, sview("module", 0, -1)): return sview("c_module", 0, -1)
+        if sview_eq(name, sview("move", 0, -1)): return sview("c_move", 0, -1)
+        if sview_eq(name, sview("include", 0, -1)): return sview("c_include", 0, -1)
+        if sview_eq(name, sview("type", 0, -1)): return sview("c_type", 0, -1)
+        if sview_eq(name, sview("extend", 0, -1)): return sview("c_extend", 0, -1)
+        if sview_eq(name, sview("impl", 0, -1)): return sview("c_impl", 0, -1)
+        if sview_eq(name, sview("where", 0, -1)): return sview("c_where", 0, -1)
         return name
-
-    def ast_expr_name(node: JsonValue) -> sview:
+    def ast_expr_name[@r](node: JsonValueHandle[r]) -> sview @r:
         kind: sview = ast_kind(node)
         if sview_eq(kind, sview("DeclRefExpr", 0, -1)):
-            referenced: JsonValue = ast_field(node, sview("referencedDecl", 0, -1))
+            referenced: JsonValueHandle[r] = ast_field(node, sview("referencedDecl", 0, -1))
             name: mutable sview = ast_name(referenced)
             name <- ast_name(node) if name.len == 0
             return name
         if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
             return ast_expr_name(ast_child(node, 0))
         return sview("", 0, 0)
-
-    def ast_unwrapped_type(node: JsonValue) -> sview:
+    def ast_unwrapped_type[@r](node: JsonValueHandle[r]) -> sview @r:
         kind: sview = ast_kind(node)
         if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
             return ast_unwrapped_type(ast_child(node, 0))
         return ast_qual_type(node)
-
-    def ast_is_empty(node: JsonValue) -> bool:
+    def ast_is_empty[@r](node: JsonValueHandle[r]) -> bool:
         return ast_kind(node).len == 0
-
-    def ast_cast_kind(node: JsonValue) -> sview:
+    def ast_cast_kind[@r](node: JsonValueHandle[r]) -> sview @r:
         return ast_string(ast_field(node, sview("castKind", 0, -1)))
-
-    def ast_target_label_id(node: JsonValue) -> sview:
+    def ast_target_label_id[@r](node: JsonValueHandle[r]) -> sview @r:
         return ast_string(ast_field(node, sview("targetLabelDeclId", 0, -1)))
-
-    def ast_enum_value(node: JsonValue, fallback: i64) -> i64:
+    def ast_enum_value_text[@r](node: JsonValueHandle[r]) -> sview @r:
+        # Clang normally places the evaluated value on a nested ConstantExpr,
+        # behind one or more implicit casts.  Looking only at the first child
+        # loses explicit values such as 0x00000001 and silently turns a flag
+        # enum into an ordinal enum.
+        value_text: sview = ast_string(ast_field(node, sview("value", 0, -1)))
+        return value_text if value_text.len > 0
         count: i64 = ast_child_count(node)
-        if count > 0:
-            child: JsonValue = ast_child(node, 0)
-            value: JsonValue = ast_field(child, sview("value", 0, -1))
-            value_text: sview = ast_string(value)
-            if value_text.len > 0:
-                # Clang gives enum values as decimal strings. The source corpus uses
-                # only ordinary integer constants, so the small parser below is enough
-                # and avoids re-parsing the C spelling.
-                result: mutable i64 = 0
-                sign: mutable i64 = 1
-                start: mutable i64 = 0
-                if string_view_index(value_text, 0) == 45:
-                    sign <- -1
-                    start <- 1
-                for index in start..<value_text.len |result, value_text|:
-                    digit: i64 = string_view_index(value_text, index) - 48
-                    result <- result * 10 + digit if digit >= 0 and digit <= 9
-                return result * sign
-        return fallback
+        if count >= 0:
+            for index in 0..<count:
+                found: sview = ast_enum_value_text(ast_child(node, index))
+                return found if found.len > 0
+        return sview("", 0, 0)
 
-    # -----------------------------------------------------------------------------
-    # Typed lowering IR
-    # -----------------------------------------------------------------------------
-    #
-    # The Clang JSON tree is intentionally not emitted directly. Lowering first
-    # produces these flat, index-based nodes. Indexes keep the IR non-recursive,
-    # which fits Elisa's value model while still allowing arbitrarily nested C
-    # expressions and statements.
+    def ast_try_integer_text(text: sview, result: mutable i64&) -> bool:
+        return false if text.len == 0
+        cursor: mutable i64 = 0
+        sign: mutable i64 = 1
+        if string_view_index(text, 0) == 45:
+            sign <- -1
+            cursor <- 1
+        base: mutable i64 = 10
+        if cursor + 1 < text.len and string_view_index(text, cursor) == 48 and (string_view_index(text, cursor + 1) == 120 or string_view_index(text, cursor + 1) == 88):
+            base <- 16
+            cursor <- cursor + 2
+        value: mutable i64 = 0
+        digits: mutable i64 = 0
+        while cursor < text.len:
+            byte: i64 = string_view_index(text, cursor)
+            digit: mutable i64 = byte - 48
+            if byte >= 97 and byte <= 102:
+                digit <- byte - 97 + 10
+            elif byte >= 65 and byte <= 70:
+                digit <- byte - 65 + 10
+            break if digit < 0 or digit >= base
+            return false if value > (9223372036854775807 - digit) / base
+            value <- value * base + digit
+            digits <- digits + 1
+            cursor <- cursor + 1
+        return false if digits == 0
+        result[0] <- value * sign
+        return true
 
-    const enum TypedExprKind of i8:
-        Invalid
-        Integer
-        Floating
-        String
-        Character
-        Name
-        Binary
-        Unary
-        ArrayIndex
-        Conditional
-        Member
-        Call
-        Sizeof
-        Cast
-        Aggregate
-        Sequence
-        Null
-        Zeroed
-
-    const enum TypedStmtKind of i8:
-        Invalid
-        Block
-        Return
-        Declaration
-        If
-        Expression
-        For
-        While
-        DoWhile
-        Break
-        Continue
-        Goto
-        Label
-        Switch
-        SwitchBreak
-        Null
-
-    const enum TypedBindingKind of i8:
-        External
-        ExternalGlobal
-
-    const enum TypedTranslationMode of i8:
-        Fidelity
-        Idiomatic
-
-    struct TypedExpr:
-        kind: TypedExprKind
-        text: sview
-        type_name: sview
-        lhs: i64
-        rhs: i64
-        third: i64
-        args_start: i64
-        args_count: i64
-        value: i64
-
-    struct TypedStmt:
-        kind: TypedStmtKind
-        expr: i64
-        aux: i64
-        aux2: i64
-        children_start: i64
-        children_count: i64
-        name: sview
-        type_name: sview
-
-    struct TypedParam:
-        name: sview
-        type_name: sview
-        is_mutable: bool
-
-    struct TypedNameAlias:
-        source: sview
-        suffix: sview
-
-    struct TypedField:
-        name: sview
-        type_name: sview
-
-    struct TypedRecord:
-        name: sview
-        fields_start: i64
-        fields_count: i64
-        comment: sview
-
-    struct TypedEnumConst:
-        name: sview
-        enum_name: sview
-        value: i64
-
-    struct TypedEnum:
-        name: sview
-        underlying_type: sview
-
-    struct TypedExtern:
-        name: sview
-        link_name: sview
-        return_type: sview
-        params_start: i64
-        params_count: i64
-        variadic: bool
-
-    struct TypedExternGlobal:
-        name: sview
-        link_name: sview
-        type_name: sview
-
-    struct TypedLabel:
-        id: sview
-        node: JsonValue
-
-    struct TypedGlobal:
-        name: sview
-        type_name: sview
-        initializer: i64
-        comment: sview
-
-    struct TypedSwitchCase:
-        value: i64
-        body: i64
-        is_default: bool
-        is_constant: bool
-        constant_value: i64
-
-    struct TypedFunction:
-        name: sview
-        return_type: sview
-        params_start: i64
-        params_count: i64
-        body: i64
-        variadic: bool
-        has_global_effect: bool
-        has_unsafe_effect: bool
-        has_goto: bool
-        label_count: i64
-        comment: sview
-
-    const enum TypedFlowTermKind of i8:
-        Open
-        Jump
-        Branch
-        Return
-        Stop
-
-    struct TypedFlowBlock:
-        term_type: mutable sview
-        statements_count: mutable i64
-        term_expr: mutable i64
-        target: mutable i64
-        true_target: mutable i64
-        false_target: mutable i64
-        term_kind: mutable TypedFlowTermKind
-        target_is_label: mutable bool
-
-    struct TypedFlowStatement:
-        block: i64
-        statement: i64
-
-    struct TypedFlowBuilder:
-        blocks: mutable darray[TypedFlowBlock]
-        statements: mutable darray[TypedFlowStatement]
-        label_blocks: mutable darray[i64]
-        declarations: mutable darray[i64]
-        break_targets: mutable darray[i64]
-        continue_targets: mutable darray[i64]
-        state_name: sview
-        current: mutable i64
-
-    struct TypedDiagnostic:
-        category: sview
-        kind: sview
-        source: sview
-        line: i64
-        column: i64
-
-    struct TypedDeclInfo:
-        id: sview
-        is_user: bool
-        is_extern: bool
-
-    struct TypedContext:
-        exprs: mutable darray[TypedExpr]
-        expr_children: mutable darray[i64]
-        stmts: mutable darray[TypedStmt]
-        stmt_children: mutable darray[i64]
-        params: mutable darray[TypedParam]
-        current_name_aliases: mutable darray[TypedNameAlias]
-        current_nonnull_names: mutable darray[sview]
-        current_nonnull_exprs: mutable darray[i64]
-        extern_params: mutable darray[TypedParam]
-        globals: mutable darray[TypedGlobal]
-        functions: mutable darray[TypedFunction]
-        user_function_names: mutable darray[sview]
-        externs: mutable darray[TypedExtern]
-        extern_globals: mutable darray[TypedExternGlobal]
-        fields: mutable darray[TypedField]
-        records: mutable darray[TypedRecord]
-        enums: mutable darray[TypedEnum]
-        enum_consts: mutable darray[TypedEnumConst]
-        labels: mutable darray[TypedLabel]
-        switch_cases: mutable darray[TypedSwitchCase]
-        decl_infos: mutable darray[TypedDeclInfo]
-        break_scopes: mutable darray[i8]
-        switch_depth: mutable i64
-        current_for_increment: mutable i64
-        current_return_type: mutable sview
-        current_has_goto: mutable bool
-        current_emit_has_goto: mutable bool
-        current_structured_break_label: mutable i64
-        current_emit_goto_name: mutable sview
-        current_switch_done_name: mutable sview
-        current_switch_done_index: mutable i64
-        current_function_body: mutable i64
-        current_trusted_depth: mutable i64
-        mode: TypedTranslationMode
-        source: cstr
-        root: mutable JsonValue
-        diagnostics: mutable darray[TypedDiagnostic]
-
-    struct TypedTranslation:
-        output: darray[u8]
-        diagnostics: darray[TypedDiagnostic]
-        failed: bool
-
-    def typed_number(value: JsonValue) -> i64:
-        match value:
-            JsonValue.Number(number):
-                return number.i64()
-            _:
-                return 0
-
-    def ast_bool(value: JsonValue) -> bool:
-        match value:
-            JsonValue.Bool(result):
-                return result
-            _:
+    # Clang uses unevaluated AST shapes for some required compile-time integer
+    # arguments.  Apple fortified headers are a common example: the object-size
+    # mode is emitted as `2 > 1 ? 1 : 0`, not as one IntegerLiteral.  Evaluate
+    # the small, side-effect-free integer subset needed at the AST boundary so
+    # such metadata does not get mistaken for the first literal in the tree.
+    def ast_try_compile_time_integer[@r](node: JsonValueHandle[r], result: mutable i64&) -> bool:
+        value_text: sview = ast_string(ast_field(node, sview("value", 0, -1)))
+        return ast_try_integer_text(value_text, result) if value_text.len > 0
+        kind: sview = ast_kind(node)
+        if (sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)) or sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("ExprWithCleanups", 0, -1))) and ast_child_count(node) > 0:
+            return ast_try_compile_time_integer(ast_child(node, 0), result)
+        if sview_eq(kind, sview("ConditionalOperator", 0, -1)) and ast_child_count(node) > 2:
+            condition: mutable i64 = 0
+            return false if not ast_try_compile_time_integer(ast_child(node, 0), condition)
+            return ast_try_compile_time_integer(ast_child(node, 1), result) if condition != 0
+            return ast_try_compile_time_integer(ast_child(node, 2), result)
+        if sview_eq(kind, sview("UnaryOperator", 0, -1)) and ast_child_count(node) > 0:
+            operand: mutable i64 = 0
+            return false if not ast_try_compile_time_integer(ast_child(node, 0), operand)
+            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            if sview_eq(opcode, sview("+", 0, -1)):
+                result[0] <- operand
+                return true
+            if sview_eq(opcode, sview("-", 0, -1)):
+                result[0] <- 0 - operand
+                return true
+            if sview_eq(opcode, sview("!", 0, -1)):
+                result[0] <- 1 if operand == 0 else 0
+                return true
+            if sview_eq(opcode, sview("~", 0, -1)):
+                result[0] <- ~operand
+                return true
+            return false
+        if sview_eq(kind, sview("BinaryOperator", 0, -1)) and ast_child_count(node) > 1:
+            left: mutable i64 = 0
+            right: mutable i64 = 0
+            return false if not ast_try_compile_time_integer(ast_child(node, 0), left) or not ast_try_compile_time_integer(ast_child(node, 1), right)
+            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            if sview_eq(opcode, sview("+", 0, -1)):
+                result[0] <- left + right
+            elif sview_eq(opcode, sview("-", 0, -1)):
+                result[0] <- left - right
+            elif sview_eq(opcode, sview("*", 0, -1)):
+                result[0] <- left * right
+            elif sview_eq(opcode, sview("/", 0, -1)):
+                return false if right == 0
+                result[0] <- left / right
+            elif sview_eq(opcode, sview("%", 0, -1)):
+                return false if right == 0
+                result[0] <- left % right
+            elif sview_eq(opcode, sview("<<", 0, -1)):
+                return false if right < 0 or right >= 63
+                result[0] <- left << right
+            elif sview_eq(opcode, sview(">>", 0, -1)):
+                return false if right < 0 or right >= 63
+                result[0] <- left >> right
+            elif sview_eq(opcode, sview("<", 0, -1)):
+                result[0] <- 1 if left < right else 0
+            elif sview_eq(opcode, sview("<=", 0, -1)):
+                result[0] <- 1 if left <= right else 0
+            elif sview_eq(opcode, sview(">", 0, -1)):
+                result[0] <- 1 if left > right else 0
+            elif sview_eq(opcode, sview(">=", 0, -1)):
+                result[0] <- 1 if left >= right else 0
+            elif sview_eq(opcode, sview("==", 0, -1)):
+                result[0] <- 1 if left == right else 0
+            elif sview_eq(opcode, sview("!=", 0, -1)):
+                result[0] <- 1 if left != right else 0
+            elif sview_eq(opcode, sview("&", 0, -1)):
+                result[0] <- left & right
+            elif sview_eq(opcode, sview("|", 0, -1)):
+                result[0] <- left | right
+            elif sview_eq(opcode, sview("^", 0, -1)):
+                result[0] <- left ^ right
+            elif sview_eq(opcode, sview("&&", 0, -1)):
+                result[0] <- 1 if left != 0 and right != 0 else 0
+            elif sview_eq(opcode, sview("||", 0, -1)):
+                result[0] <- 1 if left != 0 or right != 0 else 0
+            else:
                 return false
+            return true
+        return false
+    def ast_compile_time_integer[@r](node: JsonValueHandle[r], fallback: i64) -> i64:
+        result: mutable i64 = 0
+        return result if ast_try_compile_time_integer(node, result)
+        return fallback
+    def ast_enum_value[@r](node: JsonValueHandle[r], fallback: i64) -> i64:
+        # Clang stores the evaluated enum value on a nested ConstantExpr or
+        # cast; prefer it so flag values survive instead of becoming ordinals.
+        value_text: sview = ast_enum_value_text(node)
+        parsed: mutable i64 = 0
+        return parsed if value_text.len > 0 and ast_try_integer_text(value_text, parsed)
+        return ast_compile_time_integer(node, fallback)
+    def ast_enum_has_referenced_constant[@r](node: JsonValueHandle[r]) -> bool:
+        if sview_eq(ast_kind(node), sview("EnumConstantDecl", 0, -1)) and ast_bool(ast_field(node, sview("isReferenced", 0, -1))):
+            return true
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count:
+                return true if ast_enum_has_referenced_constant(ast_child(node, index))
+        return false
+    def ast_first_referenced_enum_constant_name[@r](node: JsonValueHandle[r]) -> sview @r:
+        if sview_eq(ast_kind(node), sview("EnumConstantDecl", 0, -1)) and ast_bool(ast_field(node, sview("isReferenced", 0, -1))):
+            return ast_name(node)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count:
+                found: sview = ast_first_referenced_enum_constant_name(ast_child(node, index))
+                return found if found.len > 0
+        return sview("", 0, 0)

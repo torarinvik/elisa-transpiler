@@ -1,0 +1,332 @@
+extend CTranslator:
+    const enum ClangResponseFailure of i8:
+        None
+        Unreadable
+        ByteLimit
+        NestingLimit
+        ArgumentLimit
+        InvalidSyntax
+
+    def clang_response_record_failure(failure: ClangResponseFailure, source_path: darray[u8], failure_out: mutable ClangResponseFailure&, path_out: mutable darray[u8]&) -> void:
+        return if failure_out[0] != ClangResponseFailure.None
+        failure_out <- failure
+        path_out.count <- 0.usize()
+        for index in 0..<source_path.count |source_path, path_out|:
+            break if source_path[index] == 0
+            path_out.push(source_path[index])
+
+    def clang_response_word_length(text: darray[u8], offset: usize) -> usize:
+        cursor: mutable usize = offset
+        while cursor < text.count |text, cursor|:
+            break if text[cursor] == 0
+            cursor <- cursor + 1.usize()
+        return cursor - offset
+
+    def clang_response_file_is_whitespace(text: darray[u8]) -> bool:
+        for index in 0..<text.count:
+            byte: u8 = text[index]
+            return false if byte != 32 and byte != 9 and byte != 10 and byte != 13 and byte != 11 and byte != 12
+        return true
+
+    def clang_response_copy_word(source_text: darray[u8], source_offset: usize, target_text: mutable darray[u8]&, target_offsets: mutable darray[usize]&, valid: mutable bool&, current_response_path: darray[u8], failure_out: mutable ClangResponseFailure&, path_out: mutable darray[u8]&) -> void:
+        if target_offsets.count >= 1000000.usize():
+            clang_response_record_failure(ClangResponseFailure.ArgumentLimit, current_response_path, failure_out, path_out)
+            valid <- false
+            return
+        copy_argv_word(source_text, source_offset, target_text, target_offsets)
+
+    # Response-file names, including nested names, follow the compilation
+    # entry's working directory. Bound cumulative bytes and recursion depth;
+    # cycles consequently fail closed rather than recursing indefinitely.
+    def clang_expand_response_word(directory: sview, source_text: darray[u8], source_offset: usize, target_text: mutable darray[u8]&, target_offsets: mutable darray[usize]&, remaining_bytes: mutable usize&, depth: i64, valid: mutable bool&, current_response_path: darray[u8], failure_out: mutable ClangResponseFailure&, path_out: mutable darray[u8]&) -> void can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        word_length: usize = clang_response_word_length(source_text, source_offset)
+        if word_length <= 1.usize() or source_text[source_offset] != 64 or source_text[source_offset + 1.usize()] == 64:
+            clang_response_copy_word(source_text, source_offset, target_text, target_offsets, valid, current_response_path, failure_out, path_out)
+            return
+
+        response_name: mutable darray[u8] = []
+        for index in (source_offset + 1.usize())..< (source_offset + word_length):
+            response_name.push(source_text[index])
+        resolved_path: mutable darray[u8] = []
+        if response_name[0] != 47:
+            append_view(&resolved_path, directory)
+            append_view(&resolved_path, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(&resolved_path, bytes_view(response_name))
+        if depth >= 16:
+            clang_response_record_failure(ClangResponseFailure.NestingLimit, resolved_path, failure_out, path_out)
+            valid <- false
+            return
+        if target_offsets.count >= 1000000.usize():
+            clang_response_record_failure(ClangResponseFailure.ArgumentLimit, resolved_path, failure_out, path_out)
+            valid <- false
+            return
+        resolved_path.push(0)
+
+        response_contents: mutable darray[u8] = []
+        response_read_succeeded: mutable bool = false
+        response_limit_exceeded: mutable bool = false
+        run_file_output((&resolved_path[0]).cast[cstr], &response_contents, &response_read_succeeded, &response_limit_exceeded, remaining_bytes[0]) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        if not response_read_succeeded:
+            response_reason: ClangResponseFailure = ClangResponseFailure.ByteLimit if response_limit_exceeded else ClangResponseFailure.Unreadable
+            clang_response_record_failure(response_reason, resolved_path, failure_out, path_out)
+            valid <- false
+            return
+        remaining_bytes[0] <- remaining_bytes[0] - response_contents.count
+        return if response_contents.count == 0.usize()
+
+        response_text: sview = bytes_view(response_contents)
+        response_tokens: mutable darray[u8] = []
+        response_offsets: mutable darray[usize] = []
+        response_parse_valid: mutable bool = false
+        tokenize_compile_command(response_text, &response_tokens, &response_offsets, &response_parse_valid, false, false)
+        if response_offsets.count == 0.usize():
+            if not clang_response_file_is_whitespace(response_contents):
+                clang_response_record_failure(ClangResponseFailure.InvalidSyntax, resolved_path, failure_out, path_out)
+                valid <- false
+            return
+        if not response_parse_valid:
+            clang_response_record_failure(ClangResponseFailure.InvalidSyntax, resolved_path, failure_out, path_out)
+            valid <- false
+            return
+        for index in 0..<response_offsets.count |directory, response_tokens, response_offsets, target_text, target_offsets, remaining_bytes, depth, valid, resolved_path, failure_out, path_out|:
+            clang_expand_response_word(directory, response_tokens, response_offsets[index], target_text, target_offsets, remaining_bytes, depth + 1, valid, resolved_path, failure_out, path_out) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+            return if not valid[0]
+
+    def clang_expand_compile_responses_detailed(directory: sview, source_text: darray[u8], source_offsets: darray[usize], target_text: mutable darray[u8]&, target_offsets: mutable darray[usize]&, max_response_bytes: usize, valid: mutable bool&, failure_out: mutable ClangResponseFailure&, path_out: mutable darray[u8]&) -> void can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        valid <- true
+        failure_out <- ClangResponseFailure.None
+        path_out.count <- 0.usize()
+        return if source_offsets.count == 0.usize()
+        empty_path: darray[u8] = []
+        clang_response_copy_word(source_text, source_offsets[0], target_text, target_offsets, valid, empty_path, failure_out, path_out)
+        return if not valid[0]
+        remaining_bytes: mutable usize = max_response_bytes
+        for index in 1..<source_offsets.count |directory, source_text, source_offsets, target_text, target_offsets, remaining_bytes, valid, failure_out, path_out|:
+            clang_expand_response_word(directory, source_text, source_offsets[index], target_text, target_offsets, remaining_bytes, 0, valid, empty_path, failure_out, path_out) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+            return if not valid[0]
+
+    def clang_expand_compile_responses(directory: sview, source_text: darray[u8], source_offsets: darray[usize], target_text: mutable darray[u8]&, target_offsets: mutable darray[usize]&, max_response_bytes: usize, valid: mutable bool&) -> void can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        failure: mutable ClangResponseFailure = ClangResponseFailure.None
+        failure_path: mutable darray[u8] = []
+        clang_expand_compile_responses_detailed(directory, source_text, source_offsets, target_text, target_offsets, max_response_bytes, valid, &failure, &failure_path) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+
+    def clang_compile_option_takes_value(text: darray[u8], offset: usize) -> bool:
+        return argv_word_equals(text, offset, sview("-I", 0, -1)) or argv_word_equals(text, offset, sview("-isystem", 0, -1)) or argv_word_equals(text, offset, sview("-iquote", 0, -1)) or argv_word_equals(text, offset, sview("-idirafter", 0, -1)) or argv_word_equals(text, offset, sview("-iframework", 0, -1)) or argv_word_equals(text, offset, sview("-iframeworkwithsysroot", 0, -1))
+        return true if argv_word_equals(text, offset, sview("-include", 0, -1)) or argv_word_equals(text, offset, sview("-include-pch", 0, -1)) or argv_word_equals(text, offset, sview("-include-pth", 0, -1)) or argv_word_equals(text, offset, sview("-imacros", 0, -1))
+        return true if argv_word_equals(text, offset, sview("-iprefix", 0, -1)) or argv_word_equals(text, offset, sview("-iwithprefix", 0, -1)) or argv_word_equals(text, offset, sview("-iwithprefixbefore", 0, -1)) or argv_word_equals(text, offset, sview("-isysroot", 0, -1)) or argv_word_equals(text, offset, sview("--sysroot", 0, -1))
+        return true if argv_word_equals(text, offset, sview("-target", 0, -1)) or argv_word_equals(text, offset, sview("--target", 0, -1)) or argv_word_equals(text, offset, sview("-arch", 0, -1)) or argv_word_equals(text, offset, sview("-x", 0, -1)) or argv_word_equals(text, offset, sview("-std", 0, -1))
+        return true if argv_word_equals(text, offset, sview("-D", 0, -1)) or argv_word_equals(text, offset, sview("-U", 0, -1)) or argv_word_equals(text, offset, sview("-Xclang", 0, -1)) or argv_word_equals(text, offset, sview("-Xlinker", 0, -1)) or argv_word_equals(text, offset, sview("-Xpreprocessor", 0, -1)) or argv_word_equals(text, offset, sview("-Xassembler", 0, -1)) or argv_word_equals(text, offset, sview("-mllvm", 0, -1))
+        return true if argv_word_equals(text, offset, sview("-fplugin", 0, -1)) or argv_word_equals(text, offset, sview("-load", 0, -1)) or argv_word_equals(text, offset, sview("-plugin", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-map-file", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-file", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-output", 0, -1))
+        return true if argv_word_equals(text, offset, sview("-fmodule-name", 0, -1)) or argv_word_equals(text, offset, sview("-fmodules-cache-path", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-user-build-path", 0, -1)) or argv_word_equals(text, offset, sview("-resource-dir", 0, -1))
+        return true if argv_word_equals(text, offset, sview("-working-directory", 0, -1)) or argv_word_equals(text, offset, sview("-ivfsoverlay", 0, -1)) or argv_word_equals(text, offset, sview("-B", 0, -1)) or argv_word_equals(text, offset, sview("-F", 0, -1)) or argv_word_equals(text, offset, sview("-L", 0, -1)) or argv_word_equals(text, offset, sview("-l", 0, -1))
+        return false
+
+    # Serialize normalized argv as decimal-length-prefixed words. This stays a
+    # valid Elisa string even when an argument contains delimiter-like bytes.
+    # At the same time, identify the actual positional source operand so a
+    # compilation database cannot silently compile a different file than its
+    # `file` field names.
+    def clang_compile_argv_has_short_enums(text: darray[u8], offsets: darray[usize]) -> bool:
+        # Clang accepts both spellings; the last one wins. This is an argv
+        # fact, not a filename or program-name heuristic.
+        enabled: mutable bool = false
+        for index in 1..<offsets.count |text, offsets, enabled|:
+            if argv_word_equals(text, offsets[index], sview("-fshort-enums", 0, -1)):
+                enabled <- true
+            elif argv_word_equals(text, offsets[index], sview("-fno-short-enums", 0, -1)):
+                enabled <- false
+        return enabled
+    def clang_compile_argv_signature(directory: sview, command: sview, arguments: darray[sview], use_arguments: bool, expected_source: sview, max_response_bytes: usize, source_operand_checked: mutable bool&, source_operand_matches: mutable bool&, short_enums_out: mutable bool&, response_failure: mutable ClangResponseFailure&, response_failure_path: mutable darray[u8]&) -> sview can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        source_operand_checked <- false
+        source_operand_matches <- false
+        short_enums_out <- false
+        response_failure <- ClangResponseFailure.None
+        response_failure_path.count <- 0.usize()
+        parsed_text: mutable darray[u8] = []
+        parsed_offsets: mutable darray[usize] = []
+        if use_arguments:
+            for index in 0..<arguments.count |parsed_text, parsed_offsets, arguments|:
+                word: sview = arguments[index]
+                for byte_index in 0..<word.len |parsed_text, word|:
+                    byte: u8 = string_view_index(word, byte_index).u8()
+                    return sview("", 0, 0) if byte == 0
+                    parsed_text.push(byte)
+                parsed_offsets.push(parsed_text.count - word.len.usize())
+                parsed_text.push(0)
+        else:
+            parsed_valid: mutable bool = false
+            tokenize_compile_command(command, &parsed_text, &parsed_offsets, &parsed_valid, true, true)
+            return sview("", 0, 0) if not parsed_valid
+        return sview("", 0, 0) if parsed_offsets.count == 0.usize()
+
+        expanded_text: mutable darray[u8] = []
+        expanded_offsets: mutable darray[usize] = []
+        response_files_valid: mutable bool = false
+        clang_expand_compile_responses_detailed(directory, parsed_text, parsed_offsets, &expanded_text, &expanded_offsets, max_response_bytes, &response_files_valid, response_failure, response_failure_path) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return sview("", 0, 0) if not response_files_valid
+
+        normalized_text: mutable darray[u8] = []
+        normalized_offsets: mutable darray[usize] = []
+        normalized_valid: mutable bool = false
+        normalize_compile_argv(expanded_text, expanded_offsets, &normalized_text, &normalized_offsets, &normalized_valid)
+        return sview("", 0, 0) if not normalized_valid
+        short_enums_out <- clang_compile_argv_has_short_enums(normalized_text, normalized_offsets)
+
+        source_operand_checked <- expected_source.len > 0
+        if source_operand_checked[0]:
+            options_ended: mutable bool = false
+            source_index: mutable usize = 1.usize()
+            while source_index < normalized_offsets.count |normalized_text, normalized_offsets, source_index, options_ended, expected_source, source_operand_matches, directory|:
+                word_offset: usize = normalized_offsets[source_index]
+                if not options_ended and argv_word_equals(normalized_text, word_offset, sview("--", 0, -1)):
+                    options_ended <- true
+                    source_index <- source_index + 1.usize()
+                elif not options_ended and clang_compile_option_takes_value(normalized_text, word_offset):
+                    source_index <- source_index + 2.usize() if source_index + 1.usize() < normalized_offsets.count else normalized_offsets.count
+                elif not options_ended and normalized_text[word_offset] == 45:
+                    source_index <- source_index + 1.usize()
+                else:
+                    word_length: usize = clang_response_word_length(normalized_text, word_offset)
+                    operand: sview = string_view_slice(bytes_view(normalized_text), word_offset.i64(), (word_offset + word_length).i64())
+                    operand_identity: mutable darray[u8] = []
+                    operand_resolves: bool = ast_json_resolve_path(operand, directory, &operand_identity) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                    if operand_resolves and sview_eq(bytes_view(operand_identity), expected_source):
+                        source_operand_matches <- true
+                        break
+                    source_index <- source_index + 1.usize()
+
+        signature: mutable darray[u8] = []
+        for index in 0..<normalized_offsets.count |normalized_text, normalized_offsets, signature|:
+            word_start: usize = normalized_offsets[index]
+            word_end: mutable usize = word_start
+            while word_end < normalized_text.count |normalized_text, word_end|:
+                break if normalized_text[word_end] == 0
+                word_end <- word_end + 1.usize()
+            append_i64(&signature, (word_end - word_start).i64())
+            signature.push(58.u8())
+            for byte_index in word_start..<word_end |normalized_text, signature|:
+                signature.push(normalized_text[byte_index])
+        return sview(ctx_string_from_view(bytes_view(signature)), 0, -1)
+
+    def run_clang_target_macros_normalized(directory: sview, normalized_text: darray[u8], normalized_offsets: darray[usize], source: cstr, max_output_bytes: usize, timeout_seconds: usize, target_macros: mutable darray[u8]&, target_macros_succeeded: mutable bool&, timeout_exceeded: mutable bool&) -> void can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        target_macros.count <- 0.usize()
+        target_macros_succeeded <- false
+        timeout_exceeded <- false
+        return if normalized_offsets.count == 0.usize()
+        macro_text: mutable darray[u8] = []
+        macro_offsets: mutable darray[usize] = []
+        macro_flags_inserted: mutable bool = false
+        for index in 0..<normalized_offsets.count |normalized_text, normalized_offsets, macro_text, macro_offsets, macro_flags_inserted|:
+            if index > 0 and not macro_flags_inserted and argv_word_equals(normalized_text, normalized_offsets[index], sview("--", 0, -1)):
+                append_argv_view(&macro_text, &macro_offsets, sview("-dM", 0, -1))
+                append_argv_view(&macro_text, &macro_offsets, sview("-E", 0, -1))
+                macro_flags_inserted <- true
+            copy_argv_word(normalized_text, normalized_offsets[index], &macro_text, &macro_offsets)
+        if not macro_flags_inserted:
+            append_argv_view(&macro_text, &macro_offsets, sview("-dM", 0, -1))
+            append_argv_view(&macro_text, &macro_offsets, sview("-E", 0, -1))
+        macro_storage: mutable darray[cstr] = []
+        build_c_argv(macro_text, macro_offsets, &macro_storage) can Memory.Allocate, Unsafe.PointerCast
+        macro_argv: mutable cstr&& = (&macro_storage[0]).cast[mutable cstr&&] can Unsafe.PointerCast
+        directory_bytes: mutable darray[u8] = []
+        append_view(&directory_bytes, directory)
+        directory_bytes.push(0) if directory.len > 0
+        working_directory: cstr = (&directory_bytes[0]).cast[cstr] if directory.len > 0 else "".cast[cstr]
+        macro_diagnostics: mutable darray[u8] = []
+        macro_limit_exceeded: mutable bool = false
+        macro_malformed: mutable bool = false
+        macro_capture_failed: mutable bool = false
+        macro_timeout_exceeded: mutable bool = false
+        macro_output_bytes: mutable usize = 0.usize()
+        macro_layout_dump: mutable darray[u8] = []
+        run_ast_argv_projected(macro_argv, working_directory, directory.len > 0, source, target_macros, &macro_diagnostics, target_macros_succeeded, &macro_limit_exceeded, &macro_malformed, &macro_capture_failed, &macro_timeout_exceeded, &macro_output_bytes, max_output_bytes, timeout_seconds, false, &macro_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        timeout_exceeded <- macro_timeout_exceeded
+        emit_view_fd(bytes_view(macro_diagnostics), 2) can Console, Unsafe.PointerCast if not target_macros_succeeded[0] and macro_diagnostics.count > 0.usize()
+
+    def run_clang_ast_command(directory: sview, compile_command: sview, source: cstr, max_output_bytes: usize, timeout_seconds: usize, succeeded: mutable bool&, limit_exceeded: mutable bool&, command_valid: mutable bool&, malformed_ast: mutable bool&, capture_failed: mutable bool&, timeout_exceeded: mutable bool&, raw_output_bytes: mutable usize&, target_macros: mutable darray[u8]&, target_macros_succeeded: mutable bool&, diagnostics: mutable darray[u8]&, record_layout_dump: mutable darray[u8]&) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        command_valid <- false
+        timeout_exceeded <- false
+        parsed_text: mutable darray[u8] = []
+        parsed_offsets: mutable darray[usize] = []
+        parsed_command: mutable bool = false
+        tokenize_compile_command(compile_command, &parsed_text, &parsed_offsets, &parsed_command, true, true)
+        return [] if not parsed_command
+
+        expanded_text: mutable darray[u8] = []
+        expanded_offsets: mutable darray[usize] = []
+        response_files_valid: mutable bool = false
+        clang_expand_compile_responses(directory, parsed_text, parsed_offsets, &expanded_text, &expanded_offsets, max_output_bytes, &response_files_valid) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return [] if not response_files_valid
+
+        normalized_text: mutable darray[u8] = []
+        normalized_offsets: mutable darray[usize] = []
+        normalize_compile_argv(expanded_text, expanded_offsets, &normalized_text, &normalized_offsets, command_valid)
+        return [] if not command_valid[0]
+        run_clang_target_macros_normalized(directory, normalized_text, normalized_offsets, source, max_output_bytes, timeout_seconds, target_macros, target_macros_succeeded, timeout_exceeded) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return [] if timeout_exceeded[0]
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Wno-unused-command-line-argument", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Xclang", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-fparse-all-comments", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Xclang", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-ast-dump=json", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Xclang", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-fdump-record-layouts-simple", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-fsyntax-only", 0, -1))
+        argv_storage: mutable darray[cstr] = []
+        build_c_argv(normalized_text, normalized_offsets, &argv_storage) can Memory.Allocate, Unsafe.PointerCast
+        argv: mutable cstr&& = (&argv_storage[0]).cast[mutable cstr&&] can Unsafe.PointerCast
+        directory_bytes: mutable darray[u8] = []
+        append_view(&directory_bytes, directory)
+        directory_bytes.push(0) if directory.len > 0
+        working_directory: cstr = (&directory_bytes[0]).cast[cstr] if directory.len > 0 else "".cast[cstr]
+        output: mutable darray[u8] = []
+        run_ast_argv_projected(argv, working_directory, directory.len > 0, source, &output, diagnostics, succeeded, limit_exceeded, malformed_ast, capture_failed, timeout_exceeded, raw_output_bytes, max_output_bytes, timeout_seconds, true, record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return output
+
+    # JSON strings remain argv elements; expand only explicit response files
+    # before normalizing the same output/dependency flags as command strings.
+    def run_clang_ast_arguments(directory: sview, arguments: darray[sview], source: cstr, max_output_bytes: usize, timeout_seconds: usize, succeeded: mutable bool&, limit_exceeded: mutable bool&, command_valid: mutable bool&, malformed_ast: mutable bool&, capture_failed: mutable bool&, timeout_exceeded: mutable bool&, raw_output_bytes: mutable usize&, target_macros: mutable darray[u8]&, target_macros_succeeded: mutable bool&, diagnostics: mutable darray[u8]&, record_layout_dump: mutable darray[u8]&) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        command_valid <- false
+        timeout_exceeded <- false
+        parsed_text: mutable darray[u8] = []
+        parsed_offsets: mutable darray[usize] = []
+        for index in 0..<arguments.count |parsed_offsets, parsed_text, arguments|:
+            argument: sview = arguments[index]
+            parsed_offsets.push(parsed_text.count)
+            for byte_index in 0..<argument.len |parsed_text, argument|:
+                byte: u8 = string_view_index(argument, byte_index).u8()
+                return [] if byte == 0
+                parsed_text.push(byte)
+            parsed_text.push(0)
+        return [] if parsed_offsets.count == 0.usize()
+
+        expanded_text: mutable darray[u8] = []
+        expanded_offsets: mutable darray[usize] = []
+        response_files_valid: mutable bool = false
+        clang_expand_compile_responses(directory, parsed_text, parsed_offsets, &expanded_text, &expanded_offsets, max_output_bytes, &response_files_valid) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return [] if not response_files_valid
+
+        normalized_text: mutable darray[u8] = []
+        normalized_offsets: mutable darray[usize] = []
+        normalize_compile_argv(expanded_text, expanded_offsets, &normalized_text, &normalized_offsets, command_valid)
+        return [] if not command_valid[0]
+        run_clang_target_macros_normalized(directory, normalized_text, normalized_offsets, source, max_output_bytes, timeout_seconds, target_macros, target_macros_succeeded, timeout_exceeded) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return [] if timeout_exceeded[0]
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Wno-unused-command-line-argument", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Xclang", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-fparse-all-comments", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Xclang", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-ast-dump=json", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-Xclang", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-fdump-record-layouts-simple", 0, -1))
+        append_argv_view(&normalized_text, &normalized_offsets, sview("-fsyntax-only", 0, -1))
+        argv_storage: mutable darray[cstr] = []
+        build_c_argv(normalized_text, normalized_offsets, &argv_storage) can Memory.Allocate, Unsafe.PointerCast
+        argv: mutable cstr&& = (&argv_storage[0]).cast[mutable cstr&&] can Unsafe.PointerCast
+        directory_bytes: mutable darray[u8] = []
+        append_view(&directory_bytes, directory)
+        directory_bytes.push(0) if directory.len > 0
+        working_directory: cstr = (&directory_bytes[0]).cast[cstr] if directory.len > 0 else "".cast[cstr]
+        output: mutable darray[u8] = []
+        run_ast_argv_projected(argv, working_directory, directory.len > 0, source, &output, diagnostics, succeeded, limit_exceeded, malformed_ast, capture_failed, timeout_exceeded, raw_output_bytes, max_output_bytes, timeout_seconds, true, record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return output

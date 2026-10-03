@@ -1,0 +1,71 @@
+extend CTranslator:
+    def ast_macro_origin_location[@r](node: JsonValueHandle[r], origin_name: sview) -> JsonValueHandle[r]:
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        origin: JsonValueHandle[r] = ast_field(location, origin_name)
+        return origin if not json_handle_is_null(origin)
+        range: JsonValueHandle[r] = ast_field(node, sview("range", 0, -1))
+        begin: JsonValueHandle[r] = ast_field(range, sview("begin", 0, -1))
+        return ast_field(begin, origin_name)
+    def ast_macro_origin_coordinate[@r](node: JsonValueHandle[r], origin_name: sview, coordinate_name: sview) -> i64:
+        origin: JsonValueHandle[r] = ast_macro_origin_location(node, origin_name)
+        return typed_number(ast_field(origin, coordinate_name))
+    def ast_range_endpoint_offset[@r](node: JsonValueHandle[r], endpoint_name: sview, token_end: bool) -> i64:
+        location: JsonValueHandle[r] = ast_field(ast_field(node, sview("range", 0, -1)), endpoint_name)
+        expansion: JsonValueHandle[r] = ast_field(location, sview("expansionLoc", 0, -1))
+        primary: JsonValueHandle[r] = expansion if not json_handle_is_null(expansion) else location
+        offset_value: JsonValueHandle[r] = ast_field(primary, sview("offset", 0, -1))
+        return -1 if json_handle_is_null(offset_value)
+        offset: i64 = typed_number(offset_value)
+        token_length: mutable i64 = 0
+        if token_end:
+            token_length_value: mutable JsonValueHandle[r] = ast_field(primary, sview("tokLen", 0, -1))
+            token_length_value <- ast_field(location, sview("tokLen", 0, -1)) if json_handle_is_null(token_length_value)
+            return -1 if json_handle_is_null(token_length_value)
+            token_length <- typed_number(token_length_value)
+        return offset + token_length
+    def ast_range_origin_location[@r](node: JsonValueHandle[r], endpoint_name: sview, origin_name: sview) -> JsonValueHandle[r]:
+        location: JsonValueHandle[r] = ast_field(ast_field(node, sview("range", 0, -1)), endpoint_name)
+        if origin_name.len > 0:
+            return ast_field(location, origin_name)
+        expansion: JsonValueHandle[r] = ast_field(location, sview("expansionLoc", 0, -1))
+        return expansion if not json_handle_is_null(expansion)
+        spelling: JsonValueHandle[r] = ast_field(location, sview("spellingLoc", 0, -1))
+        return spelling if not json_handle_is_null(spelling)
+        return location
+    def ast_range_origin_offset[@r](node: JsonValueHandle[r], endpoint_name: sview, origin_name: sview, token_end: bool) -> i64:
+        location: JsonValueHandle[r] = ast_field(ast_field(node, sview("range", 0, -1)), endpoint_name)
+        selected: JsonValueHandle[r] = ast_range_origin_location(node, endpoint_name, origin_name)
+        offset_value: JsonValueHandle[r] = ast_field(selected, sview("offset", 0, -1))
+        return -1 if json_handle_is_null(offset_value)
+        offset: i64 = typed_number(offset_value)
+        return offset if not token_end
+        token_length_value: mutable JsonValueHandle[r] = ast_field(selected, sview("tokLen", 0, -1))
+        token_length_value <- ast_field(location, sview("tokLen", 0, -1)) if json_handle_is_null(token_length_value)
+        return -1 if json_handle_is_null(token_length_value)
+        return offset + typed_number(token_length_value)
+    def ast_range_origin_file[@r](node: JsonValueHandle[r], endpoint_name: sview, origin_name: sview) -> sview @r:
+        selected: JsonValueHandle[r] = ast_range_origin_location(node, endpoint_name, origin_name)
+        file: mutable sview = ast_string(ast_field(selected, sview("file", 0, -1)))
+        return file if file.len > 0
+        return sview("", 0, 0) if origin_name.len > 0
+        location: JsonValueHandle[r] = ast_field(ast_field(node, sview("range", 0, -1)), endpoint_name)
+        file <- ast_string(ast_field(location, sview("file", 0, -1)))
+        return file
+    def ast_range_origin_included_from[@r](node: JsonValueHandle[r], endpoint_name: sview, origin_name: sview) -> sview @r:
+        selected: JsonValueHandle[r] = ast_range_origin_location(node, endpoint_name, origin_name)
+        included: JsonValueHandle[r] = ast_field(selected, sview("includedFrom", 0, -1))
+        return ast_string(ast_field(included, sview("file", 0, -1)))
+    def ast_range_has_origin[@r](node: JsonValueHandle[r], origin_name: sview) -> bool:
+        return false if origin_name.len == 0
+        location: JsonValueHandle[r] = ast_field(node, sview("loc", 0, -1))
+        return true if not json_handle_is_null(ast_field(location, origin_name))
+        range: JsonValueHandle[r] = ast_field(node, sview("range", 0, -1))
+        begin: JsonValueHandle[r] = ast_field(range, sview("begin", 0, -1))
+        end: JsonValueHandle[r] = ast_field(range, sview("end", 0, -1))
+        return not json_handle_is_null(ast_field(begin, origin_name)) or not json_handle_is_null(ast_field(end, origin_name))
+    # Clang's JSON location includes the immediate file that included an
+    # origin file. Keep this explicit edge separately from the origin itself.
+    def ast_macro_origin_included_from[@r](node: JsonValueHandle[r], origin_name: sview) -> sview @r:
+        origin: JsonValueHandle[r] = ast_macro_origin_location(node, origin_name)
+        included_from: JsonValueHandle[r] = ast_field(origin, sview("includedFrom", 0, -1))
+        return ast_string(ast_field(included_from, sview("file", 0, -1)))

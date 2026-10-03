@@ -1,0 +1,186 @@
+extend CTranslator:
+    struct TypedFormattedOutputOrigins:
+        output: darray[u8]
+        source_offsets: darray[i64]
+
+    def typed_format_push_origin(output: mutable darray[u8]&, offsets: mutable darray[i64]&, byte: u8, source_offset: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        output.push(byte)
+        offsets.push(source_offset)
+
+    def typed_format_flush_origin_newlines(output: mutable darray[u8]&, offsets: mutable darray[i64]&, pending: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        first_kept: i64 = 0 if pending.count.i64() <= 2 else pending.count.i64() - 2
+        for index in first_kept..<pending.count.i64() |output, offsets, pending|:
+            typed_format_push_origin(output, offsets, 10, pending[index.usize()]) can Memory.Allocate, Abort.Panic
+        pending <- []
+
+    def typed_format_flush_origin_spaces(output: mutable darray[u8]&, offsets: mutable darray[i64]&, pending: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        for index in 0..<pending.count.i64() |output, offsets, pending|:
+            typed_format_push_origin(output, offsets, 32, pending[index.usize()]) can Memory.Allocate, Abort.Panic
+        pending <- []
+
+    def typed_wrap_long_lines_with_origins(source: darray[u8], source_offsets: darray[i64]) -> TypedFormattedOutputOrigins can[Memory.Allocate, Abort.Panic]:
+        result: mutable darray[u8] = []
+        result_offsets: mutable darray[i64] = []
+        line_width: mutable i64 = 0
+        line_indent: mutable i64 = 0
+        at_line_start: mutable bool = true
+        in_string: mutable bool = false
+        escaped: mutable bool = false
+        in_comment: mutable bool = false
+        wrap_origin: mutable i64 = 0
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        brace_depth: mutable i64 = 0
+        for index in 0..<source.count.i64() |source, source_offsets, result, result_offsets, line_width, line_indent, at_line_start, in_string, escaped, in_comment, wrap_origin, paren_depth, bracket_depth, brace_depth|:
+            byte: u8 = source[index.usize()]
+            origin: i64 = source_offsets[index.usize()]
+            if byte == 10:
+                typed_format_push_origin(result, result_offsets, byte, origin) can Memory.Allocate, Abort.Panic
+                line_width <- 0
+                line_indent <- 0
+                at_line_start <- true
+                in_comment <- false
+                continue
+            if at_line_start:
+                if byte == 32 or byte == 9:
+                    typed_format_push_origin(result, result_offsets, byte, origin) can Memory.Allocate, Abort.Panic
+                    line_width <- line_width + 1
+                    line_indent <- line_indent + 1
+                    continue
+                at_line_start <- false
+            if in_comment:
+                typed_format_push_origin(result, result_offsets, byte, origin) can Memory.Allocate, Abort.Panic
+                line_width <- line_width + 1
+                continue
+            typed_format_push_origin(result, result_offsets, byte, origin) can Memory.Allocate, Abort.Panic
+            line_width <- line_width + 1
+            if in_string:
+                if escaped:
+                    escaped <- false
+                elif byte == 92:
+                    escaped <- true
+                elif byte == 34:
+                    in_string <- false
+                continue
+            if byte == 34:
+                in_string <- true
+            elif byte == 35:
+                in_comment <- true
+            elif byte == 40:
+                paren_depth <- paren_depth + 1
+            elif byte == 41 and paren_depth > 0:
+                paren_depth <- paren_depth - 1
+            elif byte == 91:
+                bracket_depth <- bracket_depth + 1
+            elif byte == 93 and bracket_depth > 0:
+                bracket_depth <- bracket_depth - 1
+            elif byte == 123:
+                brace_depth <- brace_depth + 1
+            elif byte == 125 and brace_depth > 0:
+                brace_depth <- brace_depth - 1
+            elif byte == 44 and line_width > 120 and (paren_depth > 0 or bracket_depth > 0 or brace_depth > 0):
+                wrap_origin <- origin + 1
+                typed_format_push_origin(result, result_offsets, 10, wrap_origin) can Memory.Allocate, Abort.Panic
+                line_width <- 0
+                for _indent in 0..<(line_indent + 1) |result, result_offsets, line_indent, wrap_origin|:
+                    for _space in 0..<4 |result, result_offsets, wrap_origin|:
+                        typed_format_push_origin(result, result_offsets, 32, wrap_origin) can Memory.Allocate, Abort.Panic
+                    line_width <- line_width + 4
+            elif line_width > 120 and (paren_depth > 0 or bracket_depth > 0 or brace_depth > 0) and ((byte == 100 and index >= 3 and source[(index - 1).usize()] == 110 and source[(index - 2).usize()] == 97 and not typed_format_is_identifier_byte(source[(index - 3).usize()]) and (index + 1 >= source.count.i64() or not typed_format_is_identifier_byte(source[(index + 1).usize()]))) or (byte == 114 and index >= 2 and source[(index - 1).usize()] == 111 and not typed_format_is_identifier_byte(source[(index - 2).usize()]) and (index + 1 >= source.count.i64() or not typed_format_is_identifier_byte(source[(index + 1).usize()])))):
+                wrap_origin <- origin + 1
+                typed_format_push_origin(result, result_offsets, 10, wrap_origin) can Memory.Allocate, Abort.Panic
+                line_width <- 0
+                for _indent in 0..<(line_indent + 1) |result, result_offsets, line_indent, wrap_origin|:
+                    for _space in 0..<4 |result, result_offsets, wrap_origin|:
+                        typed_format_push_origin(result, result_offsets, 32, wrap_origin) can Memory.Allocate, Abort.Panic
+                    line_width <- line_width + 4
+        return TypedFormattedOutputOrigins{output: result, source_offsets: result_offsets}
+
+    def typed_format_output_with_origins(source: darray[u8]) -> TypedFormattedOutputOrigins can[Memory.Allocate, Abort.Panic]:
+        result: mutable darray[u8] = []
+        result_offsets: mutable darray[i64] = []
+        pending_spaces: mutable darray[i64] = []
+        pending_newlines: mutable darray[i64] = []
+        in_string: mutable bool = false
+        escaped: mutable bool = false
+        in_comment: mutable bool = false
+        for index in 0..<source.count.i64() |source, result, result_offsets, pending_spaces, pending_newlines, in_string, escaped, in_comment|:
+            byte: u8 = source[index.usize()]
+            if byte == 13:
+                continue
+            if byte == 10:
+                pending_newlines.push(index)
+                pending_spaces <- []
+                in_comment <- false
+                continue
+            if in_string or in_comment:
+                typed_format_flush_origin_newlines(result, result_offsets, pending_newlines) can Memory.Allocate, Abort.Panic
+                typed_format_flush_origin_spaces(result, result_offsets, pending_spaces) can Memory.Allocate, Abort.Panic
+                typed_format_push_origin(result, result_offsets, byte, index) can Memory.Allocate, Abort.Panic
+                if in_string:
+                    if escaped:
+                        escaped <- false
+                    elif byte == 92:
+                        escaped <- true
+                    elif byte == 34:
+                        in_string <- false
+                continue
+            typed_format_flush_origin_newlines(result, result_offsets, pending_newlines) can Memory.Allocate, Abort.Panic
+            if byte == 32 or byte == 9:
+                pending_spaces.push(index)
+                continue
+            typed_format_flush_origin_spaces(result, result_offsets, pending_spaces) can Memory.Allocate, Abort.Panic
+            typed_format_push_origin(result, result_offsets, byte, index) can Memory.Allocate, Abort.Panic
+            if byte == 34:
+                in_string <- true
+                escaped <- false
+            elif byte == 35:
+                in_comment <- true
+        typed_format_flush_origin_newlines(result, result_offsets, pending_newlines) can Memory.Allocate, Abort.Panic
+        typed_format_flush_origin_spaces(result, result_offsets, pending_spaces) can Memory.Allocate, Abort.Panic
+        while result.count > 0 and result[result.count - 1] == 32 |result, result_offsets|:
+            _ = result.pop()
+            _ = result_offsets.pop()
+        while result.count > 0 and result[result.count - 1] == 9 |result, result_offsets|:
+            _ = result.pop()
+            _ = result_offsets.pop()
+        if result.count > 0 and result[result.count - 1] != 10:
+            typed_format_push_origin(result, result_offsets, 10, source.count.i64()) can Memory.Allocate, Abort.Panic
+        return typed_wrap_long_lines_with_origins(result, result_offsets) can Memory.Allocate, Abort.Panic
+
+    def typed_generated_offset_for_source(source_offsets: darray[i64], source_offset: i64) -> i64:
+        return -1 if source_offset < 0
+        low: mutable i64 = 0
+        high: mutable i64 = source_offsets.count.i64()
+        while low < high |source_offsets, source_offset, low, high|:
+            middle: i64 = low + (high - low) / 2
+            if source_offsets[middle.usize()] < source_offset:
+                low <- middle + 1
+            else:
+                high <- middle
+        return low
+
+    def typed_finalize_generated_source_spans[@r](spans: mutable darray[TypedGeneratedSourceSpan[r]]& @r, source_offsets: darray[i64]) -> void:
+        for index in 0..<spans.count.i64() |spans, source_offsets|:
+            span: mutable TypedGeneratedSourceSpan[r] = spans[index.usize()]
+            span.generated_start <- typed_generated_offset_for_source(source_offsets, span.generated_start)
+            span.generated_end <- typed_generated_offset_for_source(source_offsets, span.generated_end)
+            spans[index.usize()] <- span
+
+    def typed_count_removed_bytes_before(removed_offsets: darray[i64], boundary: i64) -> i64:
+        low: mutable i64 = 0
+        high: mutable i64 = removed_offsets.count.i64()
+        while low < high |removed_offsets, boundary, low, high|:
+            middle: i64 = low + (high - low) / 2
+            if removed_offsets[middle.usize()] < boundary:
+                low <- middle + 1
+            else:
+                high <- middle
+        return low
+
+    def typed_rebase_generated_source_spans[@r](spans: mutable darray[TypedGeneratedSourceSpan[r]]& @r, base_offset: i64, removed_offsets: darray[i64]) -> void:
+        for index in 0..<spans.count.i64() |spans, base_offset, removed_offsets|:
+            span: mutable TypedGeneratedSourceSpan[r] = spans[index.usize()]
+            span.generated_start <- base_offset + span.generated_start - typed_count_removed_bytes_before(removed_offsets, span.generated_start)
+            span.generated_end <- base_offset + span.generated_end - typed_count_removed_bytes_before(removed_offsets, span.generated_end)
+            spans[index.usize()] <- span

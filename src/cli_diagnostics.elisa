@@ -1,0 +1,149 @@
+extend CTranslator:
+    def emit_typed_diagnostics(diagnostics: darray[TypedDiagnostic]) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        for index in 0..<diagnostics.count |output, diagnostics|:
+            typed_append_diagnostic(&output, diagnostics[index])
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
+
+    def typed_append_diagnostic(out: mutable darray[u8]&, diagnostic: TypedDiagnostic) -> void:
+        if sview_eq(diagnostic.category, sview("internal-ir", 0, -1)):
+            append_view(out, sview("elisa-c-transpiler: internal typed IR invariant failed: ", 0, -1))
+            append_view(out, diagnostic.kind)
+            append_view(out, sview(" in ", 0, -1))
+            append_view(out, diagnostic.source)
+            append_view(out, sview(" (IR index ", 0, -1))
+            append_i64(out, diagnostic.line)
+            append_view(out, sview(")\n", 0, -1))
+            return
+        append_view(out, sview("elisa-c-transpiler: unsupported ", 0, -1))
+        append_view(out, diagnostic.category)
+        append_view(out, sview(" ", 0, -1))
+        append_view(out, diagnostic.kind)
+        append_view(out, sview(" at ", 0, -1))
+        append_view(out, diagnostic.source)
+        append_view(out, sview(":", 0, -1)) if diagnostic.source.len > 0
+        append_i64(out, diagnostic.line)
+        append_view(out, sview(":", 0, -1))
+        append_i64(out, diagnostic.column)
+        if diagnostic.subject_type.len > 0:
+            append_view(out, sview(" [type: ", 0, -1))
+            append_view(out, diagnostic.subject_type)
+            append_view(out, sview("]", 0, -1))
+        if diagnostic.required_capability.len > 0:
+            append_view(out, sview(" [missing translator capability: ", 0, -1))
+            append_view(out, diagnostic.required_capability)
+            append_view(out, sview("]", 0, -1))
+        if diagnostic.spelling_line > 0 and diagnostic.spelling_column > 0 and diagnostic.expansion_line > 0 and diagnostic.expansion_column > 0:
+            append_view(out, sview(" (macro spelling at ", 0, -1))
+            append_view(out, diagnostic.spelling_source)
+            append_view(out, sview(":", 0, -1)) if diagnostic.spelling_source.len > 0
+            append_i64(out, diagnostic.spelling_line)
+            append_view(out, sview(":", 0, -1))
+            append_i64(out, diagnostic.spelling_column)
+            append_view(out, sview("; expansion at ", 0, -1))
+            append_view(out, diagnostic.expansion_source)
+            append_view(out, sview(":", 0, -1)) if diagnostic.expansion_source.len > 0
+            append_i64(out, diagnostic.expansion_line)
+            append_view(out, sview(":", 0, -1))
+            append_i64(out, diagnostic.expansion_column)
+            append_view(out, sview(")", 0, -1))
+        if diagnostic.range_start_offset >= 0 and diagnostic.range_end_offset >= diagnostic.range_start_offset:
+            append_view(out, sview(" [bytes ", 0, -1))
+            append_i64(out, diagnostic.range_start_offset)
+            append_view(out, sview(":", 0, -1))
+            append_i64(out, diagnostic.range_end_offset)
+            append_view(out, sview("]", 0, -1))
+        append_view(out, sview("\n", 0, -1))
+
+    # Machine-readable diagnostics are emitted as one deterministic JSON array
+    # on stderr. Keep this writer independent from the human formatter so
+    # source paths, macro origins and synthesized/internal categories remain
+    # available to editor/build integrations without changing normal output.
+    def cli_append_json_string(out: mutable darray[u8]&, value: sview) -> void:
+        out.push(34.u8())
+        for index in 0..<value.len |out, value|:
+            byte: i64 = string_view_index(value, index)
+            if byte == 34:
+                out.push(92.u8())
+                out.push(34.u8())
+            elif byte == 92:
+                out.push(92.u8())
+                out.push(92.u8())
+            elif byte == 8:
+                out.push(92.u8())
+                out.push(98.u8())
+            elif byte == 12:
+                out.push(92.u8())
+                out.push(102.u8())
+            elif byte == 10:
+                out.push(92.u8())
+                out.push(110.u8())
+            elif byte == 13:
+                out.push(92.u8())
+                out.push(114.u8())
+            elif byte == 9:
+                out.push(92.u8())
+                out.push(116.u8())
+            elif byte < 32:
+                # JSON requires all remaining C0 controls to use \u00XX.
+                out.push(92.u8())
+                out.push(117.u8())
+                out.push(48.u8())
+                out.push(48.u8())
+                high: i64 = byte / 16
+                low: i64 = byte % 16
+                out.push((48 + high).u8()) if high < 10 else out.push((87 + high).u8())
+                out.push((48 + low).u8()) if low < 10 else out.push((87 + low).u8())
+            else:
+                out.push(byte.u8())
+        out.push(34.u8())
+
+    def cli_append_json_view_field(out: mutable darray[u8]&, name: sview, value: sview, first: mutable bool&) -> void:
+        out.push(44.u8()) if not first[0]
+        cli_append_json_string(out, name)
+        out.push(58.u8())
+        cli_append_json_string(out, value)
+        first <- false
+
+    def cli_append_json_i64_field(out: mutable darray[u8]&, name: sview, value: i64, first: mutable bool&) -> void:
+        out.push(44.u8()) if not first[0]
+        cli_append_json_string(out, name)
+        out.push(58.u8())
+        append_i64(out, value)
+        first <- false
+
+    def cli_emit_typed_diagnostics_json(diagnostics: darray[TypedDiagnostic]) -> void can[Console, Unsafe.PointerCast, Memory.Allocate, Abort.Panic]:
+        output: mutable darray[u8] = []
+        output.push(91.u8())
+        for index in 0..<diagnostics.count |output, diagnostics|:
+            diagnostic: TypedDiagnostic = diagnostics[index]
+            output.push(44.u8()) if index > 0
+            output.push(123.u8())
+            first: mutable bool = true
+            cli_append_json_i64_field(&output, sview("schema_version", 0, -1), 3, &first)
+            cli_append_json_view_field(&output, sview("category", 0, -1), diagnostic.category, &first)
+            cli_append_json_view_field(&output, sview("kind", 0, -1), diagnostic.kind, &first)
+            cli_append_json_view_field(&output, sview("subject_type", 0, -1), diagnostic.subject_type, &first)
+            cli_append_json_view_field(&output, sview("required_capability", 0, -1), diagnostic.required_capability, &first)
+            cli_append_json_i64_field(&output, sview("range_start_offset", 0, -1), diagnostic.range_start_offset, &first)
+            cli_append_json_i64_field(&output, sview("range_end_offset", 0, -1), diagnostic.range_end_offset, &first)
+            cli_append_json_view_field(&output, sview("source", 0, -1), diagnostic.source, &first)
+            cli_append_json_view_field(&output, sview("canonical_source", 0, -1), diagnostic.canonical_source, &first)
+            cli_append_json_i64_field(&output, sview("line", 0, -1), diagnostic.line, &first)
+            cli_append_json_i64_field(&output, sview("column", 0, -1), diagnostic.column, &first)
+            cli_append_json_view_field(&output, sview("spelling_source", 0, -1), diagnostic.spelling_source, &first)
+            cli_append_json_view_field(&output, sview("spelling_canonical_source", 0, -1), diagnostic.spelling_canonical_source, &first)
+            cli_append_json_view_field(&output, sview("spelling_included_from", 0, -1), diagnostic.spelling_included_from, &first)
+            cli_append_json_view_field(&output, sview("spelling_included_from_canonical", 0, -1), diagnostic.spelling_included_from_canonical, &first)
+            cli_append_json_i64_field(&output, sview("spelling_line", 0, -1), diagnostic.spelling_line, &first)
+            cli_append_json_i64_field(&output, sview("spelling_column", 0, -1), diagnostic.spelling_column, &first)
+            cli_append_json_view_field(&output, sview("expansion_source", 0, -1), diagnostic.expansion_source, &first)
+            cli_append_json_view_field(&output, sview("expansion_canonical_source", 0, -1), diagnostic.expansion_canonical_source, &first)
+            cli_append_json_view_field(&output, sview("expansion_included_from", 0, -1), diagnostic.expansion_included_from, &first)
+            cli_append_json_view_field(&output, sview("expansion_included_from_canonical", 0, -1), diagnostic.expansion_included_from_canonical, &first)
+            cli_append_json_i64_field(&output, sview("expansion_line", 0, -1), diagnostic.expansion_line, &first)
+            cli_append_json_i64_field(&output, sview("expansion_column", 0, -1), diagnostic.expansion_column, &first)
+            output.push(125.u8())
+        output.push(93.u8())
+        output.push(10.u8())
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast

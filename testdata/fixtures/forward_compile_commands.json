@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/forward_decl_main.c","command":"clang -std=c11 -c testdata/fixtures/forward_decl_main.c"},
+  {"directory":".","file":"testdata/fixtures/forward_decl_impl.c","command":"clang -std=c11 -c testdata/fixtures/forward_decl_impl.c"}
+]

@@ -1,0 +1,550 @@
+extend CTranslator:
+    struct TypedIRIssue[@r]:
+        kind: sview @r
+        index: i64
+
+    struct TypedControlScopeWorkItem:
+        statement: i64
+        loop_depth: i64
+        break_scope: i8
+        continue_increment: i64
+
+    struct TypedIRFunctionArity:
+        recognized: bool
+        has_prototype: bool
+        params_count: i64
+        variadic: bool
+
+    def typed_ir_valid_ref(index: i64, count: i64, optional: bool) -> bool:
+        return index == -1 if optional and index == -1
+        return false if index < 0 or index >= count
+        return true
+
+    def typed_ir_valid_range(start: i64, count: i64, limit: i64) -> bool:
+        return false if count < 0 or limit < 0
+        return start == -1 or (start >= 0 and start <= limit) if count == 0
+        return false if start < 0 or start > limit
+        return count <= limit - start
+
+    def typed_ir_issue[@r](kind: sview, index: i64) -> TypedIRIssue[r]:
+        return TypedIRIssue[r]{kind: kind, index: index}
+
+    def typed_verify_call_arity(argument_count: i64, parameter_count: i64, variadic: bool) -> bool:
+        return false if argument_count < 0 or parameter_count < 0
+        return false if argument_count < parameter_count
+        return argument_count >= parameter_count if variadic
+        return argument_count == parameter_count
+
+    def typed_ir_matching_paren(value: sview, open_paren: i64) -> i64:
+        return -1 if open_paren < 0 or open_paren >= value.len or string_view_index(value, open_paren) != 40
+        depth: mutable i64 = 0
+        for index in open_paren..<value.len |value, open_paren, depth|:
+            byte: i64 = string_view_index(value, index)
+            depth <- depth + 1 if byte == 40
+            if byte == 41:
+                depth <- depth - 1
+                return index if depth == 0
+        return -1
+
+    def typed_ir_trim_type_spaces(value: sview) -> sview:
+        result: mutable sview = value
+        while result.len > 0 and string_view_index(result, 0) == 32:
+            result <- string_view_suffix(result, 1)
+        while result.len > 0 and string_view_index(result, result.len - 1) == 32:
+            result <- string_view_prefix(result, result.len - 1)
+        return result
+
+    # Recover the declared parameter count from Clang's spelling of an
+    # indirect function type, e.g. `int (*)(int, void (*)(int, int))`.
+    # A C `(*)()` has no prototype and therefore imposes no argument-count
+    # constraint; the same spelling in C++ means exactly zero parameters.
+    def typed_ir_function_pointer_arity(function_type: sview, source_is_cxx: bool) -> TypedIRFunctionArity:
+        for group_open in 0..<function_type.len |function_type|:
+            continue if string_view_index(function_type, group_open) != 40
+            group_close: i64 = typed_ir_matching_paren(function_type, group_open)
+            continue if group_close <= group_open
+            pointer_group: mutable bool = false
+            for index in (group_open + 1)..<group_close |function_type, group_open, group_close, pointer_group|:
+                byte: i64 = string_view_index(function_type, index)
+                pointer_group <- true if byte == 42 or byte == 38
+            continue if not pointer_group
+            params_open: mutable i64 = group_close + 1
+            while params_open < function_type.len and (string_view_index(function_type, params_open) == 32 or string_view_index(function_type, params_open) == 9):
+                params_open <- params_open + 1
+            continue if params_open >= function_type.len or string_view_index(function_type, params_open) != 40
+            params_close: i64 = typed_ir_matching_paren(function_type, params_open)
+            continue if params_close <= params_open
+            params: sview = typed_ir_trim_type_spaces(string_view_prefix(string_view_suffix(function_type, params_open + 1), params_close - params_open - 1))
+            if params.len == 0:
+                return TypedIRFunctionArity{recognized: true, has_prototype: source_is_cxx, params_count: 0, variadic: false}
+            if params.len == 4 and string_view_index(params, 0) == 118 and string_view_index(params, 1) == 111 and string_view_index(params, 2) == 105 and string_view_index(params, 3) == 100:
+                return TypedIRFunctionArity{recognized: true, has_prototype: true, params_count: 0, variadic: false}
+
+            params_count: mutable i64 = 0
+            variadic: mutable bool = false
+            segment_start: mutable i64 = 0
+            paren_depth: mutable i64 = 0
+            bracket_depth: mutable i64 = 0
+            angle_depth: mutable i64 = 0
+            for index in 0..<params.len |params, params_count, variadic, segment_start, paren_depth, bracket_depth, angle_depth|:
+                byte: i64 = string_view_index(params, index)
+                if byte == 40:
+                    paren_depth <- paren_depth + 1
+                elif byte == 41:
+                    paren_depth <- paren_depth - 1
+                elif byte == 91:
+                    bracket_depth <- bracket_depth + 1
+                elif byte == 93:
+                    bracket_depth <- bracket_depth - 1
+                elif byte == 60:
+                    angle_depth <- angle_depth + 1
+                elif byte == 62 and angle_depth > 0:
+                    angle_depth <- angle_depth - 1
+                if (byte == 44 and paren_depth == 0 and bracket_depth == 0 and angle_depth == 0) or index == params.len - 1:
+                    segment_end: i64 = index if byte == 44 else index + 1
+                    segment: sview = typed_ir_trim_type_spaces(string_view_prefix(string_view_suffix(params, segment_start), segment_end - segment_start))
+                    if segment.len == 3 and string_view_index(segment, 0) == 46 and string_view_index(segment, 1) == 46 and string_view_index(segment, 2) == 46:
+                        variadic <- true
+                    else:
+                        params_count <- params_count + 1
+                    segment_start <- index + 1
+            return TypedIRFunctionArity{recognized: true, has_prototype: true, params_count: params_count, variadic: variadic}
+        return TypedIRFunctionArity{recognized: false, has_prototype: false, params_count: 0, variadic: false}
+
+    def typed_verify_call_mode[@r](ctx: TypedContext[r]&, expression: TypedExpr[r], index: i64) -> TypedIRIssue[r]:
+        if expression.value == 0 or expression.value == 2:
+            return typed_ir_issue(sview("call-callee-mode", 0, -1), index) if expression.lhs != -1
+            return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+        if expression.value == 1:
+            return typed_ir_issue(sview("call-callee-mode", 0, -1), index) if expression.lhs < 0
+            callee: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
+            indirect_arity: TypedIRFunctionArity = typed_ir_function_pointer_arity(callee.type_name, ctx.source_language_is_cxx)
+            if indirect_arity.recognized and indirect_arity.has_prototype:
+                return typed_ir_issue(sview("call-argument-count", 0, -1), index) if not typed_verify_call_arity(expression.args_count, indirect_arity.params_count, indirect_arity.variadic)
+            return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+        if expression.value >= TYPED_CALL_SIGNATURE_BASE and expression.value < TYPED_CALL_EXTERNAL_BASE:
+            encoded_signature: i64 = expression.value - TYPED_CALL_SIGNATURE_BASE
+            return typed_ir_issue(sview("call-signature-mode", 0, -1), index) if (encoded_signature % 4 != 0 and encoded_signature % 4 != 2) or expression.lhs != -1
+            signature_index: i64 = encoded_signature / 4
+            return typed_ir_issue(sview("call-signature-index", 0, -1), index) if signature_index >= ctx.user_function_signatures.count.i64()
+            signature: TypedUserFunctionSignature[r] = ctx.user_function_signatures[signature_index.usize()]
+            return typed_ir_issue(sview("call-signature-target", 0, -1), index) if signature.function_index < 0 or signature.function_index >= ctx.functions.count.i64() or signature.declaration_id.len == 0
+            target_function: TypedFunction[r] = ctx.functions[signature.function_index.usize()]
+            return typed_ir_issue(sview("call-signature-target", 0, -1), index) if not sview_eq(target_function.declaration_id, signature.declaration_id) or target_function.params_count != signature.params_count or target_function.variadic != signature.variadic
+            return typed_ir_issue(sview("call-signature-type", 0, -1), index) if not sview_eq(target_function.return_type, signature.type_name)
+            return typed_ir_issue(sview("call-result-type", 0, -1), index) if not sview_eq(expression.type_name, signature.result_type)
+            return typed_ir_issue(sview("call-argument-count", 0, -1), index) if not typed_verify_call_arity(expression.args_count, signature.params_count, signature.variadic)
+            return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+        if expression.value >= TYPED_CALL_EXTERNAL_BASE:
+            encoded_external: i64 = expression.value - TYPED_CALL_EXTERNAL_BASE
+            return typed_ir_issue(sview("call-external-signature-mode", 0, -1), index) if (encoded_external % 4 != 0 and encoded_external % 4 != 2) or expression.lhs != -1
+            external_index: i64 = encoded_external / 4
+            return typed_ir_issue(sview("call-external-signature-index", 0, -1), index) if external_index >= ctx.externs.count.i64()
+            external: TypedExtern[r] = ctx.externs[external_index.usize()]
+            return typed_ir_issue(sview("call-result-type", 0, -1), index) if not sview_eq(expression.type_name, external.result_type)
+            return typed_ir_issue(sview("call-argument-count", 0, -1), index) if not typed_verify_call_arity(expression.args_count, external.params_count, external.variadic)
+            return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+        return typed_ir_issue(sview("call-mode", 0, -1), index)
+
+    def typed_ir_increment_type_supported(type_name: sview) -> bool:
+        # Keep the IR verifier standalone: it is also compiled by the focused
+        # verifier test without the translator's full type-emission modules.
+        # Increment markers are only valid on scalar C types; normalize the
+        # top-level qualifiers exactly as Clang's QualType spelling requires.
+        base: mutable sview = type_name
+        while sview_starts_with(base, sview("const ", 0, -1)) or sview_starts_with(base, sview("volatile ", 0, -1)) or sview_starts_with(base, sview("restrict ", 0, -1)) |base|:
+            if sview_starts_with(base, sview("const ", 0, -1)):
+                base <- string_view_suffix(base, 6)
+            elif sview_starts_with(base, sview("volatile ", 0, -1)):
+                base <- string_view_suffix(base, 9)
+            else:
+                base <- string_view_suffix(base, 9)
+        return true if sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1))
+        return true if sview_eq(base, sview("float", 0, -1)) or sview_eq(base, sview("double", 0, -1)) or sview_eq(base, sview("long double", 0, -1))
+        return true if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1))
+        return true if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("signed short", 0, -1)) or sview_eq(base, sview("signed short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1))
+        return true if sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1))
+        return true if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("signed long", 0, -1)) or sview_eq(base, sview("signed long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long unsigned int", 0, -1))
+        return true if sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("signed long long", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("long long unsigned int", 0, -1))
+        return true if sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("__darwin_size_t", 0, -1)) or sview_eq(base, sview("__size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) or sview_eq(base, sview("__darwin_ssize_t", 0, -1)) or sview_eq(base, sview("__ssize_t", 0, -1))
+        return true if sview_eq(base, sview("int8_t", 0, -1)) or sview_eq(base, sview("Int8_t", 0, -1)) or sview_eq(base, sview("__int8_t", 0, -1)) or sview_eq(base, sview("uint8_t", 0, -1)) or sview_eq(base, sview("Uint8_t", 0, -1)) or sview_eq(base, sview("UInt8_t", 0, -1)) or sview_eq(base, sview("__uint8_t", 0, -1))
+        return true if sview_eq(base, sview("int16_t", 0, -1)) or sview_eq(base, sview("Int16_t", 0, -1)) or sview_eq(base, sview("__int16_t", 0, -1)) or sview_eq(base, sview("uint16_t", 0, -1)) or sview_eq(base, sview("Uint16_t", 0, -1)) or sview_eq(base, sview("UInt16_t", 0, -1)) or sview_eq(base, sview("__uint16_t", 0, -1))
+        return true if sview_eq(base, sview("int32_t", 0, -1)) or sview_eq(base, sview("Int32_t", 0, -1)) or sview_eq(base, sview("__int32_t", 0, -1)) or sview_eq(base, sview("uint32_t", 0, -1)) or sview_eq(base, sview("Uint32_t", 0, -1)) or sview_eq(base, sview("UInt32_t", 0, -1)) or sview_eq(base, sview("__uint32_t", 0, -1))
+        return true if sview_eq(base, sview("int64_t", 0, -1)) or sview_eq(base, sview("Int64_t", 0, -1)) or sview_eq(base, sview("__int64_t", 0, -1)) or sview_eq(base, sview("uint64_t", 0, -1)) or sview_eq(base, sview("Uint64_t", 0, -1)) or sview_eq(base, sview("UInt64_t", 0, -1)) or sview_eq(base, sview("__uint64_t", 0, -1))
+        return sview_eq(base, sview("wchar_t", 0, -1)) or sview_eq(base, sview("__darwin_wchar_t", 0, -1)) or sview_eq(base, sview("Wchar_t", 0, -1)) or sview_eq(base, sview("wint_t", 0, -1))
+
+    def typed_verify_enqueue_expression(index: i64, visited: mutable darray[bool]&, worklist: mutable darray[i64]&) -> void can[Memory.Allocate, Abort.Panic]:
+        return if visited[index.usize()]
+        visited[index.usize()] <- true
+        worklist.push(index)
+    def typed_verify_slice_ownership[@r](ctx: TypedContext[r]&) -> TypedIRIssue[r] can[Memory.Allocate, Abort.Panic]:
+        expression_child_owners: mutable darray[i64] = []
+        for index in 0..<ctx.expr_children.count.i64() |expression_child_owners|:
+            expression_child_owners.push(-1)
+        for index in 0..<ctx.exprs.count.i64() |ctx, expression_child_owners|:
+            expression: TypedExpr[r] = ctx.exprs[index.usize()]
+            for offset in 0..<expression.args_count |expression, expression_child_owners, index|:
+                child_index: i64 = expression.args_start + offset
+                return typed_ir_issue(sview("overlapping-expression-argument-slice", 0, -1), child_index) if expression_child_owners[child_index.usize()] >= 0
+                expression_child_owners[child_index.usize()] <- index
+        for index in 0..<ctx.expr_children.count.i64() |expression_child_owners|:
+            return typed_ir_issue(sview("orphan-expression-child", 0, -1), index) if expression_child_owners[index.usize()] < 0
+
+        statement_child_owners: mutable darray[i64] = []
+        for index in 0..<ctx.stmt_children.count.i64() |statement_child_owners|:
+            statement_child_owners.push(-1)
+        for index in 0..<ctx.stmts.count.i64() |ctx, statement_child_owners|:
+            statement: TypedStmt[r] = ctx.stmts[index.usize()]
+            continue if statement.kind != TypedStmtKind.Block
+            for offset in 0..<statement.children_count |statement, statement_child_owners, index|:
+                child_index: i64 = statement.children_start + offset
+                return typed_ir_issue(sview("overlapping-statement-child-slice", 0, -1), child_index) if statement_child_owners[child_index.usize()] >= 0
+                statement_child_owners[child_index.usize()] <- index
+        for index in 0..<ctx.stmt_children.count.i64() |statement_child_owners|:
+            return typed_ir_issue(sview("orphan-statement-child", 0, -1), index) if statement_child_owners[index.usize()] < 0
+
+        switch_case_owners: mutable darray[i64] = []
+        for index in 0..<ctx.switch_cases.count.i64() |switch_case_owners|:
+            switch_case_owners.push(-1)
+        for index in 0..<ctx.stmts.count.i64() |ctx, switch_case_owners|:
+            statement: TypedStmt[r] = ctx.stmts[index.usize()]
+            continue if statement.kind != TypedStmtKind.Switch
+            default_count: mutable i64 = 0
+            for offset in 0..<statement.children_count |statement, switch_case_owners, index|:
+                case_index: i64 = statement.children_start + offset
+                switch_case: TypedSwitchCase = ctx.switch_cases[case_index.usize()]
+                default_count <- default_count + 1 if switch_case.is_default
+                return typed_ir_issue(sview("overlapping-switch-case-slice", 0, -1), case_index) if switch_case_owners[case_index.usize()] >= 0
+                switch_case_owners[case_index.usize()] <- index
+            return typed_ir_issue(sview("switch-default-count", 0, -1), index) if default_count > 1
+        for index in 0..<ctx.switch_cases.count.i64() |switch_case_owners|:
+            return typed_ir_issue(sview("orphan-switch-case", 0, -1), index) if switch_case_owners[index.usize()] < 0
+        return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+    def typed_verify_function_labels[@r](ctx: TypedContext[r]&, function: TypedFunction[r], function_index: i64, visited: mutable darray[i64]&, statement_owners: mutable darray[i64]&) -> TypedIRIssue[r] can[Memory.Allocate, Abort.Panic]:
+        # Label IDs are allocated from a per-function table which is reset
+        # before lowering each body. Header-inline functions encode the same
+        # count negatively to suppress project wrappers; decode that marker.
+        label_limit: i64 = function.label_count if function.label_count >= 0 else -1 - function.label_count
+        label_counts: mutable darray[i64] = []
+        for label_index in 0..<label_limit |label_counts|:
+            label_counts.push(0)
+        worklist: mutable darray[i64] = [function.body]
+        generation: i64 = function_index + 1
+        while worklist.count > 0 |ctx, function, label_limit, label_counts, worklist, generation, visited, statement_owners, function_index|:
+            statement_index: i64 = worklist.pop()
+            previous_owner: i64 = statement_owners[statement_index.usize()]
+            return typed_ir_issue(sview("cross-function-statement-reference", 0, -1), statement_index) if previous_owner >= 0 and previous_owner != function_index
+            statement_owners[statement_index.usize()] <- function_index
+            continue if visited[statement_index.usize()] == generation
+            visited[statement_index.usize()] <- generation
+            statement: TypedStmt[r] = ctx.stmts[statement_index.usize()]
+            if statement.kind == TypedStmtKind.Goto:
+                return typed_ir_issue(sview("goto-label-target", 0, -1), statement_index) if not typed_ir_valid_ref(statement.aux, label_limit, false)
+            elif statement.kind == TypedStmtKind.Label:
+                return typed_ir_issue(sview("label-id", 0, -1), statement_index) if not typed_ir_valid_ref(statement.aux, label_limit, false)
+                label_counts[statement.aux.usize()] <- label_counts[statement.aux.usize()] + 1
+                worklist.push(statement.expr)
+            elif statement.kind == TypedStmtKind.Block:
+                for offset in 0..<statement.children_count |ctx, statement, worklist|:
+                    worklist.push(ctx.stmt_children[(statement.children_start + offset).usize()])
+            elif statement.kind == TypedStmtKind.If:
+                worklist.push(statement.aux)
+                worklist.push(statement.aux2) if statement.aux2 >= 0
+            elif statement.kind == TypedStmtKind.For:
+                worklist.push(statement.children_start) if statement.children_start >= 0
+                worklist.push(statement.aux)
+                worklist.push(statement.aux2) if statement.aux2 >= 0
+            elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+                worklist.push(statement.aux)
+                worklist.push(statement.aux2) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
+            elif statement.kind == TypedStmtKind.Continue:
+                worklist.push(statement.aux) if statement.aux >= 0
+            elif statement.kind == TypedStmtKind.Switch:
+                for offset in 0..<statement.children_count |ctx, statement, worklist|:
+                    switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                    worklist.push(switch_case.body)
+        for label_index in 0..<label_limit |label_counts|:
+            return typed_ir_issue(sview("label-declaration-count", 0, -1), label_index) if label_counts[label_index.usize()] != 1
+        return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+
+    def typed_verify_control_transfer_scopes[@r](ctx: TypedContext[r]&, function: TypedFunction[r], visited_loops: mutable darray[i64]&, visited_break_scopes: mutable darray[i8]&, visited_increments: mutable darray[i64]&) -> TypedIRIssue[r] can[Memory.Allocate, Abort.Panic]:
+        # Control-transfer legality depends on the innermost lexical loop or
+        # switch, not just on whether the referenced statement index exists.
+        # Track the scope through each structural edge and reject a statement
+        # node shared across incompatible scopes. Re-visiting the same node in
+        # the same scope safely terminates malformed cycles.
+        worklist: mutable darray[TypedControlScopeWorkItem] = [TypedControlScopeWorkItem{statement: function.body, loop_depth: 0, break_scope: 0, continue_increment: -1}]
+        while worklist.count > 0 |ctx, function, visited_loops, visited_break_scopes, visited_increments, worklist|:
+            item: TypedControlScopeWorkItem = worklist.pop()
+            statement_index: i64 = item.statement
+            if visited_loops[statement_index.usize()] >= 0:
+                return typed_ir_issue(sview("control-scope-shared-statement", 0, -1), statement_index) if visited_loops[statement_index.usize()] != item.loop_depth or visited_break_scopes[statement_index.usize()] != item.break_scope or visited_increments[statement_index.usize()] != item.continue_increment
+                continue
+            visited_loops[statement_index.usize()] <- item.loop_depth
+            visited_break_scopes[statement_index.usize()] <- item.break_scope
+            visited_increments[statement_index.usize()] <- item.continue_increment
+            statement: TypedStmt[r] = ctx.stmts[statement_index.usize()]
+            if statement.kind == TypedStmtKind.Break:
+                return typed_ir_issue(sview("break-outside-scope", 0, -1), statement_index) if item.break_scope == 0
+                return typed_ir_issue(sview("break-scope-kind", 0, -1), statement_index) if item.break_scope != 1
+            elif statement.kind == TypedStmtKind.SwitchBreak:
+                return typed_ir_issue(sview("switch-break-outside-switch", 0, -1), statement_index) if item.break_scope != 2
+            elif statement.kind == TypedStmtKind.Continue:
+                return typed_ir_issue(sview("continue-outside-loop", 0, -1), statement_index) if item.loop_depth == 0
+                return typed_ir_issue(sview("continue-increment-context", 0, -1), statement_index) if statement.aux != item.continue_increment
+
+            if statement.kind == TypedStmtKind.Block:
+                for offset in 0..<statement.children_count |ctx, statement, item, worklist|:
+                    worklist.push(TypedControlScopeWorkItem{statement: ctx.stmt_children[(statement.children_start + offset).usize()], loop_depth: item.loop_depth, break_scope: item.break_scope, continue_increment: item.continue_increment}) can Memory.Allocate, Abort.Panic
+            elif statement.kind == TypedStmtKind.If:
+                worklist.push(TypedControlScopeWorkItem{statement: statement.aux, loop_depth: item.loop_depth, break_scope: item.break_scope, continue_increment: item.continue_increment}) can Memory.Allocate, Abort.Panic
+                worklist.push(TypedControlScopeWorkItem{statement: statement.aux2, loop_depth: item.loop_depth, break_scope: item.break_scope, continue_increment: item.continue_increment}) can Memory.Allocate, Abort.Panic if statement.aux2 >= 0
+            elif statement.kind == TypedStmtKind.For:
+                worklist.push(TypedControlScopeWorkItem{statement: statement.children_start, loop_depth: item.loop_depth, break_scope: item.break_scope, continue_increment: item.continue_increment}) can Memory.Allocate, Abort.Panic if statement.children_start >= 0
+                worklist.push(TypedControlScopeWorkItem{statement: statement.aux, loop_depth: item.loop_depth + 1, break_scope: 1, continue_increment: statement.aux2}) can Memory.Allocate, Abort.Panic
+                worklist.push(TypedControlScopeWorkItem{statement: statement.aux2, loop_depth: item.loop_depth + 1, break_scope: 1, continue_increment: statement.aux2}) can Memory.Allocate, Abort.Panic if statement.aux2 >= 0
+            elif statement.kind == TypedStmtKind.While:
+                worklist.push(TypedControlScopeWorkItem{statement: statement.aux, loop_depth: item.loop_depth + 1, break_scope: 1, continue_increment: -1}) can Memory.Allocate, Abort.Panic
+            elif statement.kind == TypedStmtKind.DoWhile:
+                worklist.push(TypedControlScopeWorkItem{statement: statement.aux, loop_depth: item.loop_depth + 1, break_scope: 1, continue_increment: -1}) can Memory.Allocate, Abort.Panic
+                worklist.push(TypedControlScopeWorkItem{statement: statement.aux2, loop_depth: item.loop_depth + 1, break_scope: 1, continue_increment: -1}) can Memory.Allocate, Abort.Panic if statement.aux2 >= 0
+            elif statement.kind == TypedStmtKind.Switch:
+                for offset in 0..<statement.children_count |ctx, statement, item, worklist|:
+                    switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                    worklist.push(TypedControlScopeWorkItem{statement: switch_case.body, loop_depth: item.loop_depth, break_scope: 2, continue_increment: item.continue_increment}) can Memory.Allocate, Abort.Panic
+            elif statement.kind == TypedStmtKind.Label:
+                worklist.push(TypedControlScopeWorkItem{statement: statement.expr, loop_depth: item.loop_depth, break_scope: item.break_scope, continue_increment: item.continue_increment}) can Memory.Allocate, Abort.Panic
+        return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+    def typed_verify_ir[@r](ctx: TypedContext[r]&) -> TypedIRIssue[r] can[Memory.Allocate, Abort.Panic]:
+        expression_count: i64 = ctx.exprs.count.i64()
+        expression_child_count: i64 = ctx.expr_children.count.i64()
+        statement_count: i64 = ctx.stmts.count.i64()
+        statement_child_count: i64 = ctx.stmt_children.count.i64()
+        switch_case_count: i64 = ctx.switch_cases.count.i64()
+
+        for index in 0..<expression_count |ctx|:
+            expression: TypedExpr[r] = ctx.exprs[index.usize()]
+            return typed_ir_issue(sview("expression-kind", 0, -1), index) if expression.kind == TypedExprKind.Invalid
+            known_kind: bool = expression.kind == TypedExprKind.Integer or expression.kind == TypedExprKind.Floating or expression.kind == TypedExprKind.String or expression.kind == TypedExprKind.Character or expression.kind == TypedExprKind.Name or expression.kind == TypedExprKind.Binary or expression.kind == TypedExprKind.Unary or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Conditional or expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.Call or expression.kind == TypedExprKind.Sizeof or expression.kind == TypedExprKind.ObjectSizeRemaining or expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.Aggregate or expression.kind == TypedExprKind.Sequence or expression.kind == TypedExprKind.Null or expression.kind == TypedExprKind.Zeroed
+            return typed_ir_issue(sview("unknown-expression-kind", 0, -1), index) if not known_kind
+            return typed_ir_issue(sview("expression-argument-range", 0, -1), index) if not typed_ir_valid_range(expression.args_start, expression.args_count, expression_child_count)
+            if expression.kind == TypedExprKind.Binary or expression.kind == TypedExprKind.Sequence:
+                return typed_ir_issue(sview("binary-operands", 0, -1), index) if not typed_ir_valid_ref(expression.lhs, expression_count, false) or not typed_ir_valid_ref(expression.rhs, expression_count, false) or expression.third != -1
+                if expression.kind == TypedExprKind.Sequence:
+                    return typed_ir_issue(sview("sequence-mode", 0, -1), index) if expression.value < 0 or expression.value > 15
+                    if expression.value >= 1 and expression.value <= 4:
+                        assignment: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
+                        return typed_ir_issue(sview("increment-assignment", 0, -1), index) if assignment.kind != TypedExprKind.Binary or not sview_eq(assignment.text, sview("<-", 0, -1)) or assignment.rhs < 0 or assignment.rhs >= expression_count
+                        update: TypedExpr[r] = ctx.exprs[assignment.rhs.usize()]
+                        expected_update: sview = sview("+", 0, -1) if expression.value == 1 or expression.value == 2 else sview("-", 0, -1)
+                        expected_result: i64 = assignment.lhs if expression.value == 1 or expression.value == 3 else assignment.rhs
+                        return typed_ir_issue(sview("increment-update", 0, -1), index) if update.kind != TypedExprKind.Binary or update.lhs != assignment.lhs or not sview_eq(update.text, expected_update) or expression.rhs != expected_result or not typed_ir_increment_type_supported(expression.type_name)
+                    elif expression.value == 5:
+                        assignment: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
+                        return typed_ir_issue(sview("assignment-value", 0, -1), index) if assignment.kind != TypedExprKind.Binary or not sview_eq(assignment.text, sview("<-", 0, -1)) or assignment.rhs < 0 or assignment.rhs >= expression_count
+                    elif expression.value >= 6:
+                        assignment: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
+                        return typed_ir_issue(sview("compound-assignment-value", 0, -1), index) if assignment.kind != TypedExprKind.Binary or not sview_eq(assignment.text, sview("<-", 0, -1)) or assignment.rhs < 0 or assignment.rhs >= expression_count or expression.rhs != assignment.rhs
+                        update: TypedExpr[r] = ctx.exprs[assignment.rhs.usize()]
+                        expected_operator: sview = typed_binary_assignment_opcode(typed_compound_assignment_value_operator(expression.value - 6))
+                        return typed_ir_issue(sview("compound-assignment-update", 0, -1), index) if update.kind != TypedExprKind.Binary or update.lhs != assignment.lhs or not sview_eq(update.text, expected_operator)
+            elif expression.kind == TypedExprKind.Unary or expression.kind == TypedExprKind.Cast:
+                return typed_ir_issue(sview("unary-operand", 0, -1), index) if not typed_ir_valid_ref(expression.lhs, expression_count, false) or expression.rhs != -1 or expression.third != -1
+            elif expression.kind == TypedExprKind.ArrayIndex:
+                return typed_ir_issue(sview("array-index-operands", 0, -1), index) if not typed_ir_valid_ref(expression.lhs, expression_count, false) or not typed_ir_valid_ref(expression.rhs, expression_count, false) or not typed_ir_valid_ref(expression.value, expression_count, true) or expression.third < -1 or expression.third > 2
+            elif expression.kind == TypedExprKind.Conditional:
+                return typed_ir_issue(sview("conditional-operands", 0, -1), index) if not typed_ir_valid_ref(expression.lhs, expression_count, false) or not typed_ir_valid_ref(expression.rhs, expression_count, false) or not typed_ir_valid_ref(expression.third, expression_count, false)
+            elif expression.kind == TypedExprKind.Member:
+                return typed_ir_issue(sview("member-object", 0, -1), index) if not typed_ir_valid_ref(expression.lhs, expression_count, false) or expression.rhs != -1 or expression.third != -1
+            elif expression.kind == TypedExprKind.Call:
+                return typed_ir_issue(sview("call-callee", 0, -1), index) if not typed_ir_valid_ref(expression.lhs, expression_count, true) or expression.rhs != -1 or expression.third != -1
+                call_mode_issue: TypedIRIssue[r] = typed_verify_call_mode(ctx, expression, index)
+                return call_mode_issue if call_mode_issue.kind.len > 0
+            elif expression.kind == TypedExprKind.Name:
+                return typed_ir_issue(sview("name-expression-shape", 0, -1), index) if expression.lhs != -1 or expression.rhs != -1
+                if expression.value == 3:
+                    return typed_ir_issue(sview("private-global-reference", 0, -1), index) if expression.third < 0 or expression.third >= ctx.globals.count.i64()
+                    referenced_global: TypedGlobal[r] = ctx.globals[expression.third.usize()]
+                    return typed_ir_issue(sview("private-global-reference", 0, -1), index) if not referenced_global.project_private
+                    return typed_ir_issue(sview("private-global-name", 0, -1), index) if not sview_eq(expression.text, referenced_global.name)
+                    return typed_ir_issue(sview("private-global-declaration-identity", 0, -1), index) if referenced_global.declaration_id.len == 0
+                else:
+                    return typed_ir_issue(sview("name-expression-shape", 0, -1), index) if expression.value != 2 and expression.third != -1
+            else:
+                return typed_ir_issue(sview("leaf-expression-shape", 0, -1), index) if expression.lhs != -1 or expression.rhs != -1 or expression.third != -1
+            for offset in 0..<expression.args_count |ctx, expression|:
+                child: i64 = ctx.expr_children[(expression.args_start + offset).usize()]
+                return typed_ir_issue(sview("expression-argument-reference", 0, -1), index) if not typed_ir_valid_ref(child, expression_count, false)
+
+        for index in 0..<statement_child_count |ctx|:
+            child: i64 = ctx.stmt_children[index.usize()]
+            return typed_ir_issue(sview("statement-child-reference", 0, -1), index) if not typed_ir_valid_ref(child, statement_count, false)
+
+        for index in 0..<statement_count |ctx|:
+            statement: TypedStmt[r] = ctx.stmts[index.usize()]
+            return typed_ir_issue(sview("statement-kind", 0, -1), index) if statement.kind == TypedStmtKind.Invalid
+            if statement.kind == TypedStmtKind.Block:
+                return typed_ir_issue(sview("block-child-range", 0, -1), index) if not typed_ir_valid_range(statement.children_start, statement.children_count, statement_child_count)
+                return typed_ir_issue(sview("block-shape", 0, -1), index) if statement.expr != -1 or (statement.aux != -1 and statement.aux != TYPED_STMT_AUX_C_DECLARATION_GROUP) or statement.aux2 != -1
+                if statement.aux == TYPED_STMT_AUX_C_DECLARATION_GROUP:
+                    return typed_ir_issue(sview("c-declaration-group-shape", 0, -1), index) if statement.children_count < 2
+                    for offset in 0..<statement.children_count |ctx, statement|:
+                        child: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
+                        return typed_ir_issue(sview("c-declaration-group-child", 0, -1), index) if ctx.stmts[child.usize()].kind != TypedStmtKind.Declaration
+                for offset in 0..<statement.children_count |ctx, statement|:
+                    child: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
+                    return typed_ir_issue(sview("block-child-reference", 0, -1), index) if not typed_ir_valid_ref(child, statement_count, false)
+            elif statement.kind == TypedStmtKind.If:
+                return typed_ir_issue(sview("if-condition", 0, -1), index) if not typed_ir_valid_ref(statement.expr, expression_count, false)
+                return typed_ir_issue(sview("if-then-target", 0, -1), index) if not typed_ir_valid_ref(statement.aux, statement_count, false)
+                return typed_ir_issue(sview("if-else-target", 0, -1), index) if not typed_ir_valid_ref(statement.aux2, statement_count, true)
+            elif statement.kind == TypedStmtKind.For:
+                return typed_ir_issue(sview("for-condition", 0, -1), index) if not typed_ir_valid_ref(statement.expr, expression_count, false)
+                return typed_ir_issue(sview("for-body-target", 0, -1), index) if not typed_ir_valid_ref(statement.aux, statement_count, false)
+                return typed_ir_issue(sview("for-increment-target", 0, -1), index) if not typed_ir_valid_ref(statement.aux2, statement_count, true)
+                return typed_ir_issue(sview("for-increment-kind", 0, -1), index) if statement.aux2 >= 0 and ctx.stmts[statement.aux2.usize()].kind != TypedStmtKind.Expression
+                return typed_ir_issue(sview("for-initializer-target", 0, -1), index) if not typed_ir_valid_ref(statement.children_start, statement_count, true) or statement.children_count != 0
+            elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+                return typed_ir_issue(sview("loop-condition", 0, -1), index) if not typed_ir_valid_ref(statement.expr, expression_count, false)
+                return typed_ir_issue(sview("loop-body-target", 0, -1), index) if not typed_ir_valid_ref(statement.aux, statement_count, false)
+                return typed_ir_issue(sview("loop-condition-prelude", 0, -1), index) if statement.kind == TypedStmtKind.DoWhile and not typed_ir_valid_ref(statement.aux2, statement_count, true)
+                return typed_ir_issue(sview("loop-shape", 0, -1), index) if (statement.kind == TypedStmtKind.While and statement.aux2 != -1) or statement.children_start != -1 or statement.children_count != 0
+            elif statement.kind == TypedStmtKind.Switch:
+                return typed_ir_issue(sview("switch-condition", 0, -1), index) if not typed_ir_valid_ref(statement.expr, expression_count, false)
+                return typed_ir_issue(sview("switch-case-range", 0, -1), index) if not typed_ir_valid_range(statement.children_start, statement.children_count, switch_case_count)
+            elif statement.kind == TypedStmtKind.Return:
+                return typed_ir_issue(sview("return-expression", 0, -1), index) if not typed_ir_valid_ref(statement.expr, expression_count, true)
+            elif statement.kind == TypedStmtKind.Expression:
+                return typed_ir_issue(sview("statement-expression", 0, -1), index) if not typed_ir_valid_ref(statement.expr, expression_count, false)
+            elif statement.kind == TypedStmtKind.Declaration:
+                return typed_ir_issue(sview("declaration-initializer", 0, -1), index) if not typed_ir_valid_ref(statement.expr, expression_count, true)
+                return typed_ir_issue(sview("declaration-shape", 0, -1), index) if (statement.aux != -1 and statement.aux != TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR) or statement.aux2 != -1 or statement.children_start != -1 or statement.children_count != 0
+                return typed_ir_issue(sview("unordered-map-iterator-type", 0, -1), index) if statement.aux == TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR and statement.type_name.len == 0
+            elif statement.kind == TypedStmtKind.Goto:
+                return typed_ir_issue(sview("label-target", 0, -1), index) if statement.aux < 0
+            elif statement.kind == TypedStmtKind.Label:
+                return typed_ir_issue(sview("label-body", 0, -1), index) if not typed_ir_valid_ref(statement.expr, statement_count, false)
+                return typed_ir_issue(sview("label-declaration", 0, -1), index) if statement.aux < 0
+            elif statement.kind == TypedStmtKind.Continue:
+                return typed_ir_issue(sview("continue-increment-target", 0, -1), index) if not typed_ir_valid_ref(statement.aux, statement_count, true)
+                return typed_ir_issue(sview("continue-increment-kind", 0, -1), index) if statement.aux >= 0 and ctx.stmts[statement.aux.usize()].kind != TypedStmtKind.Expression
+                return typed_ir_issue(sview("leaf-statement-shape", 0, -1), index) if statement.expr != -1 or statement.aux2 != -1 or statement.children_start != -1 or statement.children_count != 0
+            elif statement.kind == TypedStmtKind.Break or statement.kind == TypedStmtKind.SwitchBreak or statement.kind == TypedStmtKind.Null:
+                return typed_ir_issue(sview("leaf-statement-shape", 0, -1), index) if statement.expr != -1 or statement.aux != -1 or statement.aux2 != -1 or statement.children_start != -1 or statement.children_count != 0
+            else:
+                return typed_ir_issue(sview("unknown-statement-kind", 0, -1), index)
+
+        for index in 0..<switch_case_count |ctx|:
+            switch_case: TypedSwitchCase = ctx.switch_cases[index.usize()]
+            return typed_ir_issue(sview("switch-case-body", 0, -1), index) if not typed_ir_valid_ref(switch_case.body, statement_count, false)
+            if switch_case.is_default:
+                return typed_ir_issue(sview("switch-default-shape", 0, -1), index) if switch_case.value != -1 or switch_case.is_constant
+            else:
+                return typed_ir_issue(sview("switch-case-value", 0, -1), index) if not typed_ir_valid_ref(switch_case.value, expression_count, false)
+
+        slice_issue: TypedIRIssue[r] = typed_verify_slice_ownership(ctx) can Memory.Allocate, Abort.Panic
+        return slice_issue if slice_issue.kind.len > 0
+
+        visited: mutable darray[i64] = []
+        for index in 0..<statement_count |visited|:
+            visited.push(0)
+        statement_owners: mutable darray[i64] = []
+        for index in 0..<statement_count |statement_owners|:
+            statement_owners.push(-1)
+        parameter_owners: mutable darray[i64] = []
+        for index in 0..<ctx.params.count.i64() |parameter_owners|:
+            parameter_owners.push(-1)
+        control_scope_loops: mutable darray[i64] = []
+        control_scope_breaks: mutable darray[i8] = []
+        control_scope_increments: mutable darray[i64] = []
+        for index in 0..<statement_count |control_scope_loops, control_scope_breaks, control_scope_increments|:
+            control_scope_loops.push(-1)
+            control_scope_breaks.push(-1)
+            control_scope_increments.push(-2)
+        for index in 0..<ctx.functions.count.i64() |ctx, visited, statement_owners, parameter_owners, control_scope_loops, control_scope_breaks, control_scope_increments|:
+            function: TypedFunction[r] = ctx.functions[index.usize()]
+            return typed_ir_issue(sview("function-body", 0, -1), index) if not typed_ir_valid_ref(function.body, statement_count, false)
+            return typed_ir_issue(sview("function-parameter-range", 0, -1), index) if not typed_ir_valid_range(function.params_start, function.params_count, ctx.params.count.i64())
+            for offset in 0..<function.params_count |ctx, function, parameter_owners, index|:
+                parameter_index: i64 = function.params_start + offset
+                return typed_ir_issue(sview("overlapping-function-parameter-range", 0, -1), parameter_index) if parameter_owners[parameter_index.usize()] >= 0
+                parameter_owners[parameter_index.usize()] <- index
+            label_issue: TypedIRIssue[r] = typed_verify_function_labels(ctx, function, index, &visited, &statement_owners) can Memory.Allocate, Abort.Panic
+            return label_issue if label_issue.kind.len > 0
+            scope_issue: TypedIRIssue[r] = typed_verify_control_transfer_scopes(ctx, function, &control_scope_loops, &control_scope_breaks, &control_scope_increments) can Memory.Allocate, Abort.Panic
+            return scope_issue if scope_issue.kind.len > 0
+
+        for index in 0..<ctx.params.count.i64() |parameter_owners|:
+            return typed_ir_issue(sview("orphan-function-parameter", 0, -1), index) if parameter_owners[index.usize()] < 0
+
+        # Every lowered statement is emitted as part of a function body. An
+        # unowned node is therefore stale/detached IR, not an intentionally
+        # reusable template; reject it before emission just like cross-function
+        # sharing above.
+        for index in 0..<statement_count |statement_owners|:
+            return typed_ir_issue(sview("orphan-statement", 0, -1), index) if statement_owners[index.usize()] < 0
+
+        expression_visited: mutable darray[bool] = []
+        expression_worklist: mutable darray[i64] = []
+        for index in 0..<expression_count |expression_visited|:
+            expression_visited.push(false)
+        for index in 0..<statement_count |ctx, expression_visited, expression_worklist|:
+            statement: TypedStmt[r] = ctx.stmts[index.usize()]
+            typed_verify_enqueue_expression(statement.expr, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic if statement.expr >= 0
+        for index in 0..<switch_case_count |ctx, expression_visited, expression_worklist|:
+            switch_case: TypedSwitchCase = ctx.switch_cases[index.usize()]
+            typed_verify_enqueue_expression(switch_case.value, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic if switch_case.value >= 0
+        for index in 0..<ctx.globals.count.i64() |ctx, expression_visited, expression_worklist|:
+            global_value: TypedGlobal[r] = ctx.globals[index.usize()]
+            typed_verify_enqueue_expression(global_value.initializer, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic if global_value.initializer >= 0
+        while expression_worklist.count > 0 |ctx, expression_visited, expression_worklist|:
+            expression_index: i64 = expression_worklist.pop()
+            expression: TypedExpr[r] = ctx.exprs[expression_index.usize()]
+            typed_verify_enqueue_expression(expression.lhs, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic if expression.lhs >= 0
+            typed_verify_enqueue_expression(expression.rhs, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic if expression.rhs >= 0
+            # `third` is an expression edge only for the false arm of a
+            # conditional. Enum names store their numeric enumerator value in
+            # this field, while array-index nodes use it for access mode.
+            typed_verify_enqueue_expression(expression.third, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic if expression.kind == TypedExprKind.Conditional
+            typed_verify_enqueue_expression(expression.value, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic if expression.kind == TypedExprKind.ArrayIndex and expression.value >= 0
+            for offset in 0..<expression.args_count |ctx, expression, expression_visited, expression_worklist|:
+                argument: i64 = ctx.expr_children[(expression.args_start + offset).usize()]
+                typed_verify_enqueue_expression(argument, &expression_visited, &expression_worklist) can Memory.Allocate, Abort.Panic
+        for index in 0..<expression_count |expression_visited|:
+            return typed_ir_issue(sview("orphan-expression", 0, -1), index) if not expression_visited[index.usize()]
+
+        extern_parameter_owners: mutable darray[i64] = []
+        for index in 0..<ctx.extern_params.count.i64() |extern_parameter_owners|:
+            extern_parameter_owners.push(-1)
+        for index in 0..<ctx.externs.count.i64() |ctx, extern_parameter_owners|:
+            external: TypedExtern[r] = ctx.externs[index.usize()]
+            return typed_ir_issue(sview("external-parameter-range", 0, -1), index) if not typed_ir_valid_range(external.params_start, external.params_count, ctx.extern_params.count.i64())
+            for offset in 0..<external.params_count |external, extern_parameter_owners, index|:
+                parameter_index: i64 = external.params_start + offset
+                return typed_ir_issue(sview("overlapping-external-parameter-range", 0, -1), parameter_index) if extern_parameter_owners[parameter_index.usize()] >= 0
+                extern_parameter_owners[parameter_index.usize()] <- index
+        for index in 0..<ctx.extern_params.count.i64() |extern_parameter_owners|:
+            return typed_ir_issue(sview("orphan-external-parameter", 0, -1), index) if extern_parameter_owners[index.usize()] < 0
+
+        field_owners: mutable darray[i64] = []
+        for index in 0..<ctx.fields.count.i64() |field_owners|:
+            field_owners.push(-1)
+        for index in 0..<ctx.records.count.i64() |ctx, field_owners|:
+            record: TypedRecord[r] = ctx.records[index.usize()]
+            return typed_ir_issue(sview("record-field-range", 0, -1), index) if not typed_ir_valid_range(record.fields_start, record.fields_count, ctx.fields.count.i64())
+            for offset in 0..<record.fields_count |record, field_owners, index|:
+                field_index: i64 = record.fields_start + offset
+                return typed_ir_issue(sview("overlapping-record-field-range", 0, -1), field_index) if field_owners[field_index.usize()] >= 0
+                field_owners[field_index.usize()] <- index
+        for index in 0..<ctx.fields.count.i64() |field_owners|:
+            return typed_ir_issue(sview("orphan-record-field", 0, -1), index) if field_owners[index.usize()] < 0
+
+        for index in 0..<ctx.globals.count.i64() |ctx|:
+            global_value: TypedGlobal[r] = ctx.globals[index.usize()]
+            return typed_ir_issue(sview("global-initializer", 0, -1), index) if not typed_ir_valid_ref(global_value.initializer, expression_count, true)
+
+        return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
+    def typed_record_ir_issue[@r](ctx: mutable TypedContext[r]&, issue: TypedIRIssue[r]) -> void can[Memory.Allocate, Abort.Panic]:
+        source_copy: cstr = string_view_copy(sview(ctx.source, 0, -1)) can Memory.Allocate, Abort.Panic
+        kind_copy: cstr = string_view_copy(issue.kind) can Memory.Allocate, Abort.Panic
+        ctx.diagnostics.push(TypedDiagnostic{category: sview("internal-ir", 0, -1), kind: sview(kind_copy, 0, -1), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0), source: sview(source_copy, 0, -1), canonical_source: ctx.canonical_source, spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), range_start_offset: -1, range_end_offset: -1, line: issue.index, column: 0, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0})

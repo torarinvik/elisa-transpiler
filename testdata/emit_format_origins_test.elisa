@@ -1,0 +1,71 @@
+include "../src/.compiler_std/elisacore_runtime.elisa"
+include "../src/.compiler_std/elisacore_json.elisa"
+
+module CTranslator:
+    struct EmitFormatOriginsTestModule:
+        _unused: u8
+
+extend CTranslator:
+    def append_view(out: mutable darray[u8]&, value: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        for index in 0..<value.len |out, value|:
+            out.push(string_view_index(value, index).u8())
+
+include "../src/typed_source_map_types.elisa"
+include "../src/emit_format.elisa"
+include "../src/emit_format_origins.elisa"
+
+extend CTranslator:
+    def format_origin_outputs_equal(left: darray[u8], right: darray[u8]) -> bool:
+        return false if left.count != right.count
+        for index in 0..<left.count.i64() |left, right|:
+            return false if left[index.usize()] != right[index.usize()]
+        return true
+
+    def format_origin_offsets_are_ordered(formatted: TypedFormattedOutputOrigins, source_length: i64) -> bool:
+        return false if formatted.output.count != formatted.source_offsets.count
+        previous: mutable i64 = -1
+        for index in 0..<formatted.source_offsets.count.i64() |formatted, previous, source_length|:
+            current: i64 = formatted.source_offsets[index.usize()]
+            return false if current < previous or current < 0 or current > source_length
+            previous <- current
+        return true
+
+    def run_emit_format_origins_checks() -> i32 can[Memory.Allocate, Abort.Panic, Console]:
+        ordinary: mutable darray[u8] = []
+        append_view(&ordinary, sview("def f( a,  b ):\r\n    return \"a,  b\" + value  # keep  spaces\n\n\n", 0, -1))
+        ordinary_mapped: TypedFormattedOutputOrigins = typed_format_output_with_origins(ordinary) can Memory.Allocate, Abort.Panic
+        ordinary_plain: darray[u8] = typed_format_output(ordinary)
+        return 1 if not format_origin_outputs_equal(ordinary_plain, ordinary_mapped.output)
+        return 2 if not format_origin_offsets_are_ordered(ordinary_mapped, ordinary.count.i64())
+
+        long_call: mutable darray[u8] = []
+        append_view(&long_call, sview("def f():\n    return call(", 0, -1))
+        for index in 0..<28 |long_call|:
+            append_view(&long_call, sview("argument_with_a_long_name, ", 0, -1))
+        append_view(&long_call, sview("last_argument)\n", 0, -1))
+        long_mapped: TypedFormattedOutputOrigins = typed_format_output_with_origins(long_call) can Memory.Allocate, Abort.Panic
+        long_plain: darray[u8] = typed_format_output(long_call)
+        return 3 if not format_origin_outputs_equal(long_plain, long_mapped.output)
+        return 4 if not format_origin_offsets_are_ordered(long_mapped, long_call.count.i64())
+        newline_count: mutable i64 = 0
+        for byte in long_mapped.output |long_mapped, newline_count|:
+            newline_count <- newline_count + 1 if byte == 10
+        return 5 if newline_count <= 2
+        generated_start: i64 = typed_generated_offset_for_source(long_mapped.source_offsets, 0)
+        generated_end: i64 = typed_generated_offset_for_source(long_mapped.source_offsets, long_call.count.i64())
+        return 6 if generated_start != 0 or generated_end < 0 or generated_end > long_mapped.output.count.i64()
+        ranges: darray[TypedOwnedSourceRange] = [TypedOwnedSourceRange{file: sview("main.c", 0, -1), included_from: sview("", 0, 0), start_offset: 0, end_offset: 1}]
+        span: TypedGeneratedSourceSpan = TypedGeneratedSourceSpan{generated_start: 4, generated_end: 10, source: ranges[0], spelling: ranges[0], expansion: ranges[0], synthesized_reason: sview("", 0, 0)}
+        spans: mutable darray[TypedGeneratedSourceSpan] = [span]
+        removed_markers: darray[i64] = [1, 5, 8]
+        typed_rebase_generated_source_spans(&spans, 100, removed_markers)
+        return 7 if spans[0].generated_start != 103 or spans[0].generated_end != 107
+        formatted_span: TypedGeneratedSourceSpan = TypedGeneratedSourceSpan{generated_start: 0, generated_end: long_call.count.i64(), source: ranges[0], spelling: ranges[0], expansion: ranges[0], synthesized_reason: sview("", 0, 0)}
+        formatted_spans: mutable darray[TypedGeneratedSourceSpan] = [formatted_span]
+        typed_finalize_generated_source_spans(&formatted_spans, long_mapped.source_offsets)
+        return 8 if formatted_spans[0].generated_start != generated_start or formatted_spans[0].generated_end != long_mapped.output.count.i64()
+        print("Formatter source-offset mapping checks passed\n")
+        return 0
+
+def main(argc: i64, argv: mutable void&) -> i32 can[Memory.Allocate, Abort.Panic, Console]:
+    return CTranslator::run_emit_format_origins_checks() can Memory.Allocate, Abort.Panic, Console

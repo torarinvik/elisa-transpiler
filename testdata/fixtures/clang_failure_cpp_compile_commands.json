@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/clang_failure.cpp",
+    "command": "clang++ -std=gnu++11 -c testdata/fixtures/clang_failure.cpp -o /dev/null"
+  }
+]

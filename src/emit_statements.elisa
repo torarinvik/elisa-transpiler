@@ -3,9 +3,9 @@ extend CTranslator:
     # the module level. They should not become visible `pass` statements when
     # surrounded by real code, but a genuinely empty Elisa block still needs a
     # body marker.
-    def typed_stmt_is_empty(ctx: TypedContext&, index: i64) -> bool:
+    def typed_stmt_is_empty[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return true if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
         return true if statement.kind == TypedStmtKind.Null
         if statement.kind == TypedStmtKind.Block:
             for offset in 0..<statement.children_count |ctx, statement|:
@@ -16,13 +16,55 @@ extend CTranslator:
     # Statement emission is kept separate from program/function emission so
     # control-flow lowering can evolve without making the top-level emitter
     # harder to audit.
-    def typed_append_switch_done_name(out: mutable darray[u8]&, ctx: TypedContext&) -> void:
+    def typed_append_switch_done_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&) -> void:
         append_view(out, sview("switch_done_", 0, -1))
         append_i64(out, ctx.current_switch_done_index)
 
-    def typed_stmt_contains_switch_break(ctx: TypedContext&, index: i64) -> bool:
+    # Elisa's current backend may lower a match selector inline in every arm.
+    # That is harmless for a pure value, but it violates C's once-only
+    # evaluation rule for selectors such as `switch (next_value())` or
+    # `switch (cursor++)`. Materialize only selectors with a known effect so
+    # ordinary switches keep their compact, idiomatic spelling.
+    def typed_switch_selector_needs_temp[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        return true if typed_condition_expr_has_effect(ctx, index)
+        return true if typed_expr_contains_call(ctx, index)
+        return not typed_expr_is_side_effect_free(ctx, index)
+    def typed_switch_selector_name[@r](ctx: TypedContext[r]&, index: i64) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        attempt: mutable i64 = 0
+        while attempt < 4096:
+            candidate: mutable darray[u8] = []
+            append_view(&candidate, sview("__elisa_transpiler_switch_selector_", 0, -1))
+            append_i64(&candidate, index)
+            if attempt > 0:
+                append_view(&candidate, sview("_", 0, -1))
+                append_i64(&candidate, attempt)
+            candidate_view: sview = bytes_view(candidate)
+            conflicts: mutable bool = typed_context_name_conflicts(ctx, candidate_view)
+            conflicts <- true if typed_emitted_name_taken(ctx, candidate_view, sview("", 0, 0))
+            if ctx.current_function_body >= 0:
+                conflicts <- true if typed_stmt_has_name_suffix(ctx, ctx.current_function_body, candidate_view, sview("", 0, 0))
+            if not conflicts:
+                copied: cstr = string_view_copy(candidate_view) can Memory.Allocate
+                return sview(copied, 0, -1)
+            attempt <- attempt + 1
+        fallback: mutable darray[u8] = []
+        append_view(&fallback, sview("__elisa_transpiler_switch_selector_fallback", 0, -1))
+        copied_fallback: cstr = string_view_copy(bytes_view(fallback)) can Memory.Allocate
+        return sview(copied_fallback, 0, -1)
+    def typed_emit_switch_selector[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, index: i64, level: i64) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        selector_name: sview = typed_switch_selector_name(ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_indent(out, level)
+        append_view(out, selector_name)
+        append_view(out, sview(": ", 0, -1))
+        append_c_type_contextual(out, ctx, typed_expr_at(ctx, index).type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview(" = ", 0, -1))
+        typed_emit_target_value(out, ctx, index, typed_expr_at(ctx, index).type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview("\n", 0, -1))
+        return selector_name
+    def typed_stmt_contains_switch_break[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
         return true if statement.kind == TypedStmtKind.SwitchBreak
         # A break in a nested switch belongs to that nested switch, not to the
         # switch whose arm contains it.
@@ -38,17 +80,18 @@ extend CTranslator:
             return true if typed_stmt_contains_switch_break(ctx, statement.aux)
             return typed_stmt_contains_switch_break(ctx, statement.aux2)
         elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
-            return typed_stmt_contains_switch_break(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
+            return typed_stmt_contains_switch_break(ctx, statement.expr) if statement.kind == TypedStmtKind.Label
+            return true if typed_stmt_contains_switch_break(ctx, statement.aux)
+            return typed_stmt_contains_switch_break(ctx, statement.aux2) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
         return false
-
-    def typed_stmt_needs_switch_done(ctx: TypedContext&, index: i64) -> bool:
+    def typed_stmt_needs_switch_done[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
         return false if statement.kind == TypedStmtKind.SwitchBreak or statement.kind == TypedStmtKind.Switch
         if statement.kind == TypedStmtKind.Block:
             for offset in 0..<statement.children_count |ctx, statement|:
                 child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
-                child: TypedStmt = typed_stmt_at(ctx, child_index)
+                child: TypedStmt[r] = typed_stmt_at(ctx, child_index)
                 # A direct break naturally ends the emitted match arm. The
                 # flag is only required when a break is nested in another
                 # statement and later arm code may still need suppressing.
@@ -57,19 +100,17 @@ extend CTranslator:
                 break if typed_switch_stmt_terminates(ctx, child_index)
             return false
         return typed_stmt_contains_switch_break(ctx, index)
-
-    def typed_switch_needs_done(ctx: TypedContext&, index: i64) -> bool:
+    def typed_switch_needs_done[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
         return false if statement.kind != TypedStmtKind.Switch
         for offset in 0..<statement.children_count |ctx, statement|:
             switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
             return true if typed_stmt_needs_switch_done(ctx, switch_case.body)
         return false
-
-    def typed_emit_switch_case_sequence(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64, guarded: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_emit_switch_case_sequence[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, index: i64, level: i64, guarded: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
         if statement.kind == TypedStmtKind.Block:
             if statement.children_count == 0:
                 if guarded:
@@ -85,7 +126,7 @@ extend CTranslator:
                 return
             for offset in 0..<statement.children_count |out, ctx, statement, level, guarded|:
                 child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
-                child: TypedStmt = typed_stmt_at(ctx, child_index)
+                child: TypedStmt[r] = typed_stmt_at(ctx, child_index)
                 if child.kind == TypedStmtKind.SwitchBreak:
                     typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if guarded
                     break
@@ -102,17 +143,15 @@ extend CTranslator:
             typed_emit_stmt(out, ctx, index, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         else:
             typed_emit_stmt(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    def typed_emit_switch_case_body(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_emit_switch_case_body[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         initial_output_size: i64 = out.count.i64()
         typed_emit_switch_case_sequence(out, ctx, index, level, typed_stmt_needs_switch_done(ctx, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if out.count.i64() == initial_output_size:
             append_indent(out, level)
             append_view(out, sview("pass\n", 0, -1))
-
-    def typed_stmt_directly_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
+    def typed_stmt_directly_needs_unsafe[@r](ctx: mutable TypedContext[r]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
         if statement.kind == TypedStmtKind.Declaration:
             return false
         if statement.kind == TypedStmtKind.For:
@@ -122,26 +161,24 @@ extend CTranslator:
     # Match patterns should retain source-level enum names when Clang gave us
     # an enum constant. Numeric values remain the fallback for computed case
     # expressions and for ordinary integer switches.
-    def typed_switch_case_is_symbolic(ctx: TypedContext&, statement: TypedStmt, switch_case: TypedSwitchCase) -> bool:
+    def typed_switch_case_is_symbolic[@r](ctx: TypedContext[r]&, statement: TypedStmt[r], switch_case: TypedSwitchCase) -> bool:
         return false if not switch_case.is_constant or not c_type_is_enum(typed_expr_at(ctx, statement.expr).type_name)
         index: mutable i64 = switch_case.value
         while index >= 0:
-            expression: TypedExpr = typed_expr_at(ctx, index)
+            expression: TypedExpr[r] = typed_expr_at(ctx, index)
             if expression.kind == TypedExprKind.Cast:
                 index <- expression.lhs
             else:
                 return expression.kind == TypedExprKind.Name and expression.value == 2
         return false
-
-    def typed_emit_switch_case_atom(out: mutable darray[u8]&, ctx: TypedContext&, statement: TypedStmt, switch_case: TypedSwitchCase) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_emit_switch_case_atom[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, statement: TypedStmt[r], switch_case: TypedSwitchCase) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         if typed_switch_case_is_symbolic(ctx, statement, switch_case):
             typed_emit_expr(out, ctx, switch_case.value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         elif switch_case.is_constant:
             append_i64(out, switch_case.constant_value)
         else:
             typed_emit_expr(out, ctx, switch_case.value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    def typed_switch_case_group_is_dense(ctx: TypedContext&, statement: TypedStmt, start: i64, end: i64) -> bool:
+    def typed_switch_case_group_is_dense[@r](ctx: TypedContext[r]&, statement: TypedStmt[r], start: i64, end: i64) -> bool:
         return false if end - start < 3
         first: TypedSwitchCase = ctx.switch_cases[(statement.children_start + start).usize()]
         return false if not first.is_constant or typed_switch_case_is_symbolic(ctx, statement, first)
@@ -152,8 +189,7 @@ extend CTranslator:
             return false if switch_case.constant_value != previous + 1
             previous <- switch_case.constant_value
         return true
-
-    def typed_emit_switch_case_pattern(out: mutable darray[u8]&, ctx: TypedContext&, statement: TypedStmt, start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_emit_switch_case_pattern[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, statement: TypedStmt[r], start: i64, end: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         if typed_switch_case_group_is_dense(ctx, statement, start, end):
             first: TypedSwitchCase = ctx.switch_cases[(statement.children_start + start).usize()]
             last: TypedSwitchCase = ctx.switch_cases[(statement.children_start + end - 1).usize()]

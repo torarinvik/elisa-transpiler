@@ -9,32 +9,64 @@ extend CTranslator:
         ArrayElement
         NestedPointerSlot
 
-    struct TypedPlace:
+    struct TypedPlace[@r]:
         kind: TypedPlaceKind
         expression: i64
-        type_name: sview
-
-    def typed_classify_place(ctx: TypedContext&, index: i64) -> TypedPlace:
-        return TypedPlace{kind: TypedPlaceKind.Invalid, expression: index, type_name: sview("", 0, 0)} if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        type_name: sview @r
+    def typed_classify_place[@r](ctx: TypedContext[r]&, index: i64) -> TypedPlace[r]:
+        return TypedPlace[r]{kind: TypedPlaceKind.Invalid, expression: index, type_name: sview("", 0, 0)} if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         if expression.kind == TypedExprKind.Name:
-            return TypedPlace{kind: TypedPlaceKind.Name, expression: index, type_name: expression.type_name}
+            return TypedPlace[r]{kind: TypedPlaceKind.Name, expression: index, type_name: expression.type_name}
         if expression.kind == TypedExprKind.Member:
-            return TypedPlace{kind: TypedPlaceKind.Member, expression: index, type_name: expression.type_name}
+            return TypedPlace[r]{kind: TypedPlaceKind.Member, expression: index, type_name: expression.type_name}
         if expression.kind == TypedExprKind.ArrayIndex:
             place_kind: TypedPlaceKind = TypedPlaceKind.NestedPointerSlot if typed_is_nested_pointer_slot(ctx, index) else TypedPlaceKind.ArrayElement
-            return TypedPlace{kind: place_kind, expression: index, type_name: expression.type_name}
-        return TypedPlace{kind: TypedPlaceKind.Invalid, expression: index, type_name: expression.type_name}
-
-    def typed_emit_place_target(out: mutable darray[u8]&, ctx: TypedContext&, place: TypedPlace, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+            return TypedPlace[r]{kind: place_kind, expression: index, type_name: expression.type_name}
+        return TypedPlace[r]{kind: TypedPlaceKind.Invalid, expression: index, type_name: expression.type_name}
+    def typed_emit_place_target[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, place: TypedPlace[r], level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         if place.kind == TypedPlaceKind.NestedPointerSlot:
             typed_emit_nested_pointer_slot_target(out, ctx, place.expression, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
         append_indent(out, level)
         typed_emit_expr(out, ctx, place.expression) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    def typed_emit_place_value(out: mutable darray[u8]&, ctx: TypedContext&, place: TypedPlace, value_index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_place_storage_type[@r](ctx: TypedContext[r]&, place: TypedPlace[r]) -> sview @r:
+        return place.type_name if place.kind != TypedPlaceKind.Member
+        expression: TypedExpr[r] = typed_expr_at(ctx, place.expression)
+        return place.type_name if expression.lhs < 0 or expression.lhs >= ctx.exprs.count.i64()
+        base: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
+        record_index: i64 = typed_record_index(ctx, base.type_name)
+        # A project unit can use a record declared in a different unit. If
+        # Clang has already lowered a C boolean field but this unit does not
+        # own the record layout, use the translator's C boolean storage shape
+        # so the assignment still crosses the integer representation boundary.
+        canonical_type: sview = typed_project_record_field_type(safe_identifier(c_type_named_base(base.type_name)), expression.text)
+        return canonical_type if canonical_type.len > 0
+        return sview("i8", 0, -1) if record_index < 0 and (sview_eq(place.type_name, sview("bool", 0, -1)) or sview_eq(place.type_name, sview("_Bool", 0, -1)))
+        return place.type_name if record_index < 0
+        record: TypedRecord[r] = ctx.records[record_index.usize()]
+        for offset in 0..<record.fields_count |ctx, record, expression|:
+            field: TypedField[r] = ctx.fields[(record.fields_start + offset).usize()]
+            return field.type_name if sview_eq(field.name, expression.text)
+        return place.type_name
+    def typed_emit_place_value[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, place: TypedPlace[r], value_index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         if place.kind == TypedPlaceKind.NestedPointerSlot:
             typed_emit_nested_pointer_slot_value(out, ctx, value_index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
-        typed_emit_target_value(out, ctx, value_index, place.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        value: mutable i64 = value_index
+        while value >= 0 and value < ctx.exprs.count.i64():
+            expression: TypedExpr[r] = typed_expr_at(ctx, value)
+            if expression.kind == TypedExprKind.Sequence:
+                # An increment helper sequence is itself the C value: it both
+                # updates the place and returns the prefix/postfix result.
+                # Unwrapping it to rhs drops the mutation (notably for
+                # `value = ++cursor`). Ordinary comma sequences still reduce
+                # to their final value here.
+                if typed_expr_is_increment_sequence(expression):
+                    break
+                value <- expression.rhs
+            elif expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("<-", 0, -1)):
+                value <- expression.rhs
+            else:
+                break
+        typed_emit_target_value(out, ctx, value, typed_place_storage_type(ctx, place)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

@@ -1,0 +1,17 @@
+extend CTranslator:
+    # Compatibility modules can expose common helper names in the compiler's
+    # lookup scope. Keep source names for ordinary C globals, but escape names
+    # that would otherwise be parsed as a standard-library function or generic.
+    def elisa_runtime_global_name_is_reserved(name: sview) -> bool:
+        return true if sview_eq(name, sview("extension", 0, -1)) or sview_eq(name, sview("filename", 0, -1)) or sview_eq(name, sview("parent", 0, -1)) or sview_eq(name, sview("stem", 0, -1)) or sview_eq(name, sview("join", 0, -1))
+        return true if sview_eq(name, sview("slice", 0, -1)) or sview_eq(name, sview("len", 0, -1)) or sview_eq(name, sview("get", 0, -1)) or sview_eq(name, sview("set", 0, -1)) or sview_eq(name, sview("clear", 0, -1)) or sview_eq(name, sview("push", 0, -1)) or sview_eq(name, sview("pop", 0, -1)) or sview_eq(name, sview("view", 0, -1))
+        return true if sview_eq(name, sview("count", 0, -1)) or sview_eq(name, sview("empty", 0, -1)) or sview_eq(name, sview("size", 0, -1)) or sview_eq(name, sview("find", 0, -1)) or sview_eq(name, sview("contains", 0, -1)) or sview_eq(name, sview("erase", 0, -1)) or sview_eq(name, sview("end", 0, -1))
+        return false
+
+    def external_global_binding_name(name: sview) -> sview can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return safe_identifier(name) if not elisa_runtime_global_name_is_reserved(name)
+        escaped: mutable darray[u8] = []
+        append_literal(&escaped, sview("__c_external_global_", 0, -1))
+        append_literal(&escaped, safe_identifier(name))
+        copied: cstr = string_view_copy(bytes_view(escaped)) can Memory.Allocate
+        return sview(copied, 0, -1)

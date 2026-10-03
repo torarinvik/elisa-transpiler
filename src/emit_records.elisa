@@ -1,0 +1,599 @@
+extend CTranslator:
+    def c_type_is_array(qual_type: sview) -> bool:
+        return sview_find_byte(qual_type, 91) >= 0
+
+    def typed_parse_decimal_view(value: sview, start: i64, end: i64, result: mutable i64&) -> bool:
+        return false if start < 0 or end <= start or end > value.len
+        parsed: mutable i64 = 0
+        for index in start..<end |value, parsed|:
+            digit: i64 = string_view_index(value, index) - 48
+            return false if digit < 0 or digit > 9
+            parsed <- parsed * 10 + digit
+        result[0] <- parsed
+        return true
+
+    def typed_anonymous_type_location(qual_type: sview, line: mutable i64&, column: mutable i64&) -> bool:
+        # The source location is the identity Clang uses for an anonymous
+        # record. Parse the marker directly instead of deriving a name from
+        # the whole spelling: paths may contain arbitrary punctuation and the
+        # same type can appear as a value, pointer, or array element.
+        open_paren: i64 = sview_find_byte(qual_type, 40)
+        close: i64 = c_find_last_byte(qual_type, 41)
+        # A desugared C++ spelling may begin directly with the parenthesized
+        # marker (`(unnamed struct at ...)`), so offset zero is valid here.
+        return false if open_paren < 0 or close <= open_paren
+        candidate: sview = string_view_suffix(qual_type, open_paren)
+        return false if not sview_starts_with(candidate, sview("(unnamed at ", 0, -1)) and not sview_starts_with(candidate, sview("(unnamed struct at ", 0, -1)) and not sview_starts_with(candidate, sview("(unnamed union at ", 0, -1)) and not sview_starts_with(candidate, sview("(anonymous struct at ", 0, -1)) and not sview_starts_with(candidate, sview("(anonymous union at ", 0, -1))
+        column_colon: i64 = c_find_last_byte(string_view_prefix(qual_type, close), 58)
+        line_colon: i64 = c_find_last_byte(string_view_prefix(qual_type, column_colon), 58)
+        return false if line_colon <= open_paren or column_colon <= line_colon
+        return false if not typed_parse_decimal_view(qual_type, line_colon + 1, column_colon, line)
+        return false if not typed_parse_decimal_view(qual_type, column_colon + 1, close, column)
+        return true
+    # Clang represents both `#pragma pack(1)` and
+    # `__attribute__((packed))` as declaration attributes. Keep the fact
+    # keyed by the emitted record name; placeholders and repeated declaration
+    # passes can then share it without changing TypedRecord[r]'s ABI.
+    def typed_record_is_packed_node[@r](node: JsonValueHandle[r]) -> bool:
+        return ast_has_child_kind(node, sview("MaxFieldAlignmentAttr", 0, -1)) or ast_has_child_kind(node, sview("PackedAttr", 0, -1))
+    def typed_mark_record_packed[@r](ctx: mutable TypedContext[r]&, record_name: sview) -> void can[Memory.Allocate]:
+        return if record_name.len == 0
+        for packed_name in ctx.packed_record_names |record_name|:
+            return if packed_name == record_name
+        ctx.packed_record_names.push(record_name)
+    def typed_record_name_is_packed[@r](ctx: TypedContext[r]&, record_name: sview) -> bool:
+        for packed_name in ctx.packed_record_names |record_name|:
+            return true if packed_name == record_name
+        return false
+    def typed_enum_index[@r](ctx: TypedContext[r]&, qual_type: sview) -> i64:
+        wanted: sview = safe_identifier(c_type_named_base(qual_type))
+        for index in 0..<ctx.enums.count |ctx, wanted|:
+            if sview_eq(ctx.enums[index].name, wanted):
+                return index
+        alias_index: mutable i64 = typed_type_alias_qualified_index(ctx, wanted)
+        alias_index <- typed_type_alias_index(ctx, wanted) if alias_index < 0
+        return -1 if alias_index < 0 or not typed_type_alias_expandable(ctx.type_aliases[alias_index.usize()])
+        declaration: JsonValueHandle[r] = typed_decl_lookup(ctx, ctx.type_aliases[alias_index.usize()].canonical_decl_id)
+        enum_id: sview = typed_find_type_decl_id_through_alias(ctx, declaration, sview("EnumType", 0, -1))
+        enumeration: JsonValueHandle[r] = typed_decl_lookup(ctx, enum_id)
+        return -1 if json_handle_is_null(enumeration) or not typed_enum_decl_is_scoped(enumeration)
+        enum_name: sview = typed_enum_decl_source_name(enumeration, sview("", 0, 0))
+        for index in 0..<ctx.enums.count |ctx, enum_name|:
+            return index if sview_eq(ctx.enums[index].name, enum_name)
+        return -1
+    def typed_enum_value_index[@r](ctx: TypedContext[r]&, qual_type: sview) -> i64: return -1 if c_type_pointer_count(qual_type) > 0 or c_type_reference_count(qual_type) > 0 or c_type_is_array(qual_type) or c_type_is_function(qual_type) else typed_enum_index(ctx, qual_type)
+    def typed_enum_storage_type[@r](ctx: TypedContext[r]&, qual_type: sview) -> sview @r:
+        index: i64 = typed_enum_index(ctx, qual_type)
+        return sview("int", 0, -1) if index < 0
+        return ctx.enums[index.usize()].underlying_type
+    def typed_emitted_value_type[@r](ctx: TypedContext[r]&, qual_type: sview) -> sview @r:
+        # Clang can leave a scalar typedef spelling on a function declaration
+        # even when its desugared type was unavailable. Keep the lowering type
+        # aligned with append_c_type's safe scalar fallback so return values do
+        # not become bool-vs-i32 mismatches at the Elisa boundary.
+        return qual_type if c_type_pointer_count(qual_type) > 0 or c_type_is_array(qual_type) or c_type_is_function(qual_type) or c_type_is_integer(qual_type) or c_type_is_floating(qual_type)
+        base: sview = c_type_named_base(qual_type)
+        return qual_type if sview_eq(base, sview("void", 0, -1)) or sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("_Bool", 0, -1)) or typed_enum_index(ctx, qual_type) >= 0
+        record_index: i64 = typed_record_index(ctx, qual_type)
+        return qual_type if record_index >= 0 and ctx.records[record_index.usize()].fields_count > 0
+        return sview("i32", 0, -1)
+    def append_c_pointer_to_array_type_contextual[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, qual_type: sview, dimension: i64, dimensions: i64) -> void:
+        pointer_open: i64 = c_pointer_to_array_open(qual_type)
+        pointer_base: sview = c_trim_spaces(string_view_prefix(qual_type, pointer_open))
+        if dimension >= dimensions:
+            # This is the array element type, not the outer pointer type. Reuse
+            # array-element lowering to retain contextual record identity,
+            # pointer mutability, and the nullable element-pointer layer.
+            append_c_array_element_type_contextual(out, ctx, pointer_base)
+            return
+        open_bracket: i64 = c_array_open_at(qual_type, dimension)
+        close_bracket: i64 = c_array_close_after(qual_type, open_bracket)
+        append_view(out, sview("array[", 0, -1))
+        append_c_pointer_to_array_type_contextual(out, ctx, qual_type, dimension + 1, dimensions)
+        append_view(out, sview(", ", 0, -1))
+        append_view_range(out, qual_type, open_bracket + 1, close_bracket)
+        append_view(out, sview("]", 0, -1))
+    def append_c_array_element_type_contextual[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, element_type: sview) -> void:
+        record_index: i64 = typed_record_index(ctx, element_type)
+        if record_index >= 0 and c_type_pointer_count(element_type) == 0 and not c_type_is_builtin_base(element_type):
+            # Resolve record-valued array elements here, at the same point
+            # where the array shape is lowered. This is important for Clang's
+            # location-based anonymous records: delegating back to the generic
+            # C spelling renderer can lose the contextual record identity.
+            append_elisa_type_name(out, ctx.records[record_index.usize()].name)
+        elif record_index >= 0 and not c_type_is_builtin_base(element_type) and c_type_pointer_count(element_type) > 0:
+            # A named record can be the pointee of an array element
+            # (`FM_OPL *chips[2]`). Preserve its pointer ABI while resolving
+            # the record through the contextual type table.
+            if c_type_pointer_layers_composable(element_type):
+                append_c_pointer_type_layers(out, element_type, ctx.records[record_index.usize()].name, c_type_pointer_count(element_type), 0, false, false, true)
+            else:
+                append_view(out, sview("mutable ", 0, -1)) if c_type_pointer_can_write(element_type)
+                append_elisa_type_name(out, ctx.records[record_index.usize()].name)
+                append_view(out, sview("&", 0, -1))
+                append_c_pointer_layers(out, c_type_pointer_count(element_type)) if c_type_pointer_count(element_type) > 1
+        else:
+            append_c_type_contextual(out, ctx, element_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(element_type)
+    def append_c_array_type_contextual[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, qual_type: sview, dimension: i64, dimensions: i64) -> void:
+        if dimension >= dimensions:
+            append_c_array_element_type_contextual(out, ctx, c_array_base_type(qual_type))
+            return
+        open_bracket: i64 = c_array_open_at(qual_type, dimension)
+        close_bracket: i64 = c_array_close_after(qual_type, open_bracket)
+        append_view(out, sview("array[", 0, -1))
+        append_c_array_type_contextual(out, ctx, qual_type, dimension + 1, dimensions)
+        append_view(out, sview(", ", 0, -1))
+        append_view_range(out, qual_type, open_bracket + 1, close_bracket)
+        append_view(out, sview("]", 0, -1))
+    def append_c_type_contextual[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, qual_type: sview) -> void:
+        # Clang keeps a typedef's spelling on array types (for example
+        # `printbuffer[1]`) but does not repeat the typedef's record identity in
+        # the array type node. Recover known record aliases from the collected
+        # type table before falling back to the spelling-only renderer.
+        # The same applies to an anonymous record used as a value: Clang emits
+        # a location-based spelling such as `struct (unnamed at file.cpp:19:1)`
+        # for an InitListExpr, while the declaration pass gives that record a
+        # stable source-derived Elisa name. Resolve it before the generic C
+        # spelling renderer turns the location into a different identifier.
+        reference_count: i64 = c_type_reference_count(qual_type)
+        if reference_count > 0:
+            append_c_type_contextual(out, ctx, c_type_reference_base(qual_type)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            for _index in 0..<reference_count |out, reference_count|:
+                append_view(out, sview("&", 0, -1))
+            return
+        if not c_type_is_array(qual_type) and c_type_pointer_count(qual_type) == 0 and (not c_type_is_function(qual_type) or c_type_is_anonymous_record_value(qual_type)) and sview_find_byte(qual_type, 38) < 0:
+            record_index: i64 = typed_record_index(ctx, qual_type)
+            if record_index >= 0:
+                append_elisa_type_name(out, ctx.records[record_index.usize()].name)
+                return
+        pointer_array_open: i64 = c_pointer_to_array_open(qual_type)
+        open_bracket: i64 = sview_find_byte(qual_type, 91)
+        close_bracket: i64 = sview_find_byte(qual_type, 93)
+        if pointer_array_open >= 0:
+            append_c_pointer_to_array_type_contextual(out, ctx, qual_type, 0, c_array_dimension_count(qual_type))
+            append_view(out, sview("&", 0, -1))
+            append_c_pointer_layers(out, c_type_pointer_count(qual_type) - 1)
+            return
+        elif open_bracket >= 0 and close_bracket > open_bracket:
+            if c_type_is_incomplete_array(qual_type):
+                append_c_array_type_contextual(out, ctx, qual_type, 1, c_array_dimension_count(qual_type))
+                append_view(out, sview("&", 0, -1))
+            else:
+                append_c_array_type_contextual(out, ctx, qual_type, 0, c_array_dimension_count(qual_type))
+            return
+        if c_type_is_function_pointer(qual_type):
+            append_view(out, sview("(", 0, -1))
+            append_c_function_type_contextual(out, ctx, qual_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview(")?", 0, -1))
+            return
+        pointer_count: i64 = c_type_pointer_count(qual_type)
+        if pointer_count > 0:
+            pointer_base: sview = c_type_pointer_base(qual_type)
+            record_index: i64 = typed_record_index(ctx, qual_type)
+            if c_type_pointer_layers_composable(qual_type) and c_type_is_integer(pointer_base):
+                char_pointer: bool = pointer_count >= 2 and c_type_is_char_pointer(qual_type)
+                append_c_pointer_type_layers(out, qual_type, clang_target_type_abi_base(ctx.target_abi, pointer_base), pointer_count, 0, char_pointer, not char_pointer, false)
+                return
+            if c_type_pointer_layers_composable(qual_type) and record_index >= 0:
+                append_c_pointer_type_layers(out, qual_type, ctx.records[record_index.usize()].name, pointer_count, 0, false, false, true)
+                return
+            enum_index: i64 = typed_enum_index(ctx, pointer_base)
+            if c_type_pointer_layers_composable(qual_type) and enum_index >= 0:
+                append_c_pointer_type_layers(out, qual_type, ctx.enums[enum_index.usize()].name, pointer_count, 0, false, false, true)
+                return
+        enum_index: i64 = typed_enum_index(ctx, qual_type)
+        if enum_index >= 0:
+            append_elisa_type_name(out, ctx.enums[enum_index.usize()].name)
+            return
+        if c_type_is_integer(qual_type):
+            append_view(out, clang_target_type_abi_base(ctx.target_abi, qual_type))
+            return
+        append_c_type(out, qual_type)
+    def typed_collect_record[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], alias: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        name: sview = alias if alias.len > 0 else ast_name(node)
+        if name.len == 0:
+            return
+        emitted_name: sview = safe_identifier(c_type_named_base(name))
+        typed_mark_record_packed(ctx, emitted_name) if typed_record_is_packed_node(node)
+        typed_mark_record_layout_unsupported(ctx, emitted_name) if typed_record_layout_is_unsupported_node(node)
+        existing_index: i64 = typed_record_index(ctx, name)
+        existing_has_fields: bool = existing_index >= 0 and ctx.records[existing_index.usize()].fields_count > 0
+        return if existing_has_fields
+        declaration_id: mutable sview = typed_decl_identity(ctx, node)
+        fields_start: i64 = ctx.fields.count.i64()
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                field: JsonValueHandle[r] = ast_child(node, index)
+                if sview_eq(ast_kind(field), sview("FieldDecl", 0, -1)):
+                    field_type: sview = typed_c_type(ctx, field) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_record_validate_array_field(ctx, field, field_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    ctx.fields.push(TypedField[r]{name: safe_identifier(ast_name(field)), type_name: field_type, is_mutable: c_type_pointer_count(field_type) > 0 and not c_type_is_const_pointer(field_type)})
+        field_count: i64 = ctx.fields.count.i64() - fields_start
+        if existing_index >= 0:
+            return if field_count == 0
+            existing: TypedRecord[r] = ctx.records[existing_index.usize()]
+            comment: mutable sview = ast_comment_text(node)
+            comment <- existing.comment if comment.len == 0
+            declaration_id <- existing.decl_id if declaration_id.len == 0
+            source_line: i64 = existing.source_line if existing.source_line > 0 else ast_location_line(node)
+            source_column: i64 = existing.source_column if existing.source_column > 0 else ast_location_column(node)
+            is_union: bool = sview_eq(ast_string(ast_field(node, sview("tagUsed", 0, -1))), sview("union", 0, -1))
+            ctx.records[existing_index.usize()] <- TypedRecord[r]{name: existing.name, decl_id: declaration_id, is_union: existing.is_union or is_union, fields_start: fields_start, fields_count: field_count, comment: comment, source_line: source_line, source_column: source_column}
+        else:
+            is_union: bool = sview_eq(ast_string(ast_field(node, sview("tagUsed", 0, -1))), sview("union", 0, -1))
+            ctx.records.push(TypedRecord[r]{name: emitted_name, decl_id: declaration_id, is_union: is_union, fields_start: fields_start, fields_count: field_count, comment: ast_comment_text(node), source_line: ast_location_line(node), source_column: ast_location_column(node)})
+    def typed_add_record_dependency_placeholder[@r](ctx: mutable TypedContext[r]&, type_name: sview) -> void:
+        # A retained source record can refer to a complete record declared in a
+        # header (SDL_Event -> SDL_KeyboardEvent is the motivating example).
+        # The old collector only created placeholders from source-level pointer
+        # uses, so header-owned value members fell through append_c_type's scalar
+        # fallback and became i32. Add only unresolved, record-shaped names; the
+        # subsequent AST pass upgrades these placeholders when Clang retained a
+        # definition, while genuinely opaque foreign handles remain harmless.
+        return if c_type_is_array(type_name) or c_type_is_function(type_name) or c_type_is_enum(type_name)
+        return if c_type_is_integer(type_name) or c_type_is_floating(type_name)
+        base: sview = c_type_named_base(type_name)
+        return if base.len == 0 or c_type_is_builtin_base(base)
+        return if sview_find_byte(base, 58) >= 0 or sview_find_byte(base, 60) >= 0 or sview_find_byte(base, 62) >= 0
+        return if sview_find_byte(base, 40) >= 0 or sview_find_byte(base, 41) >= 0
+        return if typed_record_index(ctx, base) >= 0 or typed_enum_index(ctx, type_name) >= 0
+        ctx.records.push(TypedRecord[r]{name: safe_identifier(base), decl_id: sview("", 0, 0), is_union: false, fields_start: ctx.fields.count.i64(), fields_count: 0, comment: sview("", 0, 0), source_line: 0, source_column: 0})
+    def typed_collect_record_dependency_placeholders[@r](ctx: mutable TypedContext[r]&) -> void:
+        # Walk newly added records too: a header record may itself contain a
+        # nested record value. The cursor makes this a bounded fixpoint over the
+        # type graph rather than a recursive traversal of arbitrary AST depth.
+        record_cursor: mutable i64 = 0
+        while record_cursor < ctx.records.count.i64() |ctx, record_cursor|:
+            record: TypedRecord[r] = ctx.records[record_cursor.usize()]
+            for offset in 0..<record.fields_count |ctx, record|:
+                field: TypedField[r] = ctx.fields[(record.fields_start + offset).usize()]
+                typed_add_record_dependency_placeholder(ctx, field.type_name)
+            record_cursor <- record_cursor + 1
+    def typed_collect_referenced_typedef_records[@r](ctx: mutable TypedContext[r]&, root: JsonValueHandle[r], node: JsonValueHandle[r], source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # Anonymous header records are normally reachable through a typedef
+        # rather than a named RecordDecl. Once a field use creates a placeholder
+        # for that public typedef name, resolve and materialize its declaration
+        # exactly like a project-owned typedef.
+        if ast_is_type_alias_declaration(node) and ast_name(node).len > 0 and typed_record_index(ctx, ast_name(node)) >= 0:
+            name: sview = ast_name(node)
+            record_id: sview = typed_find_type_decl_id_through_alias(ctx, node, sview("RecordType", 0, -1))
+            record: JsonValueHandle[r] = typed_record_lookup(ctx, record_id)
+            if not json_handle_is_null(record):
+                typed_collect_record(ctx, record, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, root, node, source|:
+                typed_collect_referenced_typedef_records(ctx, root, ast_child(node, index), source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def c_type_is_builtin_base(base: sview) -> bool:
+        return true if c_type_fixed_width_abi(base).len > 0
+        return sview_eq(base, sview("void", 0, -1)) or sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("cc_t", 0, -1)) or sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) or sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("float", 0, -1)) or sview_eq(base, sview("double", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) or sview_eq(base, sview("time_t", 0, -1)) or sview_eq(base, sview("tcflag_t", 0, -1)) or sview_eq(base, sview("speed_t", 0, -1)) or sview_eq(base, sview("FILE", 0, -1))
+    def typed_add_opaque_record[@r](ctx: mutable TypedContext[r]&, type_name: sview) -> void:
+        # Array spellings such as `struct EditorSyntax[1]` are object types,
+        # not record declarations. Only a named pointer/reference or an
+        # explicitly tagged record can introduce an opaque record here.
+        is_array: bool = c_type_is_array(type_name)
+        # A tagged record value is only a bare `struct T`/`union T` spelling.
+        # C++ references and declarators can retain the tag token in a larger
+        # type spelling (for example `struct T &` or a synthesized special
+        # member signature). Those are uses of an already-declared type, not
+        # evidence that a new opaque record should be invented.
+        is_tagged: bool = not is_array and not c_type_is_function(type_name) and c_type_pointer_count(type_name) == 0 and sview_find_byte(type_name, 38) < 0 and (sview_starts_with(type_name, sview("struct ", 0, -1)) or sview_starts_with(type_name, sview("union ", 0, -1)))
+        base: sview = c_type_named_base(type_name)
+        is_named_pointer: bool = c_type_pointer_count(type_name) > 0 and not c_type_is_function(type_name) and not c_type_is_builtin_base(base) and sview_find_byte(base, 58) < 0 and sview_find_byte(base, 60) < 0 and sview_find_byte(base, 62) < 0
+        return if typed_enum_index(ctx, type_name) >= 0
+        return if not is_tagged and not is_named_pointer
+        name: sview = c_type_named_base(type_name)
+        return if name.len == 0 or typed_record_index(ctx, name) >= 0
+        line: mutable i64 = 0
+        column: mutable i64 = 0
+        typed_anonymous_type_location(type_name, line, column)
+        ctx.records.push(TypedRecord[r]{name: safe_identifier(name), decl_id: sview("", 0, 0), is_union: false, fields_start: ctx.fields.count.i64(), fields_count: 0, comment: sview("", 0, 0), source_line: line, source_column: column})
+    def typed_collect_opaque_records[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # A typedef is handled by the alias-aware record/enum collectors below.
+        # Walking its type subtree as an opaque use first creates placeholders
+        # such as `HighScore___`; those placeholders can then collide with the
+        # complete anonymous record recovered through the typedef itself.
+        return if ast_is_type_alias_declaration(node)
+        type_name: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_add_opaque_record(ctx, type_name)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                typed_collect_opaque_records(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_user_function_record_uses[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # A project function can be nested below Clang's LinkageSpecDecl (for
+        # `extern "C"`) or NamespaceDecl wrappers. The ordinary top-level type
+        # pass scans a user declaration only when that wrapper itself is marked
+        # as user-owned, so anonymous records used by a header-inline body can
+        # otherwise disappear. Visit the retained tree, and scan only actual
+        # user-owned function bodies; this avoids flooding the output with the
+        # system header's unrelated opaque records while still recovering local
+        # temporaries such as SDL's anonymous endian union.
+        if sview_eq(ast_kind(node), sview("FunctionDecl", 0, -1)) and ast_has_child(node, sview("CompoundStmt", 0, -1)) and ast_is_user_declaration(node, source):
+            typed_collect_opaque_records(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, source|:
+                typed_collect_user_function_record_uses(ctx, ast_child(node, index), source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_mark_record_field_mutability[@r](ctx: mutable TypedContext[r]&) -> void:
+        # Compute field mutability once from the flat lowered expression table.
+        # The previous per-field recursive search repeated the complete function
+        # graph for every field and could overflow the host stack on large C++
+        # translation units. A single linear pass is both safer and cheaper.
+        for expression_index in 0..<ctx.exprs.count |ctx|:
+            expression: TypedExpr[r] = ctx.exprs[expression_index]
+            continue if expression.kind != TypedExprKind.Binary or not sview_eq(expression.text, sview("<-", 0, -1))
+            continue if expression.lhs < 0 or expression.lhs >= ctx.exprs.count.i64()
+            lhs: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
+            continue if lhs.kind != TypedExprKind.Member or lhs.lhs < 0 or lhs.lhs >= ctx.exprs.count.i64()
+            base: TypedExpr[r] = typed_expr_at(ctx, lhs.lhs)
+            record_index: i64 = typed_record_index(ctx, base.type_name)
+            continue if record_index < 0
+            record: TypedRecord[r] = ctx.records[record_index.usize()]
+            for offset in 0..<record.fields_count |ctx, record, lhs|:
+                field_index: i64 = record.fields_start + offset
+                field: TypedField[r] = ctx.fields[field_index.usize()]
+                if sview_eq(field.name, lhs.text):
+                    ctx.fields[field_index.usize()] <- TypedField[r]{name: field.name, type_name: field.type_name, is_mutable: true}
+                    break
+    def typed_record_field_is_mutable[@r](ctx: TypedContext[r]&, record_index: i64, field_name: sview) -> bool:
+        return false if record_index < 0 or record_index >= ctx.records.count.i64()
+        record: TypedRecord[r] = ctx.records[record_index.usize()]
+        for offset in 0..<record.fields_count |ctx, record, field_name|:
+            field: TypedField[r] = ctx.fields[(record.fields_start + offset).usize()]
+            if sview_eq(field.name, field_name):
+                return field.is_mutable
+        return false
+    def typed_enum_has_alias[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r]) -> bool:
+        # After typedef aliases are registered, a referenced constant is enough
+        # to identify the corresponding anonymous EnumDecl. C enumerator names
+        # are translation-unit scoped, so this avoids depending on whether the
+        # compact AST retained the alias's exact declaration-id edge.
+        first: sview = ast_first_referenced_enum_constant_name(node)
+        return false if first.len == 0
+        wanted: sview = safe_identifier(first)
+        for constant in ctx.enum_consts |ctx, wanted|:
+            if sview_eq(constant.name, wanted):
+                return not sview_eq(constant.enum_name, wanted)
+        return false
+    def typed_enum_decl_storage_type[@r](node: JsonValueHandle[r], abi: ClangTargetABI) -> sview @r:
+        # Clang reports an explicit C++ enum base directly. For ordinary C
+        # enums, EnumConstantDecl's type is the common integer type Clang
+        # selected for that enum (for example `unsigned int` when a value is
+        # above INT_MAX). Keep the source spelling in typed IR; the emitter
+        # maps it to Elisa's ABI scalar only at the boundary.
+        fixed_type_node: JsonValueHandle[r] = ast_field(node, sview("fixedUnderlyingType", 0, -1))
+        fixed_type: sview = ast_string(ast_field(fixed_type_node, sview("qualType", 0, -1)))
+        return fixed_type if c_type_is_integer(fixed_type)
+        count: i64 = ast_child_count(node)
+        minimum: mutable i64 = 0
+        maximum: mutable i64 = 0
+        previous: mutable i64 = -1
+        have_value: mutable bool = false
+        if count >= 0:
+            for index in 0..<count |node|:
+                constant: JsonValueHandle[r] = ast_child(node, index)
+                if sview_eq(ast_kind(constant), sview("EnumConstantDecl", 0, -1)):
+                    constant_type: sview = ast_qual_type(constant)
+                    value: i64 = ast_enum_value(constant, previous + 1)
+                    previous <- value
+                    minimum <- value if not have_value or value < minimum
+                    maximum <- value if not have_value or value > maximum
+                    have_value <- true
+                    return constant_type if c_type_is_integer(constant_type) and not abi.short_enums
+        if abi.short_enums and have_value:
+            # Clang's JSON schema omits the selected compatible enum type for
+            # ordinary C enums. Under -fshort-enums, select the smallest
+            # target integer that can represent every enumerator. This mirrors
+            # the observable ABI choice for the supported 8/16/32/64-bit
+            # targets and remains conservative for empty enums.
+            # Clang chooses an unsigned compatible type for a non-negative
+            # ordinary C enum when that is sufficient, even when all named
+            # values would also fit in signed char. A cast may subsequently
+            # carry an unnamed value such as 255, so preserve that ABI choice.
+            return sview("unsigned char", 0, -1) if minimum >= 0 and maximum <= 255
+            return sview("unsigned short", 0, -1) if minimum >= 0 and maximum <= 65535
+            return sview("unsigned int", 0, -1) if minimum >= 0 and maximum <= 4294967295
+            return sview("signed char", 0, -1) if minimum >= -128 and maximum <= 127
+            return sview("short", 0, -1) if minimum >= -32768 and maximum <= 32767
+            return sview("int", 0, -1) if minimum >= -2147483648 and maximum <= 2147483647
+            return sview("long long", 0, -1) if minimum < 0
+            return sview("unsigned long long", 0, -1)
+        return sview("int", 0, -1)
+
+    def typed_enum_elisa_storage_type(underlying_type: sview) -> sview:
+        # C++ permits fixed bool-backed enums (libc++'s ranges subrange kind is
+        # one example), while Elisa's enum storage clause requires an integer
+        # scalar. Preserve the source-level bool underlying type for conversion
+        # rules, but use its ABI-sized integer representation for the Elisa enum.
+        base: sview = c_type_named_base(underlying_type)
+        return sview("unsigned char", 0, -1) if sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("_Bool", 0, -1))
+        return underlying_type
+    def typed_collect_enum[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], alias: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        name: mutable sview = alias if alias.len > 0 else ast_name(node)
+        name <- typed_enum_decl_source_name(node, name) if typed_enum_decl_is_scoped(node)
+        # An untagged C enum can still be a used type/constant set. Give it a
+        # stable source-derived Elisa namespace so constants such as NUMBUTTONS
+        # remain available without inventing a C-program-specific table.
+        name <- ast_first_referenced_enum_constant_name(node) if name.len == 0
+        if name.len == 0:
+            return
+        for index in 0..<ctx.enums.count |ctx, name|:
+            return if sview_eq(ctx.enums[index].name, name)
+        underlying_type: sview = typed_enum_decl_storage_type(node, ctx.target_abi)
+        storage_type: sview = typed_enum_elisa_storage_type(underlying_type)
+        ctx.enums.push(TypedEnum[r]{name: safe_identifier(name), underlying_type: underlying_type, storage_type: storage_type})
+        previous: mutable i64 = -1
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, name, previous|:
+                constant: JsonValueHandle[r] = ast_child(node, index)
+                if not sview_eq(ast_kind(constant), sview("EnumConstantDecl", 0, -1)):
+                    continue
+                value: i64 = ast_enum_value(constant, previous + 1)
+                previous <- value
+                ctx.enum_consts.push(TypedEnumConst[r]{name: safe_identifier(ast_name(constant)), enum_name: safe_identifier(name), value: value})
+    def typed_collect_referenced_named_enums[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # A system typedef can wrap a named EnumDecl several levels below its
+        # top-level declaration (SDL_EventType is one example). The compact AST
+        # retains the wrapper because a constant is referenced, so walk the
+        # retained subtree and collect the actual enum namespace as well.
+        if sview_eq(ast_kind(node), sview("EnumDecl", 0, -1)) and ast_name(node).len > 0 and ast_enum_has_referenced_constant(node):
+            typed_collect_enum(ctx, node, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                typed_collect_referenced_named_enums(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_record_nodes[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source: cstr, parent_kind: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1)) and ast_string(ast_field(node, sview("elisaTemplateType", 0, -1))).len > 0:
+            typed_collect_specialized_record(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        record_kind: bool = sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1))
+        name: mutable sview = ast_name(node)
+        if record_kind and name.len == 0:
+            # The RecordDecl itself has no qualType. Reconnect it to an opaque
+            # record collected from a use-site by its source location; if no
+            # use-site was retained, the Clang declaration id is still a stable
+            # local name for this record.
+            line: i64 = ast_location_line(node)
+            column: i64 = ast_location_column(node)
+            existing_index: i64 = typed_record_index_at_location(ctx, line, column)
+            name <- ctx.records[existing_index.usize()].name if existing_index >= 0 else ast_string(ast_field(node, sview("id", 0, -1)))
+        user: bool = ast_is_user_type_declaration(node, source)
+        # A source declaration can be a normal record definition. A record
+        # first discovered through a source-level pointer/value type starts as
+        # opaque and is upgraded here when its full Clang node is encountered.
+        # Clang's implicit injected CXXRecordDecl repeats the primary template
+        # name, not the instantiated layout. The specialization node above owns
+        # concrete fields; emitting this declaration adds a bogus opaque record.
+        template_pattern: bool = sview_eq(parent_kind, sview("ClassTemplateDecl", 0, -1)) and sview_eq(kind, sview("CXXRecordDecl", 0, -1))
+        if record_kind and not template_pattern and not ast_bool(ast_field(node, sview("isImplicit", 0, -1))) and name.len > 0 and (user or ast_is_embedded_user_record(node, source) or typed_record_index(ctx, name) >= 0):
+            typed_collect_record(ctx, node, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, source|:
+                typed_collect_record_nodes(ctx, ast_child(node, index), source, kind) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_local_typedef_records[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # A local anonymous record is represented by Clang as a CXXRecordDecl
+        # followed by a TypedefDecl in the same DeclStmt. The typedef's type
+        # node only carries an ownedTagDecl reference, so collect the sibling
+        # record and give its otherwise nameless layout the source typedef name.
+        if sview_eq(ast_kind(node), sview("DeclStmt", 0, -1)):
+            count: i64 = ast_child_count(node)
+            if count >= 0:
+                for alias_index in 0..<count |ctx, node, source|:
+                    alias_node: JsonValueHandle[r] = ast_child(node, alias_index)
+                    continue if not ast_is_type_alias_declaration(alias_node) or ast_name(alias_node).len == 0 or not ast_is_user_type_declaration(alias_node, source)
+                    for record_index in 0..<count |ctx, node, alias_node|:
+                        record_node: JsonValueHandle[r] = ast_child(node, record_index)
+                        kind: sview = ast_kind(record_node)
+                        if (sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1))) and ast_name(record_node).len == 0 and ast_child_count(record_node) > 0:
+                            typed_collect_record(ctx, record_node, ast_name(alias_node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            break
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, source|:
+                typed_collect_local_typedef_records(ctx, ast_child(node, index), source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_typedef_records[@r](ctx: mutable TypedContext[r]&, root: JsonValueHandle[r], node: JsonValueHandle[r], source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # Header declarations are often nested below a LinkageSpecDecl in the
+        # compact AST. Walk the complete retained tree so complete aliases are
+        # registered before pointer uses can request opaque placeholders.
+        if ast_is_type_alias_declaration(node) and ast_name(node).len > 0 and ast_is_user_type_declaration(node, source):
+            name: sview = ast_name(node)
+            record_id: sview = typed_find_type_decl_id_through_alias(ctx, node, sview("RecordType", 0, -1))
+            record: JsonValueHandle[r] = typed_record_lookup(ctx, record_id)
+            if not json_handle_is_null(record):
+                typed_collect_record(ctx, record, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            enum_id: sview = typed_find_type_decl_id_through_alias(ctx, node, sview("EnumType", 0, -1))
+            enumeration: JsonValueHandle[r] = typed_decl_lookup(ctx, enum_id)
+            if not json_handle_is_null(enumeration) and sview_eq(ast_kind(enumeration), sview("EnumDecl", 0, -1)):
+                typed_collect_enum(ctx, enumeration, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, root, node, source|:
+                typed_collect_typedef_records(ctx, root, ast_child(node, index), source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_types[@r](ctx: mutable TypedContext[r]&, root: JsonValueHandle[r], source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        count: i64 = ast_child_count(root)
+        if count < 0:
+            return
+        typed_collect_type_aliases(ctx, root, source, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # Register typedef-backed enums before visiting anonymous EnumDecls.
+        # This gives the later fallback decision a stable ownership table.
+        for index in 0..<count |ctx, root, source|:
+            declaration: JsonValueHandle[r] = ast_child(root, index)
+            if ast_is_type_alias_declaration(declaration) and ast_is_user_type_declaration(declaration, source):
+                enum_id: sview = typed_find_type_decl_id_through_alias(ctx, declaration, sview("EnumType", 0, -1))
+                enumeration: JsonValueHandle[r] = typed_decl_lookup(ctx, enum_id)
+                if not json_handle_is_null(enumeration) and sview_eq(ast_kind(enumeration), sview("EnumDecl", 0, -1)):
+                    typed_collect_enum(ctx, enumeration, ast_name(declaration)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # Register enum names before walking opaque record candidates. C and
+        # C++ typedef spellings can make an enum look like an ordinary named
+        # value type; pre-registering prevents a same-named placeholder struct
+        # from being created for it.
+        for index in 0..<count |ctx, root, source|:
+            declaration: JsonValueHandle[r] = ast_child(root, index)
+            name: sview = ast_name(declaration)
+            user: bool = ast_is_user_type_declaration(declaration, source)
+            if sview_eq(ast_kind(declaration), sview("EnumDecl", 0, -1)) and (user or ast_enum_has_referenced_constant(declaration)) and not typed_enum_has_alias(ctx, declaration):
+                typed_collect_enum(ctx, declaration, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if ast_is_type_alias_declaration(declaration) and user:
+                enum_id: sview = typed_find_type_decl_id_through_alias(ctx, declaration, sview("EnumType", 0, -1))
+                enumeration: JsonValueHandle[r] = typed_decl_lookup(ctx, enum_id)
+                if not json_handle_is_null(enumeration) and sview_eq(ast_kind(enumeration), sview("EnumDecl", 0, -1)):
+                    typed_collect_enum(ctx, enumeration, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # Retain referenced ENUMS from included headers before collecting opaque
+        # record candidates. Clang often spells an external enum use only as its
+        # typedef name (for example SDL_PixelFormat), so the opaque-record pass
+        # cannot recognize it textually. If the enum is collected afterward, the
+        # already-created placeholder wins project type emission and the enum
+        # constant is lowered as a field on a bogus struct. The ordering here is
+        # semantic: enum knowledge must precede placeholder creation.
+        typed_collect_referenced_named_enums(ctx, root) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # Register complete typedef-backed records before scanning pointer uses.
+        # Otherwise a use such as `HighScore *` creates an opaque placeholder
+        # before the anonymous record behind `typedef struct { ... } HighScore`
+        # is connected to its public name.
+        typed_collect_typedef_records(ctx, root, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_collect_local_typedef_records(ctx, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_collect_user_function_record_uses(ctx, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        for index in 0..<count |ctx, root, source|:
+            declaration: JsonValueHandle[r] = ast_child(root, index)
+            name: sview = ast_name(declaration)
+            user: bool = ast_is_user_type_declaration(declaration, source)
+            source_user: bool = ast_is_user_declaration(declaration, source)
+            # Only source declarations and their expression trees can introduce
+            # an external record type that the emitted translation actually uses.
+            # Scanning the complete AST also sees every libc/SDL ABI declaration
+            # retained by the compact projection and floods the output with
+            # unrelated opaque records.
+            if user or source_user:
+                typed_collect_opaque_records(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(ast_kind(declaration), sview("EnumDecl", 0, -1)) and (user or ast_enum_has_referenced_constant(declaration)) and not typed_enum_has_alias(ctx, declaration):
+                typed_collect_enum(ctx, declaration, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if ast_is_type_alias_declaration(declaration) and user:
+                record_id: sview = typed_find_type_decl_id_through_alias(ctx, declaration, sview("RecordType", 0, -1))
+                record: JsonValueHandle[r] = typed_record_lookup(ctx, record_id)
+                if not json_handle_is_null(record):
+                    typed_collect_record(ctx, record, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                enum_id: sview = typed_find_type_decl_id_through_alias(ctx, declaration, sview("EnumType", 0, -1))
+                enumeration: JsonValueHandle[r] = typed_decl_lookup(ctx, enum_id)
+                if not json_handle_is_null(enumeration) and sview_eq(ast_kind(enumeration), sview("EnumDecl", 0, -1)):
+                    typed_collect_enum(ctx, enumeration, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_collect_record_nodes(ctx, root, source, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_collect_local_typedef_records(ctx, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # Resolve record-valued members declared by external headers. This is a
+        # generic dependency pass, not an SDL rule: it follows the field graph
+        # of records already used by the source and only retains matching AST
+        # definitions. A small fixed number of rounds handles aliases and nested
+        # dependencies without rescanning the entire AST forever.
+        for _pass in 0..<8 |ctx, root, source|:
+            before: i64 = ctx.records.count.i64()
+            typed_collect_record_dependency_placeholders(ctx)
+            typed_collect_referenced_typedef_records(ctx, root, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_collect_record_nodes(ctx, root, source, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            break if ctx.records.count.i64() == before
+        typed_collect_local_typedef_records(ctx, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_collect_referenced_named_enums(ctx, root) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

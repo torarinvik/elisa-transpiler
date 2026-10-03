@@ -1,468 +1,75 @@
-    def typed_stmt_has_name_suffix(ctx: TypedContext&, index: i64, prefix: sview, suffix: sview) -> bool:
-        return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if statement.kind == TypedStmtKind.Declaration and typed_name_matches_suffix(statement.name, prefix, suffix)
-        if statement.kind == TypedStmtKind.Block:
-            for offset in 0..<statement.children_count |ctx, statement, prefix, suffix|:
-                return true if typed_stmt_has_name_suffix(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], prefix, suffix)
-        elif statement.kind == TypedStmtKind.If:
-            return true if typed_stmt_has_name_suffix(ctx, statement.aux, prefix, suffix)
-            return statement.aux2 >= 0 and typed_stmt_has_name_suffix(ctx, statement.aux2, prefix, suffix)
-        elif statement.kind == TypedStmtKind.For:
-            return true if typed_stmt_has_name_suffix(ctx, statement.children_start, prefix, suffix)
-            return true if typed_stmt_has_name_suffix(ctx, statement.aux, prefix, suffix)
-            return statement.aux2 >= 0 and typed_stmt_has_name_suffix(ctx, statement.aux2, prefix, suffix)
-        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
-            return typed_stmt_has_name_suffix(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr, prefix, suffix)
-        elif statement.kind == TypedStmtKind.Switch:
-            for offset in 0..<statement.children_count |ctx, statement, prefix, suffix|:
-                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-                return true if typed_stmt_has_name_suffix(ctx, switch_case.body, prefix, suffix)
-        return false
-
-    def typed_parameter_alias_conflicts(ctx: TypedContext&, function: TypedFunction, parameter: TypedParam, suffix: sview) -> bool:
-        for offset in 0..<function.params_count |ctx, function, parameter, suffix|:
-            other: TypedParam = ctx.params[(function.params_start + offset).usize()]
-            return true if not sview_eq(other.name, parameter.name) and typed_name_matches_suffix(other.name, parameter.name, suffix)
-        return typed_stmt_has_name_suffix(ctx, function.body, parameter.name, suffix)
-
-    def typed_parameter_needs_alias(ctx: TypedContext&, function: TypedFunction, parameter: TypedParam) -> bool:
-        return false if c_type_pointer_count(parameter.type_name) == 0 or c_type_is_function(parameter.type_name)
-        return typed_stmt_assigns_name(ctx, function.body, parameter.name)
-
-    def typed_parameter_alias_suffix(ctx: TypedContext&, function: TypedFunction, parameter: TypedParam) -> sview:
-        cursor: sview = sview("_cursor", 0, -1)
-        return cursor if not typed_parameter_alias_conflicts(ctx, function, parameter, cursor) else sview("_alias", 0, -1) if not typed_parameter_alias_conflicts(ctx, function, parameter, sview("_alias", 0, -1)) else sview("_value", 0, -1)
-
-    def typed_stmt_is_declaration_group(ctx: TypedContext&, index: i64) -> bool:
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if statement.kind == TypedStmtKind.Declaration
-        return false if statement.kind != TypedStmtKind.Block or statement.children_count == 0
-        for offset in 0..<statement.children_count |ctx, statement|:
-            return false if not typed_stmt_is_declaration_group(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
-        return true
-
-    def typed_stmt_guarantees_exit(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if statement.kind == TypedStmtKind.Return
-        if statement.kind == TypedStmtKind.Block:
-            for offset in 0..<statement.children_count |ctx, statement|:
-                return true if typed_stmt_guarantees_exit(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
-            return false
-        if statement.kind == TypedStmtKind.If:
-            constant: mutable i64 = 0
-            if typed_eval_integer_constant(ctx, statement.expr, constant):
-                return typed_stmt_guarantees_exit(ctx, statement.aux) if constant != 0
-                return statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux2)
-            return statement.aux >= 0 and statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux) and typed_stmt_guarantees_exit(ctx, statement.aux2)
-        if statement.kind == TypedStmtKind.Switch:
-            has_default: mutable bool = false
-            for offset in 0..<statement.children_count |ctx, statement, has_default|:
-                switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-                has_default <- true if switch_case.is_default
-                return false if typed_stmt_contains_switch_break(ctx, switch_case.body)
-                return false if not typed_stmt_guarantees_exit(ctx, switch_case.body)
-            return has_default and statement.children_count > 0
-        if statement.kind == TypedStmtKind.Label:
-            return typed_stmt_guarantees_exit(ctx, statement.expr)
-        if statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.For:
-            return typed_expr_is_always_true(ctx, statement.expr) and typed_stmt_guarantees_exit(ctx, statement.aux)
-        return false
-
-    def typed_condition_nonnull_name(ctx: TypedContext&, index: i64, wants_true: bool) -> sview:
-        return typed_null_guard_name(ctx, index, true) if wants_true else typed_null_guard_name(ctx, index, false)
-
-    def typed_condition_nonnull_expr(ctx: TypedContext&, index: i64, wants_true: bool) -> i64:
-        return -1 if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        expected_opcode: sview = sview("!=", 0, -1) if wants_true else sview("==", 0, -1)
-        return -1 if expression.kind != TypedExprKind.Binary or not sview_eq(expression.text, expected_opcode)
-        lhs: TypedExpr = typed_expr_at(ctx, expression.lhs)
-        rhs: TypedExpr = typed_expr_at(ctx, expression.rhs)
-        # Facts are attached to places, not just identifiers. This covers
-        # nullable struct fields and indexed pointer slots while keeping the
-        # same conservative requirement: one side must be a null literal and
-        # the other side must still have a nullable C pointer type.
-        return expression.lhs if c_type_pointer_optional(lhs.type_name) and typed_expr_is_null_value(ctx, expression.rhs)
-        return expression.rhs if c_type_pointer_optional(rhs.type_name) and typed_expr_is_null_value(ctx, expression.lhs)
-        return -1
-
-    def typed_push_condition_nonnull_facts(ctx: mutable TypedContext&, index: i64, wants_true: bool) -> i64:
-        return 0 if index < 0 or index >= ctx.exprs.count.i64()
-        # A call in the condition can mutate a pointer checked earlier in the
-        # same logical expression. Keeping no fact is safer than assuming C's
-        # opaque call preserved the object graph.
-        return 0 if typed_expr_contains_call(ctx, index)
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        before: i64 = ctx.current_nonnull_exprs.count.i64()
-        fact: sview = typed_condition_nonnull_name(ctx, index, wants_true)
-        fact_expr: i64 = typed_condition_nonnull_expr(ctx, index, wants_true)
-        if fact_expr >= 0:
-            # Keep the parallel fact arrays aligned. An empty name represents
-            # a member/indexed place and is intentionally ignored by the name
-            # fast path.
-            ctx.current_nonnull_names.push(fact)
-            ctx.current_nonnull_exprs.push(fact_expr)
-        if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("and", 0, -1)) and wants_true:
-            typed_push_condition_nonnull_facts(ctx, expression.lhs, true)
-            typed_push_condition_nonnull_facts(ctx, expression.rhs, true)
-        elif expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("or", 0, -1)) and not wants_true:
-            typed_push_condition_nonnull_facts(ctx, expression.lhs, false)
-            typed_push_condition_nonnull_facts(ctx, expression.rhs, false)
-        return ctx.current_nonnull_exprs.count.i64() - before
-
-    def typed_pop_nonnull_facts(ctx: mutable TypedContext&, count: i64) -> void:
-        cursor: mutable i64 = 0
-        while cursor < count and ctx.current_nonnull_exprs.count > 0:
-            _ = ctx.current_nonnull_exprs.pop()
-            if ctx.current_nonnull_names.count > 0:
-                _ = ctx.current_nonnull_names.pop()
-            cursor <- cursor + 1
-
-    def typed_invalidate_nonnull_facts(ctx: mutable TypedContext&, index: i64) -> void:
-        return if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        # A call may mutate an object reachable through a writable pointer
-        # argument or a global. Remove only the facts whose roots can actually
-        # be affected; unrelated facts survive read-only calls.
-        if typed_expr_contains_call(ctx, index):
-            cursor: mutable i64 = 0
-            while cursor < ctx.current_nonnull_exprs.count.i64():
-                fact_expr: i64 = ctx.current_nonnull_exprs[cursor.usize()]
-                root: sview = typed_expr_root_name(ctx, fact_expr)
-                if root.len > 0 and typed_call_may_mutate_root(ctx, index, root):
-                    last: i64 = ctx.current_nonnull_exprs.count.i64() - 1
-                    ctx.current_nonnull_exprs[cursor.usize()] <- ctx.current_nonnull_exprs[last.usize()]
-                    _ = ctx.current_nonnull_exprs.pop()
-                    if cursor < ctx.current_nonnull_names.count.i64():
-                        last_name: i64 = ctx.current_nonnull_names.count.i64() - 1
-                        ctx.current_nonnull_names[cursor.usize()] <- ctx.current_nonnull_names[last_name.usize()]
-                        _ = ctx.current_nonnull_names.pop()
-                else:
-                    cursor <- cursor + 1
-            return
-        if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("<-", 0, -1)):
-            cursor: mutable i64 = 0
-            while cursor < ctx.current_nonnull_exprs.count.i64():
-                fact_expr: i64 = ctx.current_nonnull_exprs[cursor.usize()]
-                lhs: TypedExpr = typed_expr_at(ctx, expression.lhs)
-                same_root_write: bool = lhs.kind == TypedExprKind.Name and sview_eq(typed_expr_root_name(ctx, fact_expr), lhs.text)
-                if typed_expr_is_same_place(ctx, expression.lhs, fact_expr) or same_root_write:
-                    last: i64 = ctx.current_nonnull_exprs.count.i64() - 1
-                    ctx.current_nonnull_exprs[cursor.usize()] <- ctx.current_nonnull_exprs[last.usize()]
-                    _ = ctx.current_nonnull_exprs.pop()
-                    if cursor < ctx.current_nonnull_names.count.i64():
-                        last_name: i64 = ctx.current_nonnull_names.count.i64() - 1
-                        ctx.current_nonnull_names[cursor.usize()] <- ctx.current_nonnull_names[last_name.usize()]
-                        _ = ctx.current_nonnull_names.pop()
-                else:
-                    cursor <- cursor + 1
-        typed_invalidate_nonnull_facts(ctx, expression.lhs) if expression.kind == TypedExprKind.Sequence
-        typed_invalidate_nonnull_facts(ctx, expression.rhs) if expression.kind == TypedExprKind.Sequence
-
-    def typed_emit_stmt_body(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        typed_emit_callback_guards(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.expr >= 0
-        match statement.kind:
-            TypedStmtKind.Block:
-                if statement.children_count > 0:
-                    guarded_switch: bool = ctx.current_switch_done_index >= 0 and typed_stmt_needs_switch_done(ctx, index)
-                    initial_output_size: i64 = out.count.i64()
-                    for offset in 0..<statement.children_count |out, ctx, statement, level, guarded_switch|:
-                        child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
-                        child: TypedStmt = typed_stmt_at(ctx, child_index)
-                        continue if statement.children_count > 1 and typed_stmt_is_empty(ctx, child_index)
-                        if child.kind == TypedStmtKind.SwitchBreak:
-                            typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ctx.current_switch_done_index >= 0
-                            break
-                        child_level: mutable i64 = level
-                        if guarded_switch:
-                            append_indent(out, level)
-                            append_view(out, sview("if not ", 0, -1))
-                            typed_append_switch_done_name(out, ctx)
-                            append_view(out, sview(":\n", 0, -1))
-                            child_level <- level + 1
-                        if ctx.current_emit_has_goto and child.kind != TypedStmtKind.Label and not typed_stmt_is_declaration_group(ctx, child_index):
-                            append_indent(out, child_level)
-                            append_view(out, sview("if ", 0, -1))
-                            append_view(out, ctx.current_emit_goto_name)
-                            append_view(out, sview(" == 0:\n", 0, -1))
-                            typed_emit_stmt(out, ctx, child_index, child_level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                        else:
-                            typed_emit_stmt(out, ctx, child_index, child_level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                        break if not ctx.current_emit_has_goto and typed_stmt_guarantees_exit(ctx, child_index)
-                    if out.count.i64() == initial_output_size:
-                        append_indent(out, level)
-                        append_view(out, sview("pass\n", 0, -1))
-                else:
-                    append_indent(out, level)
-                    append_view(out, sview("pass\n", 0, -1))
-            TypedStmtKind.Return:
-                if statement.expr >= 0 and typed_expr_at(ctx, statement.expr).kind == TypedExprKind.Binary and sview_eq(typed_expr_at(ctx, statement.expr).text, sview("<-", 0, -1)):
-                    typed_emit_expression_statement(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    append_indent(out, level)
-                    append_view(out, sview("return ", 0, -1))
-                    typed_emit_target_value(out, ctx, typed_assignment_result(ctx, statement.expr), statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    append_view(out, sview("\n", 0, -1))
-                    return
-                append_indent(out, level)
-                append_view(out, sview("return", 0, -1))
-                if statement.expr >= 0:
-                    append_view(out, sview(" ", 0, -1))
-                    typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview("\n", 0, -1))
-            TypedStmtKind.Declaration:
-                append_indent(out, level)
-                append_view(out, statement.name)
-                append_view(out, sview(": mutable ", 0, -1)) if typed_declaration_is_mutable(ctx, statement) else append_view(out, sview(": ", 0, -1))
-                append_c_type_contextual(out, ctx, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(statement.type_name)
-                append_view(out, sview(" = ", 0, -1))
-                if c_type_is_array(statement.type_name) or statement.expr < 0:
-                    append_view(out, sview("zeroed", 0, -1))
-                else:
-                    typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview("\n", 0, -1))
-            TypedStmtKind.If:
-                constant: mutable i64 = 0
-                if typed_eval_integer_constant(ctx, statement.expr, constant):
-                    if constant != 0:
-                        typed_emit_stmt(out, ctx, statement.aux, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    elif statement.aux2 >= 0:
-                        typed_emit_stmt(out, ctx, statement.aux2, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    else:
-                        append_indent(out, level)
-                        append_view(out, sview("pass\n", 0, -1))
-                    return
-                typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
-                append_indent(out, level)
-                append_view(out, sview("if ", 0, -1))
-                typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview(":\n", 0, -1))
-                then_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
-                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                typed_pop_nonnull_facts(ctx, then_facts)
-                if statement.aux2 >= 0:
-                    append_indent(out, level)
-                    append_view(out, sview("else:\n", 0, -1))
-                    else_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, false)
-                    typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    typed_pop_nonnull_facts(ctx, else_facts)
-                # An early-return guard establishes the opposite fact on the
-                # path that continues after the `if`. Carry that fact forward
-                # instead of reasserting the same nullable pointer at every
-                # later dereference.
-                if statement.aux2 < 0 and typed_stmt_guarantees_exit(ctx, statement.aux):
-                    _ = typed_push_condition_nonnull_facts(ctx, statement.expr, false)
-                elif statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux2):
-                    _ = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
-            TypedStmtKind.While:
-                typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
-                append_indent(out, level)
-                if ctx.current_emit_has_goto and typed_expr_is_always_true(ctx, statement.expr):
-                    append_view(out, sview("while ", 0, -1))
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" == 0", 0, -1))
-                elif ctx.current_emit_has_goto:
-                    append_view(out, sview("while ((", 0, -1))
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" == 0) and (", 0, -1))
-                    typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    append_view(out, sview("))", 0, -1))
-                elif typed_expr_is_always_true(ctx, statement.expr):
-                    append_view(out, sview("while true", 0, -1))
-                else:
-                    append_view(out, sview("while ", 0, -1))
-                    typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview(":\n", 0, -1))
-                loop_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
-                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                typed_pop_nonnull_facts(ctx, loop_facts)
-            TypedStmtKind.DoWhile:
-                typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
-                append_indent(out, level)
-                append_view(out, sview("while true:\n", 0, -1))
-                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                if ctx.current_emit_has_goto:
-                    append_indent(out, level + 1)
-                    append_view(out, sview("break if ", 0, -1))
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" != 0\n", 0, -1))
-                append_indent(out, level + 1)
-                append_view(out, sview("break if not ", 0, -1))
-                typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview("\n", 0, -1))
-            TypedStmtKind.For:
-                typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
-                if statement.children_start >= 0:
-                    typed_emit_stmt(out, ctx, statement.children_start, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_indent(out, level)
-                if ctx.current_emit_has_goto:
-                    append_view(out, sview("while ((", 0, -1))
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" == 0) and (", 0, -1))
-                    typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    append_view(out, sview("))", 0, -1))
-                else:
-                    append_view(out, sview("while ", 0, -1))
-                    typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview(":\n", 0, -1))
-                loop_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
-                typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                # A C `for` increment runs after each body iteration, not after
-                # the loop. `continue` already carries its increment in the
-                # lowered body, so this handles the fall-through path.
-                typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.aux2 >= 0 and not typed_stmt_guarantees_exit(ctx, statement.aux)
-                typed_pop_nonnull_facts(ctx, loop_facts)
-            TypedStmtKind.Break:
-                append_indent(out, level)
-                append_view(out, sview("break\n", 0, -1))
-            TypedStmtKind.Continue:
-                append_indent(out, level)
-                append_view(out, sview("continue\n", 0, -1))
-            TypedStmtKind.Switch:
-                typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
-                saved_switch_done_index: i64 = ctx.current_switch_done_index
-                needs_switch_done: bool = typed_switch_needs_done(ctx, index)
-                ctx.current_switch_done_index <- index if needs_switch_done else -1
-                if needs_switch_done:
-                    append_indent(out, level)
-                    typed_append_switch_done_name(out, ctx)
-                    append_view(out, sview(": mutable bool = false\n", 0, -1))
-                append_indent(out, level)
-                append_view(out, sview("match ", 0, -1))
-                typed_emit_expr(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview(":\n", 0, -1))
-                has_default: mutable bool = false
-                offset: mutable i64 = 0
-                while offset < statement.children_count |out, ctx, statement, level, has_default, offset|:
-                    switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-                    append_indent(out, level + 1)
-                    if switch_case.is_default:
-                        append_view(out, sview("_:\n", 0, -1))
-                        has_default <- true
-                    else:
-                        group_end: mutable i64 = offset + 1
-                        while group_end < statement.children_count |ctx, statement, switch_case, group_end|:
-                            next_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + group_end).usize()]
-                            break if next_case.is_default or next_case.body != switch_case.body
-                            group_end <- group_end + 1
-                        typed_emit_switch_case_pattern(out, ctx, statement, offset, group_end) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                        offset <- group_end - 1
-                        append_view(out, sview(":\n", 0, -1))
-                    typed_emit_switch_case_body(out, ctx, switch_case.body, level + 2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    offset <- offset + 1
-                if not has_default:
-                    append_indent(out, level + 1)
-                    append_view(out, sview("_:\n", 0, -1))
-                    append_indent(out, level + 2)
-                    append_view(out, sview("pass\n", 0, -1))
-                ctx.current_switch_done_index <- saved_switch_done_index
-            TypedStmtKind.SwitchBreak:
-                if ctx.current_switch_done_index >= 0:
-                    append_indent(out, level)
-                    typed_append_switch_done_name(out, ctx)
-                    append_view(out, sview(" <- true\n", 0, -1))
-            TypedStmtKind.Goto:
-                append_indent(out, level)
-                append_view(out, ctx.current_emit_goto_name)
-                append_view(out, sview(" <- ", 0, -1))
-                append_i64(out, statement.aux + 1)
-                append_view(out, sview("\n", 0, -1))
-            TypedStmtKind.Label:
-                if ctx.current_emit_has_goto:
-                    append_indent(out, level)
-                    append_view(out, sview("if ((", 0, -1))
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" == 0) or (", 0, -1))
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" == ", 0, -1))
-                    append_i64(out, statement.aux + 1)
-                    append_view(out, sview(")):\n", 0, -1))
-                    append_indent(out, level + 1)
-                    append_view(out, sview("if ", 0, -1))
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" == ", 0, -1))
-                    append_i64(out, statement.aux + 1)
-                    append_view(out, sview(":\n", 0, -1))
-                    append_indent(out, level + 2)
-                    append_view(out, ctx.current_emit_goto_name)
-                    append_view(out, sview(" <- 0\n", 0, -1))
-                    typed_emit_stmt(out, ctx, statement.expr, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                else:
-                    typed_emit_stmt(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            TypedStmtKind.Expression:
-                typed_invalidate_nonnull_facts(ctx, statement.expr)
-                typed_emit_expression_statement(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            TypedStmtKind.Null:
-                append_indent(out, level)
-                append_view(out, sview("pass\n", 0, -1))
-            _:
-                append_indent(out, level)
-                append_view(out, sview("<invalid-ir>\n", 0, -1))
-
-    def typed_emit_stmt(out: mutable darray[u8]&, ctx: mutable TypedContext&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        if ctx.mode == TypedTranslationMode.Idiomatic and ctx.current_trusted_depth == 0 and typed_stmt_directly_needs_unsafe(ctx, index):
-            append_indent(out, level)
-            append_view(out, sview("trusted Unsafe.StaleRef:\n", 0, -1))
-            ctx.current_trusted_depth <- ctx.current_trusted_depth + 1
-            typed_emit_stmt_body(out, ctx, index, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            ctx.current_trusted_depth <- ctx.current_trusted_depth - 1
-        else:
-            typed_emit_stmt_body(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    def typed_emit_function(out: mutable darray[u8]&, ctx: mutable TypedContext&, function: TypedFunction) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+extend CTranslator:
+    def typed_emit_function[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, function: TypedFunction[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if function.link_name.len > 0 and sview_eq(function.link_name, function.name):
+            append_view(out, sview("@link_name(\"__elisa_c_impl_", 0, -1))
+            append_view(out, function.name)
+            append_view(out, sview("__", 0, -1))
+            append_i64(out, function.params_count)
+            append_view(out, sview("\")\n", 0, -1))
         if function.comment.len > 0:
             append_view(out, sview("#", 0, -1))
             append_view(out, function.comment)
             append_view(out, sview("\n", 0, -1))
         append_view(out, sview("def ", 0, -1))
-        append_view(out, function.name)
+        if ctx.project_mode and function.internal_linkage:
+            typed_emit_internal_function_name(out, ctx, function)
+        elif typed_function_is_header_inline(function):
+            typed_emit_header_inline_function_name(out, function.name, function.params_count)
+        else:
+            typed_emit_function_name(out, ctx, function.name, function.params_count)
         append_view(out, sview("(", 0, -1))
         if function.params_count > 0:
             for offset in 0..<function.params_count |out, ctx, function|:
                 append_view(out, sview(", ", 0, -1)) if offset > 0
-                parameter: TypedParam = ctx.params[(function.params_start + offset).usize()]
+                parameter: TypedParam[r] = ctx.params[(function.params_start + offset).usize()]
                 append_view(out, parameter.name)
-                if typed_parameter_is_mutable(ctx, function, parameter):
+                if typed_parameter_is_mutable(ctx, function, parameter) and not c_type_pointer_layers_composable(parameter.type_name):
                     append_view(out, sview(": mutable ", 0, -1))
                 else:
                     append_view(out, sview(": ", 0, -1))
                 append_c_type_contextual(out, ctx, parameter.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(parameter.type_name)
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(parameter.type_name)
         if function.variadic:
             append_view(out, sview(", ...", 0, -1)) if function.params_count > 0
             append_view(out, sview("...", 0, -1)) if function.params_count == 0
         append_view(out, sview(") -> ", 0, -1))
-        append_function_return_type(out, function.return_type)
+        append_function_return_type(out, ctx, function.return_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         body_level: i64 = typed_emit_function_effects(out, ctx, function)
         # These are function-local emission facts. Function bodies are emitted
         # sequentially, so clearing the context-owned arrays is both sufficient
         # and stage-1-safe; copying auto-region darray values into a longer-lived
         # context field is rejected as an escaping borrow by the backend.
         ctx.current_name_aliases <- []
+        ctx.current_declared_names <- []
+        ctx.current_declared_scope_starts <- []
         ctx.current_nonnull_names <- []
         ctx.current_nonnull_exprs <- []
         if function.params_count > 0:
             for offset in 0..<function.params_count |out, ctx, function|:
-                parameter: TypedParam = ctx.params[(function.params_start + offset).usize()]
+                parameter: TypedParam[r] = ctx.params[(function.params_start + offset).usize()]
                 if typed_parameter_needs_alias(ctx, function, parameter):
                     suffix: sview = typed_parameter_alias_suffix(ctx, function, parameter)
-                    ctx.current_name_aliases.push(TypedNameAlias{source: parameter.name, suffix: suffix})
+                    ctx.current_name_aliases.push(TypedNameAlias[r]{source: parameter.name, suffix: suffix})
                     append_indent(out, body_level)
                     append_view(out, parameter.name)
                     append_view(out, suffix)
                     append_view(out, sview(": mutable ", 0, -1))
                     append_c_type_contextual(out, ctx, parameter.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(parameter.type_name)
+                    append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(parameter.type_name)
                     append_view(out, sview(" = ", 0, -1))
                     append_view(out, parameter.name)
                     append_view(out, sview("\n", 0, -1))
-        if sview_eq(function.name, sview("main", 0, -1)) and typed_has_global_initializers(ctx):
+        if sview_eq(function.name, sview("main", 0, -1)) and (ctx.project_mode or typed_has_global_initializers(ctx)):
             append_indent(out, body_level)
-            append_view(out, typed_global_initializer_name(ctx))
-            append_view(out, sview("()\n", 0, -1))
+            if ctx.project_mode:
+                # Project manifests install one deterministic initializer
+                # runner after all translated modules. Calling that runner
+                # from main makes globals from every C/C++ translation unit
+                # behave like their source-language static initialization.
+                append_view(out, sview("elisa_init_project()\n", 0, -1))
+            elif typed_has_global_initializers(ctx):
+                append_view(out, typed_global_initializer_name(ctx))
+                append_view(out, sview("()\n", 0, -1))
         saved_emit_has_goto: bool = ctx.current_emit_has_goto
         saved_goto_name: sview = ctx.current_emit_goto_name
         saved_function_body: i64 = ctx.current_function_body
@@ -482,118 +89,494 @@
         ctx.current_switch_done_name <- sview("", 0, 0)
         ctx.current_switch_done_index <- -1
         ctx.current_name_aliases <- []
+        ctx.current_declared_names <- []
+        ctx.current_declared_scope_starts <- []
         ctx.current_nonnull_names <- []
         ctx.current_nonnull_exprs <- []
         if (function.has_goto or not typed_stmt_guarantees_exit(ctx, function.body)) and not sview_starts_with(c_function_return_type(function.return_type), sview("void", 0, -1)):
             append_indent(out, body_level)
             append_view(out, sview("return null\n", 0, -1)) if sview_find_byte(c_function_return_type(function.return_type), 42) >= 0 else append_view(out, sview("return 0\n", 0, -1))
 
-    def typed_has_global_initializers(ctx: TypedContext&) -> bool:
-        for index in 0..<ctx.globals.count |ctx|:
-            return true if ctx.globals[index].initializer >= 0
+    # Elisa deliberately internalizes ordinary program definitions. In project
+    # mode a translated C/C++ unit still has to preserve the source language's
+    # external-linkage surface for a neighboring object, so publish a thin
+    # wrapper while leaving the actual implementation and all internal calls
+    # untouched. The wrapper name is Elisa-private and the native name comes
+    # from Clang's ABI spelling; no source-library names are special-cased here.
+    def typed_external_wrapper_needs_adapter[@r](ctx: TypedContext[r]&, function: TypedFunction[r]) -> bool:
+        # Elisa's `export fn ... = target` form names a function by source
+        # spelling and arity. That is sufficient for C, but ambiguous when
+        # C++ leaves several same-arity overloads under one Elisa name.
+        # Detect that generic shape here; no library name is special-cased.
+        for index in 0..<ctx.functions.count |ctx, function|:
+            other: TypedFunction[r] = ctx.functions[index.usize()]
+            if not other.internal_linkage and sview_eq(other.name, function.name) and other.params_count == function.params_count:
+                differs: mutable bool = false
+                for offset in 0..<function.params_count |ctx, function, other, differs|:
+                    left: TypedParam[r] = ctx.params[(function.params_start + offset).usize()]
+                    right: TypedParam[r] = ctx.params[(other.params_start + offset).usize()]
+                    if not sview_eq(c_type_without_qualifiers(left.type_name), c_type_without_qualifiers(right.type_name)) or left.is_mutable != right.is_mutable:
+                        differs <- true
+                        break
+                return true if differs
         return false
 
-    def typed_global_initializer_name(ctx: TypedContext&) -> sview:
+    def typed_emit_external_adapter_name[@r](out: mutable darray[u8]&, function: TypedFunction[r]) -> void:
+        append_view(out, sview("__elisa_c_abi_adapter_", 0, -1))
+        append_view(out, function.name)
+        append_view(out, sview("__", 0, -1))
+        append_i64(out, function.params_count)
+        append_view(out, sview("__", 0, -1))
+        append_i64(out, (hash_sview(function.link_name) & 0x7fffffffffffffff).i64())
+    def typed_emit_external_wrapper_adapter[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, function: TypedFunction[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        append_view(out, sview("def ", 0, -1))
+        typed_emit_external_adapter_name(out, function)
+        append_view(out, sview("(", 0, -1))
+        if function.params_count > 0:
+            for offset in 0..<function.params_count |out, ctx, function|:
+                append_view(out, sview(", ", 0, -1)) if offset > 0
+                parameter: TypedParam[r] = ctx.params[(function.params_start + offset).usize()]
+                append_view(out, parameter.name)
+                append_view(out, sview(": mutable ", 0, -1)) if typed_parameter_is_mutable(ctx, function, parameter) and not c_type_pointer_layers_composable(parameter.type_name) else append_view(out, sview(": ", 0, -1))
+                append_c_type_contextual(out, ctx, parameter.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(parameter.type_name)
+        append_view(out, sview(") -> ", 0, -1))
+        append_function_return_type(out, ctx, function.return_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        body_level: i64 = typed_emit_function_effects(out, ctx, function)
+        append_indent(out, body_level)
+        returns_void: bool = sview_starts_with(c_function_return_type(function.return_type), sview("void", 0, -1))
+        append_view(out, function.name) if returns_void else append_view(out, sview("return ", 0, -1))
+        append_view(out, function.name) if not returns_void
+        append_view(out, sview("(", 0, -1))
+        if function.params_count > 0:
+            for offset in 0..<function.params_count |out, ctx, function|:
+                append_view(out, sview(", ", 0, -1)) if offset > 0
+                parameter: TypedParam[r] = ctx.params[(function.params_start + offset).usize()]
+                append_view(out, parameter.name)
+        append_view(out, sview(")\n", 0, -1))
+    def typed_emit_external_wrapper[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, function: TypedFunction[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if function.link_name.len == 0 or function.variadic
+        needs_adapter: bool = typed_external_wrapper_needs_adapter(ctx, function)
+        typed_emit_external_wrapper_adapter(out, ctx, function) if needs_adapter
+        append_view(out, sview("\n", 0, -1)) if needs_adapter
+        append_view(out, sview("@link_name(\"", 0, -1))
+        append_view(out, function.link_name)
+        append_view(out, sview("\")\nexport fn __c_abi_", 0, -1))
+        append_view(out, function.name)
+        append_view(out, sview("__", 0, -1))
+        append_i64(out, function.params_count)
+        if ctx.source_language_is_cxx and function.link_name.len > 0 and not sview_eq(function.link_name, function.name):
+            wrapper_identity: u64 = hash_sview(function.link_name) & 0x7fffffffffffffff
+            append_view(out, sview("__abi_", 0, -1))
+            append_i64(out, wrapper_identity.i64())
+        append_view(out, sview("(", 0, -1))
+        if function.params_count > 0:
+            for offset in 0..<function.params_count |out, ctx, function|:
+                append_view(out, sview(", ", 0, -1)) if offset > 0
+                parameter: TypedParam[r] = ctx.params[(function.params_start + offset).usize()]
+                append_view(out, parameter.name)
+                append_view(out, sview(": mutable ", 0, -1)) if typed_parameter_is_mutable(ctx, function, parameter) and not c_type_pointer_layers_composable(parameter.type_name) else append_view(out, sview(": ", 0, -1))
+                append_c_type_contextual(out, ctx, parameter.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(parameter.type_name)
+        append_view(out, sview(") -> ", 0, -1))
+        append_function_return_type(out, ctx, function.return_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview(" = ", 0, -1))
+        if needs_adapter:
+            typed_emit_external_adapter_name(out, function)
+        else:
+            # The compact path is sufficient for unambiguous C and C++ symbols.
+            append_view(out, function.name)
+        append_view(out, sview("\n", 0, -1))
+    def typed_has_global_initializers[@r](ctx: TypedContext[r]&) -> bool:
+        for index in 0..<ctx.globals.count |ctx|:
+            global_value: TypedGlobal[r] = ctx.globals[index]
+            return true if global_value.initializer >= 0 and not global_value.initializer_is_direct
+        return false
+
+    # File-scope C initializers are required to be static expressions. Keep
+    # the direct-global path conservative: every accepted node must be pure and
+    # every nested value must be representable by the normal initializer
+    # emitter. Calls, reads of other mutable objects, address arithmetic and
+    # assignment sequences stay on the runtime path (or produce a diagnostic
+    # for a source-level const object).
+    def typed_global_initializer_expr_is_static[@r](ctx: TypedContext[r]&, index: i64, depth: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64() or depth > 128
+        expression: TypedExpr[r] = ctx.exprs[index.usize()]
+        return true if expression.kind == TypedExprKind.Integer or expression.kind == TypedExprKind.Floating or expression.kind == TypedExprKind.String or expression.kind == TypedExprKind.Character or expression.kind == TypedExprKind.Null or expression.kind == TypedExprKind.Zeroed
+        match expression.kind:
+            TypedExprKind.Name:
+                # Enum constants are emitted as Elisa enum members. Other
+                # names may refer to mutable storage or to a project symbol
+                # whose initialization order is not represented here.
+                return expression.value == 1 or expression.value == 2
+            TypedExprKind.Unary:
+                return false if sview_eq(expression.text, sview("&", 0, -1)) else typed_global_initializer_expr_is_static(ctx, expression.lhs, depth + 1)
+            TypedExprKind.Binary:
+                return false if sview_eq(expression.text, sview("<-", 0, -1)) else typed_global_initializer_expr_is_static(ctx, expression.lhs, depth + 1) and typed_global_initializer_expr_is_static(ctx, expression.rhs, depth + 1)
+            TypedExprKind.Conditional:
+                return typed_global_initializer_expr_is_static(ctx, expression.lhs, depth + 1) and typed_global_initializer_expr_is_static(ctx, expression.rhs, depth + 1) and typed_global_initializer_expr_is_static(ctx, expression.third, depth + 1)
+            TypedExprKind.Cast:
+                return typed_global_initializer_expr_is_static(ctx, expression.lhs, depth + 1)
+            TypedExprKind.Sizeof:
+                return true
+            TypedExprKind.ObjectSizeRemaining:
+                return true
+            TypedExprKind.Aggregate:
+                for offset in 0..<expression.args_count |ctx, expression, depth|:
+                    return false if not typed_global_initializer_expr_is_static(ctx, ctx.expr_children[(expression.args_start + offset).usize()], depth + 1)
+                return true
+            _:
+                return false
+    def typed_global_initializer_is_direct[@r](ctx: TypedContext[r]&, index: i64, target_type: sview) -> bool:
+        return false if index < 0
+        # Keep pointer/address materialization out of this first direct path;
+        # the source binding still remains immutable, but unsupported dynamic
+        # initialization is reported instead of silently weakening it.
+        return false if c_type_pointer_count(target_type) > 0 or c_type_is_function_pointer(target_type) or c_type_reference_count(target_type) > 0
+        return false if not (c_type_is_integer(target_type) or c_type_is_floating(target_type) or c_type_is_enum(target_type) or c_type_is_array(target_type) or typed_record_index(ctx, target_type) >= 0)
+        return typed_global_initializer_expr_is_static(ctx, index, 0)
+    def typed_global_source_is_mutable[@r](ctx: mutable TypedContext[r]&, declaration: JsonValueHandle[r], global_type: sview, initializer: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        source_const: bool = c_type_is_const_object(global_type)
+        direct: bool = typed_global_initializer_is_direct(ctx, initializer, global_type) if initializer >= 0 else false
+        if source_const and initializer >= 0 and not direct:
+            typed_record_diagnostic(ctx, declaration, sview("global", 0, -1), sview("const-global-initializer-requires-static-emission", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return not source_const or (initializer >= 0 and not direct)
+
+    def typed_project_initializer_name(source: cstr) -> sview can[Memory.Allocate, Abort.Panic]:
+        path: sview = sview(source, 0, -1)
+        start: mutable i64 = 0
+        for index in 0..<path.len |path, start|:
+            start <- index + 1 if string_view_index(path, index) == 47
+        end: mutable i64 = path.len
+        for index in start..<path.len |path, start, end|:
+            if string_view_index(path, index) == 46:
+                end <- index
+                break
+        out: mutable darray[u8] = []
+        append_literal(&out, "elisa_init_")
+        if end <= start:
+            append_literal(&out, "unit")
+        else:
+            for index in start..<end |out, path, start, end|:
+                byte: i64 = string_view_index(path, index)
+                if (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 95:
+                    out.push(byte.u8())
+                else:
+                    out.push(95)
+        copied: cstr = string_view_copy(bytes_view(out)) can Memory.Allocate
+        return sview(copied, 0, -1)
+    def typed_global_initializer_name[@r](ctx: TypedContext[r]&) -> sview @r:
+        return ctx.initializer_name if ctx.project_mode and ctx.initializer_name.len > 0
         candidate: sview = sview("initialize_globals", 0, -1)
         return candidate if not typed_context_name_conflicts(ctx, candidate)
         return sview("elisa_initialize_globals", 0, -1)
 
-    def typed_emit_global_initializers(out: mutable darray[u8]&, ctx: TypedContext&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        return if not typed_has_global_initializers(ctx)
+    # A project initializer is part of the generated embedding surface, so a
+    # host may legally call it more than once. Dynamic C initialization is
+    # one-time work, however. Derive the guard from the canonical translation
+    # unit identity and check the complete collected symbol set before
+    # returning a heap-backed name; this keeps the guard generic and avoids a
+    # fixed identifier colliding with a source declaration.
+    def typed_global_initializer_guard_name[@r](ctx: TypedContext[r]&) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        candidate: mutable darray[u8] = []
+        append_view(&candidate, sview("__elisa_transpiler_init_guard_", 0, -1))
+        append_i64(&candidate, hash.i64())
+        candidate_view: sview = bytes_view(candidate)
+        if typed_context_name_conflicts(ctx, candidate_view):
+            append_view(&candidate, sview("_guard", 0, -1))
+        copied: cstr = string_view_copy(bytes_view(candidate)) can Memory.Allocate, Abort.Panic
+        return sview(copied, 0, -1)
+    def typed_emit_global_initializers[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if not ctx.project_mode and not typed_has_global_initializers(ctx)
+        has_dynamic_initializers: bool = typed_has_global_initializers(ctx)
+        guard_name: mutable sview = sview("", 0, 0)
+        guard_name <- typed_global_initializer_guard_name(ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if has_dynamic_initializers
+        if has_dynamic_initializers:
+            append_view(out, sview("global mutable ", 0, -1))
+            append_view(out, guard_name)
+            append_view(out, sview(": bool = false\n\n", 0, -1))
         append_view(out, sview("def ", 0, -1))
         append_view(out, typed_global_initializer_name(ctx))
         append_view(out, sview("() -> void can[Abort.Panic, Global, Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef]:\n", 0, -1))
         append_view(out, sview("    can Abort.Panic, Global, Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef:\n", 0, -1))
+        if not typed_has_global_initializers(ctx):
+            append_view(out, sview("        pass\n\n", 0, -1))
+            return
+        append_view(out, sview("        if ", 0, -1))
+        append_view(out, guard_name)
+        append_view(out, sview(":\n            return\n        ", 0, -1))
+        append_view(out, guard_name)
+        append_view(out, sview(" <- true\n", 0, -1))
         for index in 0..<ctx.globals.count |out, ctx|:
-            typed_global: TypedGlobal = ctx.globals[index.usize()]
+            typed_global: TypedGlobal[r] = ctx.globals[index.usize()]
             if typed_global.initializer >= 0:
+                continue if typed_global.initializer_is_direct
                 append_view(out, sview("        trusted Unsafe.StaleRef:\n            ", 0, -1))
-                append_view(out, typed_global.name)
+                typed_emit_project_global_name(out, ctx, typed_global) if typed_global.project_private else append_view(out, typed_global.name)
                 append_view(out, sview(" <- ", 0, -1))
                 typed_emit_initializer_value(out, ctx, typed_global.initializer, typed_global.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 append_view(out, sview("\n", 0, -1))
         append_view(out, sview("\n", 0, -1))
-
-    def typed_emit_program(out: mutable darray[u8]&, ctx: mutable TypedContext&, with_prelude: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        typed_emit_runtime_prelude(out, typed_context_needs_nonnull_helper(ctx), typed_context_needs_readonly_nonnull_helper(ctx), typed_context_needs_varargs(ctx)) if with_prelude
-        typed_emit_types(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        typed_emit_externals(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_user_globals_in_scope[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source: cstr, inside_anonymous_namespace: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        count: i64 = ast_child_count(node)
+        if count < 0:
+            return
+        for index in 0..<count |ctx, node, source|:
+            declaration: JsonValueHandle[r] = ast_child(node, index)
+            if sview_eq(ast_kind(declaration), sview("VarDecl", 0, -1)) and ast_is_user_declaration(declaration, source) and (not ast_is_extern_decl(declaration) or not json_handle_is_null(ast_field(declaration, sview("init", 0, -1)))):
+                name: sview = safe_identifier(ast_name(declaration))
+                global_type: sview = typed_c_type(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                project_private: bool = ast_is_static_decl(declaration) or inside_anonymous_namespace or typed_project_cpp_namespace_const_has_internal_linkage(ctx, declaration, global_type)
+                raw_declaration_id: sview = ast_string(ast_field(declaration, sview("id", 0, -1)))
+                declaration_id: mutable sview = typed_decl_canonical_id(ctx, raw_declaration_id)
+                declaration_id <- raw_declaration_id if declaration_id.len == 0
+                already_collected: bool = typed_global_declaration_index(ctx, declaration_id) >= 0 if project_private else typed_global_index(ctx, name) >= 0
+                if name.len > 0 and not already_collected:
+                    initializer: mutable i64 = -1
+                    if ast_child_count(declaration) > 0:
+                        for child_index in 0..<ast_child_count(declaration) |ctx, declaration, initializer|:
+                            initializer_node: JsonValueHandle[r] = ast_child(declaration, child_index)
+                            continue if ast_is_comment_node(initializer_node)
+                            initializer <- typed_lower_expr(ctx, initializer_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            break
+                    identity_hash: i64 = typed_global_identity_hash(ctx, declaration, name, global_type) if project_private else 0
+                    initializer_is_direct: bool = typed_global_initializer_is_direct(ctx, initializer, global_type) if initializer >= 0 else false
+                    is_mutable: bool = typed_global_source_is_mutable(ctx, declaration, global_type, initializer) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    ctx.globals.push(TypedGlobal[r]{name: name, type_name: global_type, comment: ast_comment_text(declaration), declaration_id: declaration_id, initializer: initializer, is_mutable: is_mutable, initializer_is_direct: initializer_is_direct, identity_hash: identity_hash, project_private: project_private})
+            elif ast_is_declaration_scope(declaration):
+                nested_anonymous_namespace: bool = inside_anonymous_namespace or ast_is_anonymous_namespace(declaration)
+                typed_collect_user_globals_in_scope(ctx, declaration, source, nested_anonymous_namespace) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_function_globals_in_scope[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source: cstr) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        count: i64 = ast_child_count(node)
+        if count < 0:
+            return
+        for index in 0..<count |ctx, node, source|:
+            declaration: JsonValueHandle[r] = ast_child(node, index)
+            if sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)):
+                if ast_has_child(declaration, sview("CompoundStmt", 0, -1)) and ast_is_user_declaration(declaration, source):
+                    typed_collect_globals(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            elif ast_is_declaration_scope(declaration):
+                typed_collect_function_globals_in_scope(ctx, declaration, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_lower_functions_in_scope[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source: cstr, inside_anonymous_namespace: bool, collect_frontend_stats: bool, arena_bytes: usize) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        count: i64 = ast_child_count(node)
+        if count < 0:
+            return
+        for index in 0..<count |ctx, node, source|:
+            declaration: JsonValueHandle[r] = ast_child(node, index)
+            if sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)):
+                if ast_has_child(declaration, sview("CompoundStmt", 0, -1)) and ast_is_user_declaration(declaration, source):
+                    typed_emit_frontend_phase_stats(sview(source, 0, -1), sview("function-start", 0, -1), ast_name(declaration), arena_bytes, 0.usize(), ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                    lowered_function: i64 = typed_lower_function(ctx, declaration, inside_anonymous_namespace)
+                    _ = lowered_function
+                    typed_emit_frontend_phase_stats(sview(source, 0, -1), sview("function-finished", 0, -1), ast_name(declaration), arena_bytes, 0.usize(), ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+            elif ast_is_declaration_scope(declaration):
+                nested_anonymous_namespace: bool = inside_anonymous_namespace or ast_is_anonymous_namespace(declaration)
+                typed_lower_functions_in_scope(ctx, declaration, source, nested_anonymous_namespace, collect_frontend_stats, arena_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_emit_program_body[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, project_mode: bool, collect_frontend_stats: bool, arena_bytes: usize) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        typed_emit_types(out, ctx, project_mode) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("emit-types", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+        typed_emit_externals(out, ctx, project_mode) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("emit-externals", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
         if ctx.globals.count > 0:
             for index in 0..<ctx.globals.count |out, ctx|:
-                typed_global: TypedGlobal = ctx.globals[index.usize()]
+                typed_global: TypedGlobal[r] = ctx.globals[index.usize()]
+                continue if project_mode and not typed_global.project_private and typed_project_global_seen(typed_global.name)
+                if project_mode and not typed_global.project_private:
+                    typed_project_mark_global(typed_global.name) can Memory.Allocate, Abort.Panic
                 if typed_global.comment.len > 0:
                     append_view(out, sview("#", 0, -1))
                     append_view(out, typed_global.comment)
                     append_view(out, sview("\n", 0, -1))
-                append_view(out, sview("global mutable ", 0, -1))
-                append_view(out, typed_global.name)
+                append_view(out, sview("global mutable ", 0, -1)) if typed_global.is_mutable else append_view(out, sview("global ", 0, -1))
+                typed_emit_project_global_name(out, ctx, typed_global) if typed_global.project_private else append_view(out, typed_global.name)
                 append_view(out, sview(": ", 0, -1))
                 append_c_type_contextual(out, ctx, typed_global.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(typed_global.type_name)
-                append_view(out, sview(" = zeroed", 0, -1))
+                append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(typed_global.type_name)
+                if typed_global.initializer_is_direct:
+                    append_view(out, sview(" = ", 0, -1))
+                    typed_emit_initializer_value(out, ctx, typed_global.initializer, typed_global.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                else:
+                    append_view(out, sview(" = zeroed", 0, -1))
                 append_view(out, sview("\n\n", 0, -1))
         typed_emit_global_initializers(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("emit-global-initializers", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
         for index in 0..<ctx.functions.count |out, ctx|:
-            typed_emit_function(out, ctx, ctx.functions[index.usize()]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            function: TypedFunction[r] = ctx.functions[index.usize()]
+            if project_mode and not function.internal_linkage and typed_function_is_header_inline(function) and typed_project_function_seen(function.name, function.params_count, function.variadic):
+                continue
+            if project_mode and not function.internal_linkage:
+                typed_project_mark_function(function.name, function.params_count, function.variadic) can Memory.Allocate, Abort.Panic
+            typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("emit-function-start", 0, -1), function.name, arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+            typed_emit_function(out, ctx, function) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("emit-function-finished", 0, -1), function.name, arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+            typed_emit_external_wrapper(out, ctx, function) if project_mode
             append_view(out, sview("\n", 0, -1)) if index + 1 < ctx.functions.count
+    def typed_emit_program[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, with_prelude: bool, project_mode: bool, collect_frontend_stats: bool, arena_bytes: usize, needs_runtime_nonnull: mutable bool&, needs_runtime_readonly_nonnull: mutable bool&, needs_runtime_varargs: mutable bool&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        body: mutable darray[u8] = []
+        typed_emit_program_body(&body, ctx, project_mode, collect_frontend_stats, arena_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("program-body-emitted", 0, -1), sview("", 0, 0), arena_bytes, body.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+        increment_helpers: i64 = typed_increment_helper_mask(ctx)
+        # Emitter markers record the exact helper calls present in the body,
+        # so ordinary statement-only assignments do not cause value helpers
+        # to be emitted unnecessarily.
+        needs_nonnull: mutable bool = false
+        needs_readonly_nonnull: mutable bool = false
+        needs_assignment_value: mutable bool = false
+        needs_compound_assignment_value: mutable bool = false
+        for index in 0..<body.count |body, needs_nonnull, needs_readonly_nonnull, needs_assignment_value, needs_compound_assignment_value|:
+            needs_nonnull <- true if body[index] == 0
+            needs_readonly_nonnull <- true if body[index] == 1
+            needs_assignment_value <- true if body[index] == 2
+            needs_compound_assignment_value <- true if body[index] == 3
+        needs_runtime_nonnull <- needs_nonnull
+        needs_runtime_readonly_nonnull <- needs_readonly_nonnull
+        needs_runtime_varargs <- typed_context_needs_varargs(ctx)
+        if with_prelude:
+            typed_emit_runtime_prelude(out, needs_runtime_nonnull, needs_runtime_readonly_nonnull, needs_runtime_varargs)
+            typed_emit_cpp_compatibility(out, ctx.needs_cpp_unordered_map)
+        # Helpers are emitted in each translation unit and namespaced by a
+        # deterministic source-path hash, so separately translated project
+        # modules can use scalar increment expressions without duplicate
+        # global definitions in the shared project manifest.
+        typed_emit_assignment_value_helper(out, ctx) if needs_assignment_value
+        if needs_compound_assignment_value:
+            typed_emit_compound_assignment_value_helpers(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_increment_helpers(out, ctx, increment_helpers)
+        typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("support-helpers-emitted", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+        body_base_offset: i64 = out.count.i64()
+        removed_marker_offsets: mutable darray[i64] = []
+        for index in 0..<body.count |out, body, removed_marker_offsets|:
+            byte: u8 = body[index]
+            removed_marker_offsets.push(index.i64()) if ctx.source_mapping_enabled and (byte == 0 or byte == 1 or byte == 2 or byte == 3)
+            out.push(byte) if byte != 0 and byte != 1 and byte != 2 and byte != 3
+        typed_rebase_generated_source_spans(ctx.generated_source_spans, body_base_offset, removed_marker_offsets) if ctx.source_mapping_enabled
+        typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("body-appended", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
 
-    def typed_append_diagnostic(out: mutable darray[u8]&, diagnostic: TypedDiagnostic) -> void:
-        append_view(out, sview("elisa-c-transpiler: unsupported ", 0, -1))
-        append_view(out, diagnostic.category)
-        append_view(out, sview(" ", 0, -1))
-        append_view(out, diagnostic.kind)
-        append_view(out, sview(" at ", 0, -1))
-        append_view(out, diagnostic.source)
-        append_view(out, sview(":", 0, -1)) if diagnostic.source.len > 0
-        append_i64(out, diagnostic.line)
-        append_view(out, sview(":", 0, -1))
-        append_i64(out, diagnostic.column)
-        append_view(out, sview("\n", 0, -1))
-
-    def translate_ast_mode_with_options(ast_bytes: darray[u8], source: cstr, with_prelude: bool, mode: TypedTranslationMode) -> TypedTranslation can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        output: mutable darray[u8] = []
-        parsed: JsonParseResult = json_parse_checked(&perm_arena, bytes_view(ast_bytes))
+    def translate_ast_mode_with_options[@r](translation: mutable TypedTranslation[r]&, ast_bytes: darray[u8] @r, record_layout_dump: darray[u8] @r, source: cstr @r, with_prelude: bool, mode: TypedTranslationMode, project_mode: bool, max_frontend_json_values: usize, collect_frontend_stats: bool, dump_typed_ir: bool, capture_source_map: bool, source_working_directory: sview @r, requested_project_initializer_name: sview @r, target_abi: ClangTargetABI, source_language_is_cxx: bool) -> void can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        translation.output.count <- 0.usize()
+        translation.source_map.count <- 0.usize()
+        translation.typed_ir_dump.count <- 0.usize()
+        translation.diagnostics.count <- 0.usize()
+        translation.ast_json_values <- -1
+        translation.ast_arena_used_bytes <- 0.usize()
+        translation.needs_cpp_unordered_map <- false
+        translation.needs_runtime_nonnull <- false
+        translation.needs_runtime_readonly_nonnull <- false
+        translation.needs_runtime_varargs <- false
+        translation.failed <- false
+        translation.frontend_json_value_limit_exceeded <- false
+        source_view: sview @r = sview(source, 0, -1)
+        canonical_source_result: sview = typed_canonical_source_path(source_view, source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        canonical_source: sview @r = typed_copy_view_to_region(canonical_source_result) can Memory.Allocate, Abort.Panic
+        preflight_value_count: mutable i64 = 0
+        preflight_limit_exceeded: mutable bool = false
+        preflight_valid: bool = ast_json_preflight_value_count(bytes_view(ast_bytes), max_frontend_json_values, &preflight_value_count, &preflight_limit_exceeded)
+        if preflight_valid and preflight_limit_exceeded:
+            translation.failed <- true
+            translation.ast_json_values <- preflight_value_count if collect_frontend_stats else -1
+            translation.frontend_json_value_limit_exceeded <- true
+            return
+        ast_arena: mutable Arena = zeroed
+        parsed: JsonParseResult[ast_arena] = json_parse_checked(&ast_arena, bytes_view(ast_bytes))
         if parsed.code != JsonErrorCode.OK:
             diagnostics: mutable darray[TypedDiagnostic] = []
-            diagnostics.push(TypedDiagnostic{category: sview("AST", 0, -1), kind: sview("invalid-json", 0, -1), source: sview(source, 0, -1), line: 0, column: parsed.pos})
-            return TypedTranslation{output: output, diagnostics: diagnostics, failed: true}
-        context: mutable TypedContext = TypedContext{exprs: [], expr_children: [], stmts: [], stmt_children: [], params: [], current_name_aliases: [], current_nonnull_names: [], current_nonnull_exprs: [], extern_params: [], globals: [], functions: [], user_function_names: [], externs: [], extern_globals: [], fields: [], records: [], enums: [], enum_consts: [], labels: [], switch_cases: [], decl_infos: [], break_scopes: [], switch_depth: 0, current_for_increment: -1, current_return_type: sview("", 0, 0), current_has_goto: false, current_emit_has_goto: false, current_structured_break_label: -1, current_emit_goto_name: sview("", 0, 0), current_switch_done_name: sview("", 0, 0), current_switch_done_index: -1, current_function_body: -1, current_trusted_depth: 0, mode: mode, source: source, root: JsonValue.Null, diagnostics: []}
-        root: JsonValue = parsed.value
-        context.root <- root
-        typed_collect_types(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        typed_collect_external_globals(&context, root)
-        typed_collect_user_functions(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        declarations: JsonValue = ast_children(root)
-        count: i64 = json_array_len(declarations)
-        if count >= 0:
-            for index in 0..<count |context, declarations, source|:
-                declaration: JsonValue = ast_array_item(declarations, index)
-                if sview_eq(ast_kind(declaration), sview("VarDecl", 0, -1)) and ast_is_user_declaration(declaration, source):
-                    name: sview = safe_identifier(ast_name(declaration))
-                    if name.len > 0 and typed_global_index(context, name) < 0:
-                        initializer: mutable i64 = -1
-                        if ast_child_count(declaration) > 0:
-                            initializer <- typed_lower_expr(&context, ast_child(declaration, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                        context.globals.push(TypedGlobal{name: name, type_name: ast_c_type(declaration), initializer: initializer, comment: ast_comment_text(declaration)})
-            for index in 0..<count |output, declarations|:
-                declaration: JsonValue = ast_array_item(declarations, index)
-                if sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)) and ast_has_child(declaration, sview("CompoundStmt", 0, -1)) and ast_is_user_declaration(declaration, source):
-                    typed_collect_globals(&context, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            for index in 0..<count |output, declarations|:
-                declaration: JsonValue = ast_array_item(declarations, index)
-                if sview_eq(ast_kind(declaration), sview("FunctionDecl", 0, -1)) and ast_has_child(declaration, sview("CompoundStmt", 0, -1)) and ast_is_user_declaration(declaration, source):
-                    lowered_function: i64 = typed_lower_function(&context, declaration)
-                    _ = lowered_function
-        if context.diagnostics.count == 0:
-            append_view(&output, sview("# Generated by the Elisa C translator.\n\n", 0, -1))
-            typed_emit_program(&output, &context, with_prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            output <- typed_format_output(output)
-        return TypedTranslation{output: output, diagnostics: context.diagnostics, failed: context.diagnostics.count > 0}
+            diagnostics.push(TypedDiagnostic{category: sview("AST", 0, -1), kind: sview("invalid-json", 0, -1), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0), source: source_view, canonical_source: canonical_source, spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), range_start_offset: -1, range_end_offset: -1, line: 0, column: parsed.pos, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0})
+            ast_arena_used_bytes: usize = arena_used_bytes(&ast_arena) if collect_frontend_stats else 0.usize()
+            for index in 0..<diagnostics.count |diagnostics, translation|:
+                translation.diagnostics.push(diagnostics[index])
+            translation.failed <- true
+            translation.ast_arena_used_bytes <- ast_arena_used_bytes
+        else:
+            root: JsonValueHandle[ast_arena] = json_handle_from_result(parsed)
+            initializer_name: mutable sview = sview("initialize_globals", 0, -1)
+            initializer_name <- requested_project_initializer_name if project_mode and requested_project_initializer_name.len > 0
+            initializer_name <- typed_project_initializer_name(source) can Memory.Allocate, Abort.Panic if project_mode and requested_project_initializer_name.len == 0
+            context: mutable TypedContext[ast_arena] = typed_new_context(root, project_mode, initializer_name, mode, target_abi, source_language_is_cxx, capture_source_map, source, source_working_directory, canonical_source)
+            ast_json_values: i64 = preflight_value_count if collect_frontend_stats else -1
+            ast_arena_used_bytes: usize = arena_used_bytes(&ast_arena) if collect_frontend_stats else 0.usize()
+            typed_emit_frontend_phase_stats(source_view, sview("json-parsed", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+            schema_issue: sview = ast_root_schema_issue(root)
+            if schema_issue.len > 0:
+                translation.diagnostics.push(TypedDiagnostic{category: sview("AST schema", 0, -1), kind: typed_copy_view_to_region(schema_issue), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0), source: source_view, canonical_source: canonical_source, spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), range_start_offset: -1, range_end_offset: -1, line: 0, column: 0, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0})
+                translation.failed <- true
+                translation.ast_json_values <- ast_json_values
+                translation.ast_arena_used_bytes <- ast_arena_used_bytes
+            else:
+                typed_decl_index_build(&context, root) can Memory.Allocate, Abort.Panic
+                typed_emit_frontend_phase_stats(source_view, sview("declaration-index", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                typed_collect_types(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_emit_frontend_phase_stats(source_view, sview("types-collected", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                typed_parse_clang_record_layouts(&context, bytes_view(record_layout_dump)) can Memory.Allocate
+                typed_scan_cpp_features(&context, root, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_collect_external_globals(&context, root, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_collect_user_functions(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_emit_frontend_phase_stats(source_view, sview("declarations-collected", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                declarations: JsonValueHandle[ast_arena] = ast_children(root)
+                count: i64 = json_handle_array_len(declarations)
+                if count >= 0:
+                    typed_collect_user_globals_in_scope(&context, root, source, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_collect_function_globals_in_scope(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_emit_frontend_phase_stats(source_view, sview("globals-collected", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                    typed_lower_functions_in_scope(&context, root, source, false, collect_frontend_stats, ast_arena_used_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_emit_frontend_phase_stats(source_view, sview("functions-lowered", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                issue: mutable TypedIRIssue[ast_arena] = TypedIRIssue[ast_arena]{kind: sview("", 0, 0), index: -1}
+                if context.diagnostics.count == 0:
+                    issue <- typed_verify_ir(context) can Memory.Allocate, Abort.Panic
+                    typed_record_ir_issue(&context, issue) can Memory.Allocate, Abort.Panic if issue.kind.len > 0
+                if context.diagnostics.count == 0:
+                    typed_mark_record_field_mutability(&context)
+                    issue <- typed_verify_ir(context) can Memory.Allocate, Abort.Panic
+                    typed_record_ir_issue(&context, issue) can Memory.Allocate, Abort.Panic if issue.kind.len > 0
+                typed_emit_frontend_phase_stats(source_view, sview("ir-verified", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                # When explicitly requested, retain the IR dump on verifier and
+                # lowering diagnostics too; failed IR is often the most useful case
+                # for this debugging view. Successful translations still dump the
+                # final post-verification form.
+                if dump_typed_ir:
+                    generated_ir_dump: darray[u8] = typed_dump_ir(context) can Memory.Allocate, Abort.Panic
+                    for index in 0..<generated_ir_dump.count |generated_ir_dump, translation|:
+                        translation.typed_ir_dump.push(generated_ir_dump[index])
+                needs_runtime_nonnull: mutable bool = false
+                needs_runtime_readonly_nonnull: mutable bool = false
+                needs_runtime_varargs: mutable bool = false
+                if context.diagnostics.count == 0:
+                    append_view(&translation.output, sview("# Generated by the Elisa C translator.\n\n", 0, -1))
+                    typed_emit_program(&translation.output, &context, with_prelude, project_mode, collect_frontend_stats, ast_arena_used_bytes, &needs_runtime_nonnull, &needs_runtime_readonly_nonnull, &needs_runtime_varargs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_emit_frontend_phase_stats(source_view, sview("program-emitted", 0, -1), sview("", 0, 0), ast_arena_used_bytes, translation.output.count, &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                    if context.source_mapping_enabled:
+                        formatted: TypedFormattedOutputOrigins = typed_format_output_with_origins(translation.output) can Memory.Allocate, Abort.Panic
+                        translation.output.count <- 0.usize()
+                        for index in 0..<formatted.output.count |formatted, translation|:
+                            translation.output.push(formatted.output[index])
+                        typed_finalize_generated_source_spans(&context.generated_source_spans, formatted.source_offsets)
+                    else:
+                        formatted_output: darray[u8] = typed_format_output(translation.output)
+                        translation.output.count <- 0.usize()
+                        for index in 0..<formatted_output.count |formatted_output, translation|:
+                            translation.output.push(formatted_output[index])
+                    typed_emit_frontend_phase_stats(source_view, sview("output-formatted", 0, -1), sview("", 0, 0), ast_arena_used_bytes, translation.output.count, &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                copied_source_map: darray[TypedGeneratedSourceSpan[r]] @r = typed_copy_generated_source_spans(context.generated_source_spans) can Memory.Allocate, Abort.Panic
+                copied_diagnostics: darray[TypedDiagnostic] @r = typed_copy_diagnostics(context.diagnostics) can Memory.Allocate, Abort.Panic
+                for index in 0..<copied_source_map.count |copied_source_map, translation|:
+                    translation.source_map.push(copied_source_map[index])
+                for index in 0..<copied_diagnostics.count |copied_diagnostics, translation|:
+                    translation.diagnostics.push(copied_diagnostics[index])
+                translation.ast_json_values <- ast_json_values
+                translation.ast_arena_used_bytes <- ast_arena_used_bytes
+                translation.needs_cpp_unordered_map <- context.needs_cpp_unordered_map
+                translation.needs_runtime_nonnull <- needs_runtime_nonnull
+                translation.needs_runtime_readonly_nonnull <- needs_runtime_readonly_nonnull
+                translation.needs_runtime_varargs <- needs_runtime_varargs
+                translation.failed <- context.diagnostics.count > 0
+        arena_free(&ast_arena) can Memory.Release, Abort.Panic
+        return
 
-    def translate_ast_mode(ast_bytes: darray[u8], source: cstr, with_prelude: bool) -> TypedTranslation can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        region translation:
-            return translate_ast_mode_with_options(ast_bytes, source, with_prelude, TypedTranslationMode.Idiomatic) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def translate_ast_mode[@r](translation: mutable TypedTranslation[r]&, ast_bytes: darray[u8] @r, source: cstr @r, with_prelude: bool) -> void can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        empty_layout_dump: mutable darray[u8] @r = []
+        translate_ast_mode_with_options(translation, ast_bytes, empty_layout_dump, source, with_prelude, TypedTranslationMode.Idiomatic, false, 1000000.usize(), false, false, false, sview("", 0, 0), sview("", 0, 0), clang_target_abi_unknown(), source_is_cxx(source)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
 
-    def translate_ast(ast_bytes: darray[u8], source: cstr) -> TypedTranslation can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        region translation:
-            return translate_ast_mode_with_options(ast_bytes, source, true, TypedTranslationMode.Idiomatic) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def translate_ast[@r](translation: mutable TypedTranslation[r]&, ast_bytes: darray[u8] @r, source: cstr @r) -> void can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        empty_layout_dump: mutable darray[u8] @r = []
+        translate_ast_mode_with_options(translation, ast_bytes, empty_layout_dump, source, true, TypedTranslationMode.Idiomatic, false, 1000000.usize(), false, false, false, sview("", 0, 0), sview("", 0, 0), clang_target_abi_unknown(), source_is_cxx(source)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console

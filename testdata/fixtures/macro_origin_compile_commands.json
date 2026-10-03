@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/macro_origin_header.c",
+    "command": "clang -std=c11 -c testdata/fixtures/macro_origin_header.c"
+  }
+]

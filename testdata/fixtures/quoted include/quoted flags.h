@@ -1,0 +1,1 @@
+#define QUOTED_HEADER_VALUE 42

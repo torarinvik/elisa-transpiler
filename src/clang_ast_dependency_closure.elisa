@@ -1,0 +1,46 @@
+extend CTranslator:
+    def ast_dependency_graph_close(graph: AstDependencyGraph&, ids: mutable AstDependencySet&) -> void can[Memory.Allocate, Abort.Panic]:
+        # Queue stable graph indexes rather than borrowed identifier views.
+        # The graph is immutable during closure, and the queue grows while it
+        # is read; scalar indexes avoid widening a local container of views
+        # across loop iterations under the compiler's region checks.
+        pending: mutable darray[i64] = []
+        for index in 0..<ids.slots.count.usize() |ids, pending|:
+            identifier: sview = ids.slots[index]
+            node_slot: i64 = ast_dependency_graph_find_slot(graph, identifier) if identifier.len > 0 else -1
+            pending.push(node_slot) if node_slot >= 0
+        cursor: mutable usize = 0.usize()
+        while cursor < pending.count:
+            node_slot: i64 = pending[cursor]
+            edge_index: mutable i64 = graph.nodes[node_slot.usize()].first_edge
+            while edge_index >= 0:
+                edge: AstDependencyEdge = graph.edges[edge_index.usize()]
+                before: usize = ids.count
+                ast_dependency_set_add(ids, edge.target) can Memory.Allocate, Abort.Panic
+                if ids.count > before:
+                    target_slot: i64 = ast_dependency_graph_find_slot(graph, edge.target)
+                    pending.push(target_slot) if target_slot >= 0
+                edge_index <- edge.next
+            cursor <- cursor + 1.usize()
+
+    def ast_json_dependency_wrapper_kind(kind: sview) -> bool:
+        return sview_eq(kind, sview("LinkageSpecDecl", 0, -1)) or sview_eq(kind, sview("ExternCContextDecl", 0, -1)) or sview_eq(kind, sview("NamespaceDecl", 0, -1)) or sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1)) or sview_eq(kind, sview("ClassTemplatePartialSpecializationDecl", 0, -1)) or sview_eq(kind, sview("FunctionTemplateDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasTemplateDecl", 0, -1))
+
+    def ast_json_node_has_dependency_id(text: sview, start: i64, ids: AstDependencySet) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        return true if ast_dependency_set_contains(ids, ast_json_decl_id(text, start))
+        return false if not ast_json_dependency_wrapper_kind(ast_json_object_kind(text, start))
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1)) and (string_view_index(text, value_start) == 123 or string_view_index(text, value_start) == 91):
+                return true if ast_json_node_has_dependency_id(text, value_start, ids)
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false

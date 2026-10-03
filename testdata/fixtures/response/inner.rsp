@@ -1,0 +1,1 @@
+-I"../quoted include" -MD -MF response-generated.d -MT "quoted target" -MQ "quoted target" -MJ response-generated.json -serialize-diagnostics response-generated.dia -save-temps -ftime-trace -c ../compile_command_quoted.c -o response-generated.o

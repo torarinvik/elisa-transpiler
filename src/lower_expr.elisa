@@ -1,148 +1,406 @@
 extend CTranslator:
-    def typed_resolve_decl(ctx: mutable TypedContext&, referenced: JsonValue) -> TypedDeclInfo can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_type_spelling_identifier_byte(byte: i64) -> bool:
+        return true if byte >= 65 and byte <= 90
+        return true if byte >= 97 and byte <= 122
+        return true if byte >= 48 and byte <= 57
+        return byte == 95
+
+    def typed_type_spelling_has_word(type_name: sview, word: sview) -> bool:
+        return false if word.len == 0 or type_name.len < word.len
+        for start in 0..<(type_name.len - word.len + 1) |type_name, word|:
+            matches: mutable bool = true
+            for offset in 0..<word.len |type_name, word, start, matches|:
+                matches <- false if string_view_index(type_name, start + offset) != string_view_index(word, offset)
+            continue if not matches
+            has_left_boundary: bool = start == 0 or not typed_type_spelling_identifier_byte(string_view_index(type_name, start - 1))
+            end: i64 = start + word.len
+            has_right_boundary: bool = end == type_name.len or not typed_type_spelling_identifier_byte(string_view_index(type_name, end))
+            return true if has_left_boundary and has_right_boundary
+        return false
+
+    def typed_float_builtin_kind(name: sview) -> i64:
+        # These are Clang builtin identities, not target-library names.  C's
+        # NAN/INFINITY macros commonly lower to these functions, and emitting
+        # them as externals would make the result depend on a platform libm
+        # symbol that may not exist (for example __builtin_huge_valf).
+        return 1 if sview_eq(name, sview("__builtin_nan", 0, -1)) or sview_eq(name, sview("__builtin_nanf", 0, -1)) or sview_eq(name, sview("__builtin_nans", 0, -1)) or sview_eq(name, sview("__builtin_nansf", 0, -1))
+        return 2 if sview_eq(name, sview("__builtin_inf", 0, -1)) or sview_eq(name, sview("__builtin_inff", 0, -1)) or sview_eq(name, sview("__builtin_huge_val", 0, -1)) or sview_eq(name, sview("__builtin_huge_valf", 0, -1))
+        return 0
+    def typed_pointer_difference_element_size[@r](ctx: TypedContext[r]&, pointer_type: sview) -> i64:
+        return clang_target_type_size_bytes(ctx.target_abi, pointer_type) if c_type_pointer_count(pointer_type) > 1
+        element_type: sview = c_type_pointer_base(pointer_type)
+        return 1 if sview_eq(c_type_without_qualifiers(element_type), sview("void", 0, -1))
+        enum_index: i64 = typed_enum_index(ctx, element_type)
+        return clang_target_type_size_bytes(ctx.target_abi, ctx.enums[enum_index.usize()].underlying_type) if enum_index >= 0
+        record_index: i64 = typed_record_index(ctx, element_type)
+        return typed_record_layout_size_bytes(ctx, element_type) if record_index >= 0
+        return clang_target_type_size_bytes(ctx.target_abi, element_type)
+    def typed_ast_expression_has_effect[@r](node: JsonValueHandle[r]) -> bool:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("CallExpr", 0, -1)):
+            return false if ast_child_count(node) > 0 and typed_float_builtin_kind(typed_callee_name(ast_child(node, 0))) > 0
+            return true
+        return true if sview_eq(kind, sview("CXXMemberCallExpr", 0, -1)) or sview_eq(kind, sview("CXXOperatorCallExpr", 0, -1)) or sview_eq(kind, sview("CXXConstructExpr", 0, -1)) or sview_eq(kind, sview("VAArgExpr", 0, -1))
+        return true if typed_type_spelling_has_word(ast_qual_type(node), sview("volatile", 0, -1))
+        return true if sview_eq(kind, sview("CompoundAssignOperator", 0, -1))
+        if sview_eq(kind, sview("BinaryOperator", 0, -1)):
+            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            return true if sview_eq(opcode, sview("=", 0, -1)) or sview_eq(opcode, sview("+=", 0, -1)) or sview_eq(opcode, sview("-=", 0, -1)) or sview_eq(opcode, sview("*=", 0, -1)) or sview_eq(opcode, sview("/=", 0, -1)) or sview_eq(opcode, sview("%=", 0, -1)) or sview_eq(opcode, sview("&=", 0, -1)) or sview_eq(opcode, sview("|=", 0, -1)) or sview_eq(opcode, sview("^=", 0, -1)) or sview_eq(opcode, sview("<<=", 0, -1)) or sview_eq(opcode, sview(">>=", 0, -1))
+        if sview_eq(kind, sview("UnaryOperator", 0, -1)):
+            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            return true if sview_eq(opcode, sview("++", 0, -1)) or sview_eq(opcode, sview("--", 0, -1))
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node|:
+                return true if typed_ast_expression_has_effect(ast_child(node, index))
+        return false
+    def typed_ast_expression_has_volatile_access[@r](node: JsonValueHandle[r]) -> bool:
+        return true if typed_type_spelling_has_word(ast_qual_type(node), sview("volatile", 0, -1))
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node|:
+                return true if typed_ast_expression_has_volatile_access(ast_child(node, index))
+        return false
+    def typed_ast_has_effectful_comma[@r](node: JsonValueHandle[r]) -> bool:
+        if sview_eq(ast_kind(node), sview("BinaryOperator", 0, -1)) and sview_eq(ast_string(ast_field(node, sview("opcode", 0, -1))), sview(",", 0, -1)) and ast_child_count(node) > 1:
+            return true if typed_ast_expression_has_effect(ast_child(node, 0))
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node|:
+                return true if typed_ast_has_effectful_comma(ast_child(node, index))
+        return false
+    def typed_resolve_decl[@r](ctx: mutable TypedContext[r]&, referenced: JsonValueHandle[r]) -> TypedDeclInfo[r] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         decl_id: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
         if decl_id.len > 0:
             for index in 0..<ctx.decl_infos.count |ctx, decl_id|:
-                info: TypedDeclInfo = ctx.decl_infos[index]
+                info: TypedDeclInfo[r] = ctx.decl_infos[index]
                 return info if sview_eq(info.id, decl_id)
-        declaration: mutable JsonValue = ast_find_decl_by_id(ctx.root, decl_id) if decl_id.len > 0 else JsonValue.Null
-        declaration <- referenced if declaration == JsonValue.Null
-        info: TypedDeclInfo = TypedDeclInfo{id: decl_id, is_user: ast_is_user_declaration(declaration, ctx.source), is_extern: sview_eq(ast_string(ast_field(declaration, sview("storageClass", 0, -1))), sview("extern", 0, -1))}
+        declaration: mutable JsonValueHandle[r] = typed_decl_lookup(ctx, decl_id) if decl_id.len > 0 else json_handle_null(ctx.root)
+        declaration <- referenced if json_handle_is_null(declaration)
+        canonical_id: sview = typed_decl_canonical_id(ctx, decl_id)
+        declaration_slot: i64 = typed_decl_index_find_slot(ctx, decl_id)
+        has_previous: bool = declaration_slot >= 0 and ctx.declaration_index[declaration_slot.usize()].previous_id.len > 0
+        is_canonical: bool = canonical_id.len == 0 or sview_eq(decl_id, canonical_id)
+        info: TypedDeclInfo[r] = TypedDeclInfo[r]{id: decl_id, is_canonical: is_canonical, has_previous: has_previous, is_user: ast_is_user_declaration(declaration, ctx.source), is_extern: sview_eq(ast_string(ast_field(declaration, sview("storageClass", 0, -1))), sview("extern", 0, -1)), cpp_iterator_map_type: sview("", 0, 0), cpp_iterator_decl_name: sview("", 0, 0), cpp_iterator_decl_line: 0}
         ctx.decl_infos.push(info) if decl_id.len > 0
         return info
-
-    def typed_lower_expr(ctx: mutable TypedContext&, node: JsonValue) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_lower_expr_impl[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         kind: sview = ast_kind(node)
-        type_name: mutable sview = ast_c_type(node)
+        type_name: mutable sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # Clang's desugared iterator spelling contains implementation pointers
+        # from libc++/libstdc++. Once ownership is proven from find/end, use a
+        # pointer-free semantic marker so C pointer nullability logic cannot
+        # mistake an iterator value for a nullable pointer.
+        if ctx.source_language_is_cxx and cpp_unordered_map_iterator_map_type(ctx, node).len > 0 can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            type_name <- sview("__cpp_unordered_map_iterator", 0, -1)
         if ast_is_comment_node(node):
             # Defensive fallback for declaration paths where Clang places a
             # documentation node in the initializer slot. No executable value
             # exists; `zeroed` matches C's static/default initialization and is
             # harmless for callers that subsequently discard the metadata node.
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("StringLiteral", 0, -1)):
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.String, text: ast_string(ast_field(node, sview("value", 0, -1))), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.String, text: ast_string(ast_field(node, sview("value", 0, -1))), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if sview_eq(kind, sview("CXXBoolLiteralExpr", 0, -1)):
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("1", 0, -1) if ast_bool(ast_field(node, sview("value", 0, -1))) else sview("0", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if sview_eq(kind, sview("PredefinedExpr", 0, -1)):
+            return typed_lower_expr(ctx, ast_child(node, 0)) if ast_child_count(node) > 0
+        if sview_eq(kind, sview("CXXConstructExpr", 0, -1)):
+            count: i64 = ast_child_count(node)
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if count <= 0
+            return typed_lower_expr(ctx, ast_child(node, 0)) if count == 1
+        if sview_eq(kind, sview("ExprWithCleanups", 0, -1)) or sview_eq(kind, sview("MaterializeTemporaryExpr", 0, -1)):
+            # These are C++ lifetime wrappers around the value expression. Elisa's
+            # region/lifetime model owns the resulting value, so the wrappers have
+            # no independent expression-level representation.
+            return typed_lower_expr(ctx, ast_child(node, 0)) if ast_child_count(node) > 0
+        if sview_eq(kind, sview("VAArgExpr", 0, -1)):
+            # Clang represents `va_arg(ap, T)` as a dedicated expression rather than
+            # a callable builtin. Preserve the storage operand as a normal child and
+            # let the emitter spell the typed Elisa primitive; this keeps the lowering
+            # independent of a fixed list of C vararg element types.
+            if ast_child_count(node) != 1:
+                typed_record_unsupported(ctx, node, sview("variadic argument storage", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            storage: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1 if storage < 0
+            args_start: i64 = ctx.expr_children.count.i64()
+            ctx.expr_children.push(storage)
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: sview("__builtin_va_arg", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: 1, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("IntegerLiteral", 0, -1)) or sview_eq(kind, sview("FloatingLiteral", 0, -1)):
             literal_kind: TypedExprKind = TypedExprKind.Integer if sview_eq(kind, sview("IntegerLiteral", 0, -1)) else TypedExprKind.Floating
-            return typed_push_expr(ctx, TypedExpr{kind: literal_kind, text: ast_string(ast_field(node, sview("value", 0, -1))), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: literal_kind, text: ast_string(ast_field(node, sview("value", 0, -1))), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("CharacterLiteral", 0, -1)):
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Character, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: typed_number(ast_field(node, sview("value", 0, -1)))}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Character, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: typed_number(ast_field(node, sview("value", 0, -1)))}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("DeclRefExpr", 0, -1)):
-            referenced: JsonValue = ast_field(node, sview("referencedDecl", 0, -1))
+            referenced: JsonValueHandle[r] = ast_field(node, sview("referencedDecl", 0, -1))
             name: mutable sview = ast_name(referenced)
             name <- ast_name(node) if name.len == 0
             if name.len == 0:
                 typed_record_unsupported(ctx, node, sview("expression", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1
-            if sview_eq(ast_kind(referenced), sview("FunctionDecl", 0, -1)) and typed_user_function_index(ctx, name) < 0:
-                typed_add_external(ctx, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            # Clang's DeclRefExpr type intentionally drops the reference
+            # qualifier (`T*&` is exposed as `T*`) because the source
+            # expression denotes the referred value. Retain the parameter's
+            # declaration spelling in the translated IR so the emitter can
+            # select the pointer slot for a C++ reference-to-pointer.
+            if sview_eq(ast_kind(referenced), sview("ParmVarDecl", 0, -1)):
+                referenced_type: sview = typed_c_type(ctx, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if c_type_reference_count(referenced_type) > 0:
+                    type_name <- referenced_type
+            if sview_eq(ast_kind(referenced), sview("FunctionDecl", 0, -1)):
+                typed_resolve_decl(ctx, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_add_external(ctx, name, type_name, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             is_external_decl: mutable bool = false
             if sview_eq(ast_kind(referenced), sview("VarDecl", 0, -1)):
-                decl_info: TypedDeclInfo = typed_resolve_decl(ctx, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                decl_info: TypedDeclInfo[r] = typed_resolve_decl(ctx, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 is_external_decl <- decl_info.is_extern or not decl_info.is_user
             if sview_eq(ast_kind(referenced), sview("VarDecl", 0, -1)) and is_external_decl and typed_global_index(ctx, safe_identifier(name)) < 0:
                 typed_add_external_global(ctx, name, type_name)
             enum_name: mutable sview = sview("", 0, 0)
             enum_marker: mutable i64 = 0
+            name_third: mutable i64 = -1
             if sview_eq(ast_kind(referenced), sview("EnumConstantDecl", 0, -1)):
                 enum_name <- typed_enum_const_name(ctx, name)
                 enum_value: i64 = typed_enum_const_value(ctx, name)
-                enum_marker <- 2 if enum_name.len > 0 and enum_value >= 0
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Name, text: safe_identifier(name), type_name: enum_name, lhs: -1, rhs: -1, third: enum_value, args_start: -1, args_count: 0, value: enum_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Name, text: safe_identifier(name), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: enum_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                # -1 is a valid enum value. Use an explicit membership check
+                # rather than treating the old numeric sentinel as absence.
+                enum_marker <- 2 if enum_name.len > 0 and typed_enum_const_known(ctx, name)
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Name, text: safe_identifier(name), type_name: enum_name, lhs: -1, rhs: -1, third: enum_value, args_start: -1, args_count: 0, value: enum_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(ast_kind(referenced), sview("VarDecl", 0, -1)):
+                referenced_id: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
+                canonical_id: mutable sview = typed_decl_canonical_id(ctx, referenced_id)
+                canonical_id <- referenced_id if canonical_id.len == 0
+                global_index: i64 = typed_global_declaration_index(ctx, canonical_id)
+                if global_index >= 0 and ctx.globals[global_index.usize()].project_private:
+                    enum_marker <- 3
+                    name_third <- global_index
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Name, text: safe_identifier(name), type_name: type_name, lhs: -1, rhs: -1, third: name_third, args_start: -1, args_count: 0, value: enum_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)):
             cast_kind: sview = ast_cast_kind(node)
             if sview_eq(cast_kind, sview("NullToPointer", 0, -1)):
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             operand: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if operand < 0:
                 return -1
+            operand_type: sview = typed_expr_at(ctx, operand).type_name
+            if (sview_eq(type_name, sview("bool", 0, -1)) or sview_eq(type_name, sview("_Bool", 0, -1))) and (c_type_is_integer(operand_type) or c_type_is_enum(operand_type)) and not (sview_eq(operand_type, sview("bool", 0, -1)) or sview_eq(operand_type, sview("_Bool", 0, -1))):
+                zero: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: operand_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("!=", 0, -1), type_name: type_name, lhs: operand, rhs: zero, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            source_is_numeric: bool = (c_type_is_integer(operand_type) or c_type_is_floating(operand_type)) and not c_type_is_enum(operand_type)
+            target_is_numeric: bool = (c_type_is_integer(type_name) or c_type_is_floating(type_name)) and not c_type_is_enum(type_name)
+            if source_is_numeric and target_is_numeric and not sview_eq(clang_target_type_abi_base(ctx.target_abi, operand_type), clang_target_type_abi_base(ctx.target_abi, type_name)):
+                # Clang's implicit arithmetic casts encode the conversions C
+                # applies before operators (notably integer promotions). Keep
+                # that target type in the typed IR; reconstructing it later
+                # from the unconverted source operands loses cases such as a
+                # signed narrow value promoted before comparison.
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Cast, text: type_name, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if sview_eq(cast_kind, sview("ArrayToPointerDecay", 0, -1)) or sview_eq(cast_kind, sview("FunctionToPointerDecay", 0, -1)) or sview_eq(cast_kind, sview("BitCast", 0, -1)):
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Cast, text: type_name, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Cast, text: type_name, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return operand
         if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
             return typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("ImplicitValueInitExpr", 0, -1)):
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("CXXStaticCastExpr", 0, -1)):
             cast_kind: sview = ast_cast_kind(node)
             if sview_eq(cast_kind, sview("NullToPointer", 0, -1)):
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             operand: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if operand < 0:
                 return -1
+            operand_type: sview = typed_expr_at(ctx, operand).type_name
+            source_is_numeric: bool = (c_type_is_integer(operand_type) or c_type_is_floating(operand_type)) and not c_type_is_enum(operand_type)
+            target_is_numeric: bool = (c_type_is_integer(type_name) or c_type_is_floating(type_name)) and not c_type_is_enum(type_name)
+            if source_is_numeric and target_is_numeric:
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Cast, text: type_name, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if sview_eq(cast_kind, sview("BitCast", 0, -1)) or sview_eq(cast_kind, sview("PointerToIntegral", 0, -1)) or sview_eq(cast_kind, sview("IntegralToPointer", 0, -1)) or sview_eq(cast_kind, sview("NoOp", 0, -1)):
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Cast, text: type_name, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Cast, text: type_name, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return operand
         if sview_eq(kind, sview("BinaryOperator", 0, -1)) or sview_eq(kind, sview("CompoundAssignOperator", 0, -1)):
+            lhs_expression_start: usize = ctx.exprs.count
+            lhs_child_start: usize = ctx.expr_children.count
+            raw_opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            iterator_member: mutable sview = sview("", 0, 0)
+            iterator_member <- cpp_unordered_map_iterator_member(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ast_child_count(node) > 0
+            if sview_eq(kind, sview("BinaryOperator", 0, -1)) and sview_eq(raw_opcode, sview("=", 0, -1)) and sview_eq(iterator_member, sview("second", 0, -1)) and ast_child_count(node) > 1:
+                iterator_arrow: mutable JsonValueHandle[r] = cpp_unwrap_expression(ast_child(ast_child(node, 0), 0))
+                iterator: i64 = typed_lower_expr(ctx, ast_child(iterator_arrow, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                assigned_value: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if iterator < 0 or assigned_value < 0:
+                    return -1
+                callee: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Member, text: sview("set_second", 0, -1), type_name: type_name, lhs: iterator, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                args_start: i64 = ctx.expr_children.count.i64()
+                ctx.expr_children.push(assigned_value)
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: sview("set_second", 0, -1), type_name: type_name, lhs: callee, rhs: -1, third: -1, args_start: args_start, args_count: 1, value: 1}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(kind, sview("BinaryOperator", 0, -1)) and sview_eq(raw_opcode, sview(",", 0, -1)) and ast_child_count(node) > 0 and typed_ast_expression_has_volatile_access(ast_child(node, 0)):
+                typed_record_unsupported(ctx, node, sview("volatile comma operand sequencing", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
             lhs: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1 if lhs < 0
+            if sview_eq(kind, sview("BinaryOperator", 0, -1)) and (sview_eq(raw_opcode, sview("&&", 0, -1)) or sview_eq(raw_opcode, sview("||", 0, -1))):
+                decisive_left: mutable i64 = 0
+                if typed_eval_integer_constant(ctx, lhs, decisive_left) and ((sview_eq(raw_opcode, sview("&&", 0, -1)) and decisive_left == 0) or (sview_eq(raw_opcode, sview("||", 0, -1)) and decisive_left != 0)):
+                    # The constant lhs was lowered only to prove that the RHS
+                    # is unreachable. Remove its now-unreferenced IR nodes
+                    # before returning the folded boolean value.
+                    typed_truncate_exprs(ctx, lhs_expression_start)
+                    ctx.expr_children.count <- lhs_child_start
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("0", 0, -1) if sview_eq(raw_opcode, sview("&&", 0, -1)) else sview("1", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if ast_child_count(node) > 1 and typed_ast_has_effectful_comma(ast_child(node, 1)):
+                    typed_record_unsupported(ctx, node, sview("comma effects in short-circuit right operand", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
             rhs: mutable i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if lhs < 0 or rhs < 0:
                 return -1
-            raw_opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            if sview_eq(raw_opcode, sview("-", 0, -1)) and typed_expr_is_pointer(ctx, lhs) and typed_expr_is_pointer(ctx, rhs):
+                left_pointer_type: sview = typed_expr_at(ctx, lhs).type_name
+                element_size: i64 = typed_pointer_difference_element_size(ctx, left_pointer_type)
+                if element_size <= 0:
+                    typed_record_unsupported(ctx, node, sview("pointer subtraction element layout", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
             if sview_eq(raw_opcode, sview(",", 0, -1)):
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Sequence, text: sview(",", 0, -1), type_name: type_name, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sequence, text: sview(",", 0, -1), type_name: type_name, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             opcode: mutable sview = typed_surface_opcode(raw_opcode)
             if sview_eq(opcode, sview("=", 0, -1)):
                 opcode <- sview("<-", 0, -1)
             else:
                 compound: sview = typed_binary_assignment_opcode(opcode)
                 if compound.len > 0:
-                    rhs <- typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: compound, type_name: type_name, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    rhs <- typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: compound, type_name: type_name, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     opcode <- sview("<-", 0, -1)
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: opcode, type_name: type_name, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: opcode, type_name: type_name, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            # C assignment expressions evaluate to the assigned value. Mark
+            # simple assignments separately so value emission can preserve
+            # both the store and its result through a generated Elisa helper.
+            # Compound assignments still need dedicated single-evaluation
+            # lowering before they can use the same value-context path.
+            sequence_mode: mutable i64 = 0
+            if sview_eq(raw_opcode, sview("=", 0, -1)):
+                sequence_mode <- 5
+            elif sview_eq(kind, sview("CompoundAssignOperator", 0, -1)):
+                compound_id: i64 = typed_compound_assignment_value_id(raw_opcode)
+                sequence_mode <- 6 + compound_id if compound_id >= 0
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sequence, text: sview(",", 0, -1), type_name: type_name, lhs: assignment, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: sequence_mode}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if sview_eq(raw_opcode, sview("=", 0, -1)) or sview_eq(kind, sview("CompoundAssignOperator", 0, -1))
+            return assignment
         if sview_eq(kind, sview("UnaryOperator", 0, -1)):
             opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            if ctx.source_language_is_cxx and sview_eq(opcode, sview("&", 0, -1)) and ast_child_count(node) > 0:
+                element_member: sview = cpp_unordered_map_iterator_element_member(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if element_member.len > 0:
+                    typed_record_unsupported(ctx, node, sview("unordered_map iterator element address-taking", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
             if sview_eq(opcode, sview("*", 0, -1)):
-                pointer_node: JsonValue = ast_strip_condition(ast_child(node, 0))
+                pointer_node: JsonValueHandle[r] = ast_strip_condition(ast_child(node, 0))
                 pointer_opcode: sview = ast_string(ast_field(pointer_node, sview("opcode", 0, -1)))
                 if sview_eq(ast_kind(pointer_node), sview("UnaryOperator", 0, -1)) and (sview_eq(pointer_opcode, sview("++", 0, -1)) or sview_eq(pointer_opcode, sview("--", 0, -1))):
                     pointer: i64 = typed_lower_expr(ctx, ast_child(pointer_node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     side_effect: i64 = typed_lower_expr(ctx, pointer_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    zero: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    zero: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     if pointer < 0 or side_effect < 0:
                         return -1
-                    return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: type_name, lhs: pointer, rhs: zero, third: 2 if ast_bool(ast_field(pointer_node, sview("isPostfix", 0, -1))) else 1, args_start: -1, args_count: 0, value: side_effect}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: type_name, lhs: pointer, rhs: zero, third: 2 if ast_bool(ast_field(pointer_node, sview("isPostfix", 0, -1))) else 1, args_start: -1, args_count: 0, value: side_effect}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             operand: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if operand < 0:
                 return -1
             if sview_eq(opcode, sview("++", 0, -1)) or sview_eq(opcode, sview("--", 0, -1)):
-                delta: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                # The increment amount is an integer even when the operand is
+                # a pointer.  Keeping the pointer type here makes the emitter
+                # mistake pointer +/- 1 for pointer subtraction and produces
+                # a raw-address cast instead of Elisa's indexed pointer form.
+                delta: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 arithmetic: sview = sview("+", 0, -1) if sview_eq(opcode, sview("++", 0, -1)) else sview("-", 0, -1)
-                value: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: arithmetic, type_name: type_name, lhs: operand, rhs: delta, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: type_name, lhs: operand, rhs: value, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                value: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: arithmetic, type_name: type_name, lhs: operand, rhs: delta, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: type_name, lhs: operand, rhs: value, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                postfix: bool = ast_bool(ast_field(node, sview("isPostfix", 0, -1)))
+                increment_mode: i64 = 1 if sview_eq(opcode, sview("++", 0, -1)) and postfix else 2 if sview_eq(opcode, sview("++", 0, -1)) else 3 if postfix else 4
+                helper_marker: i64 = increment_mode if typed_increment_scalar_key(ctx, type_name).len > 0 else 0
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sequence, text: sview(",", 0, -1), type_name: type_name, lhs: assignment, rhs: operand if postfix else value, third: -1, args_start: -1, args_count: 0, value: helper_marker}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if sview_eq(opcode, sview("*", 0, -1)):
-                zero: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: type_name, lhs: operand, rhs: zero, third: 0, args_start: -1, args_count: 0, value: -1}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                zero: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: type_name, lhs: operand, rhs: zero, third: 0, args_start: -1, args_count: 0, value: -1}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if sview_eq(opcode, sview("!", 0, -1)):
                 operand_type: sview = ast_qual_type(ast_child(node, 0))
                 if sview_eq(operand_type, sview("_Bool", 0, -1)) or sview_eq(operand_type, sview("bool", 0, -1)):
-                    return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Unary, text: sview("not", 0, -1), type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                comparison_rhs: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: operand_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if sview_find_byte(operand_type, 42) >= 0 else typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: sview("==", 0, -1), type_name: sview("_Bool", 0, -1), lhs: operand, rhs: comparison_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Unary, text: opcode, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Unary, text: sview("not", 0, -1), type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                comparison_rhs: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: operand_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if sview_find_byte(operand_type, 42) >= 0 else typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("==", 0, -1), type_name: sview("_Bool", 0, -1), lhs: operand, rhs: comparison_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Unary, text: opcode, type_name: type_name, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("UnaryExprOrTypeTraitExpr", 0, -1)):
             trait: sview = ast_string(ast_field(node, sview("name", 0, -1)))
-            if not sview_eq(trait, sview("sizeof", 0, -1)):
+            is_sizeof: bool = sview_eq(trait, sview("sizeof", 0, -1))
+            is_alignof: bool = sview_eq(trait, sview("alignof", 0, -1))
+            if not is_sizeof and not is_alignof:
                 typed_record_unsupported(ctx, node, sview("expression", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1
-            operand_type: sview = ast_c_type(ast_child(node, 0)) if ast_child_count(node) > 0 else ast_type_object_c_type(ast_field(node, sview("argType", 0, -1)))
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Sizeof, text: sview("", 0, 0), type_name: operand_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            type_operand: bool = not json_handle_is_null(ast_field(node, sview("argType", 0, -1)))
+            operand_type: sview = typed_resolve_type_aliases(ctx, ast_type_object_c_type(ast_field(node, sview("argType", 0, -1)))) if type_operand else typed_c_type(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if c_type_has_nonconstant_array_bound(operand_type):
+                typed_record_unsupported(ctx, node, sview("variable-length sizeof/alignment bound evaluation", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            record_layout_index: i64 = typed_record_layout_query_index(ctx, operand_type)
+            if is_alignof and (record_layout_index < 0 or typed_clang_alignof_bytes(ctx, operand_type) <= 0):
+                typed_record_unsupported(ctx, node, sview("record alignment layout", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            if is_sizeof and record_layout_index >= 0 and typed_clang_sizeof_bytes(ctx, operand_type) < 0:
+                typed_record_unsupported(ctx, node, sview("record size layout", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sizeof, text: sview("", 0, 0), type_name: operand_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1 if is_alignof else 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if sview_eq(kind, sview("CXXOperatorCallExpr", 0, -1)):
+            operator_name: sview = ast_expr_name(ast_child(node, 0)) if ast_child_count(node) > 0 else sview("", 0, 0)
+            # Clang lowers an assignment to a C++ record's implicitly generated
+            # `operator=` as a call expression. Elisa assignments are statements,
+            # so retain the same IR shape used for C's ordinary struct assignment
+            # and let the existing place emitter handle fields and array elements.
+            if sview_eq(operator_name, sview("operator=", 0, -1)) and ast_child_count(node) >= 3:
+                lhs: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                rhs: i64 = typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if lhs >= 0 and rhs >= 0:
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: type_name, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(operator_name, sview("operator[]", 0, -1)) and ast_child_count(node) >= 3:
+                object: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                key: i64 = typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if object >= 0 and key >= 0:
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: type_name, lhs: object, rhs: key, third: 0, args_start: -1, args_count: 0, value: -1}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(operator_name, sview("operator->", 0, -1)) and ast_child_count(node) >= 2:
+                if cpp_type_is_unordered_map_iterator(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                    return typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_record_unsupported(ctx, node, sview("C++ operator-> outside unordered_map iterators", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            if (sview_eq(operator_name, sview("operator==", 0, -1)) or sview_eq(operator_name, sview("operator!=", 0, -1))) and ast_child_count(node) >= 3:
+                left_map_type: sview = cpp_unordered_map_iterator_map_type(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                right_map_type: sview = cpp_unordered_map_iterator_map_type(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if left_map_type.len == 0:
+                    typed_record_unsupported(ctx, node, sview("unordered_map iterator comparison left operand", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
+                if right_map_type.len == 0:
+                    typed_record_unsupported(ctx, node, sview("unordered_map iterator comparison right operand", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
+                if not sview_eq(left_map_type, right_map_type):
+                    typed_record_unsupported(ctx, node, sview("unordered_map iterator comparison across different map types", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
+                left: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                right: i64 = typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if left >= 0 and right >= 0:
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("==", 0, -1) if sview_eq(operator_name, sview("operator==", 0, -1)) else sview("!=", 0, -1), type_name: type_name, lhs: left, rhs: right, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_record_unsupported(ctx, node, operator_name if operator_name.len > 0 else sview("C++ operator expression", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
         if sview_eq(kind, sview("ArraySubscriptExpr", 0, -1)):
             base: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             index: mutable i64 = -1
             side_effect: mutable i64 = -1
             side_effect_order: mutable i64 = 0
-            index_node: JsonValue = ast_child(node, 1)
-            index_core: JsonValue = ast_strip_condition(index_node)
+            index_node: JsonValueHandle[r] = ast_child(node, 1)
+            index_core: JsonValueHandle[r] = ast_strip_condition(index_node)
             if sview_eq(ast_kind(index_core), sview("UnaryOperator", 0, -1)) and (sview_eq(ast_string(ast_field(index_core, sview("opcode", 0, -1))), sview("++", 0, -1)) or sview_eq(ast_string(ast_field(index_core, sview("opcode", 0, -1))), sview("--", 0, -1))):
                 index_operand: i64 = typed_lower_expr(ctx, ast_child(index_core, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 index <- index_operand
                 side_effect <- typed_lower_expr(ctx, index_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 if not ast_bool(ast_field(index_core, sview("isPostfix", 0, -1))):
-                    delta: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: ast_qual_type(index_core), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    delta: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: ast_qual_type(index_core), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     arithmetic: sview = sview("+", 0, -1) if sview_eq(ast_string(ast_field(index_core, sview("opcode", 0, -1))), sview("++", 0, -1)) else sview("-", 0, -1)
-                    index <- typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: arithmetic, type_name: ast_qual_type(index_core), lhs: index_operand, rhs: delta, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    index <- typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: arithmetic, type_name: ast_qual_type(index_core), lhs: index_operand, rhs: delta, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     side_effect_order <- 1
                 else:
                     side_effect_order <- 2
@@ -150,28 +408,48 @@ extend CTranslator:
                 index <- typed_lower_expr(ctx, index_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if base < 0 or index < 0:
                 return -1
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: type_name, lhs: base, rhs: index, third: side_effect_order, args_start: -1, args_count: 0, value: side_effect}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: type_name, lhs: base, rhs: index, third: side_effect_order, args_start: -1, args_count: 0, value: side_effect}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("ConditionalOperator", 0, -1)):
+            condition_expression_start: usize = ctx.exprs.count
+            condition_child_start: usize = ctx.expr_children.count
             condition: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            when_true: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            when_false: i64 = typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            if condition < 0 or when_true < 0 or when_false < 0:
+            if condition < 0:
                 return -1
             # A constant condition has no evaluation side effect. Select its
-            # arm in the IR so generated Elisa does not retain a noisy
-            # conditional expression for enum/flag and literal predicates.
+            # arm in the IR without retaining temporary condition nodes or
+            # lowering the unselected arm. This keeps the executable IR free
+            # of dead nodes while preserving the source's chosen value.
             constant: mutable i64 = 0
             if typed_eval_integer_constant(ctx, condition, constant):
-                return when_true if constant != 0 else when_false
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Conditional, text: sview("", 0, 0), type_name: type_name, lhs: condition, rhs: when_true, third: when_false, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_rewrite_conditional_prunes <- typed_rewrite_conditional_prunes + 1
+                if typed_rewrite_explanations_enabled:
+                    cli_emit_rewrite_event_node(ctx, node, sview("conditional-arm-pruning", 0, -1), sview("applied", 0, -1), sview("proof", 0, -1), sview("target-abi-integer-constant-condition", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_truncate_exprs(ctx, condition_expression_start)
+                ctx.expr_children.count <- condition_child_start
+                return typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if constant != 0
+                return typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if typed_ast_has_effectful_comma(ast_child(node, 1)) or typed_ast_has_effectful_comma(ast_child(node, 2)):
+                typed_record_unsupported(ctx, node, sview("comma effects in conditional expression arm", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            when_true: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            when_false: i64 = typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if when_true < 0 or when_false < 0:
+                return -1
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Conditional, text: sview("", 0, 0), type_name: type_name, lhs: condition, rhs: when_true, third: when_false, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("MemberExpr", 0, -1)):
+            iterator_member: sview = cpp_unordered_map_iterator_member(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if iterator_member.len > 0:
+                arrow: JsonValueHandle[r] = cpp_unwrap_expression(ast_child(node, 0))
+                iterator: i64 = typed_lower_expr(ctx, ast_child(arrow, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                callee: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Member, text: safe_identifier(iterator_member), type_name: type_name, lhs: iterator, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: safe_identifier(iterator_member), type_name: type_name, lhs: callee, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             base: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             name: sview = ast_name(node)
             if base < 0 or name.len == 0:
                 typed_record_unsupported(ctx, node, sview("expression", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1
             arrow: i64 = 1 if ast_bool(ast_field(node, sview("isArrow", 0, -1))) else 0
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Member, text: safe_identifier(name), type_name: type_name, lhs: base, rhs: -1, third: -1, args_start: -1, args_count: 0, value: arrow}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Member, text: safe_identifier(name), type_name: type_name, lhs: base, rhs: -1, third: -1, args_start: -1, args_count: 0, value: arrow}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("InitListExpr", 0, -1)):
             lowered_args: mutable darray[i64] = []
             count: mutable i64 = ast_initializer_child_count(node)
@@ -179,7 +457,7 @@ extend CTranslator:
             count <- capacity if capacity > 0 and count > capacity
             if count >= 0:
                 for index in 0..<count |ctx, node, lowered_args|:
-                    initializer_child: JsonValue = ast_initializer_child(node, index)
+                    initializer_child: JsonValueHandle[r] = ast_initializer_child(node, index)
                     continue if ast_is_comment_node(initializer_child)
                     child: i64 = typed_lower_expr(ctx, initializer_child) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     if child < 0:
@@ -188,28 +466,106 @@ extend CTranslator:
             args_start: i64 = ctx.expr_children.count.i64()
             for index in 0..<lowered_args.count |ctx, lowered_args|:
                 ctx.expr_children.push(lowered_args[index])
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Aggregate, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: ctx.expr_children.count.i64() - args_start, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Aggregate, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: ctx.expr_children.count.i64() - args_start, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if sview_eq(kind, sview("CXXMemberCallExpr", 0, -1)):
+            if ast_child_count(node) > 0:
+                callee_node: JsonValueHandle[r] = ast_child(node, 0)
+                callee_name: mutable sview = ast_expr_name(callee_node)
+                callee_name <- ast_name(callee_node) if callee_name.len == 0
+                callee_index: i64 = typed_lower_expr(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if callee_index >= 0 and callee_name.len > 0:
+                    lowered_args: mutable darray[i64] = []
+                    for index in 1..<ast_child_count(node) |ctx, node, lowered_args|:
+                        argument: i64 = typed_lower_expr(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        if argument < 0:
+                            return -1
+                        lowered_args.push(argument)
+                    args_start: i64 = ctx.expr_children.count.i64()
+                    for index in 0..<lowered_args.count |ctx, lowered_args|:
+                        ctx.expr_children.push(lowered_args[index])
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: safe_identifier(callee_name), type_name: type_name, lhs: callee_index, rhs: -1, third: -1, args_start: args_start, args_count: lowered_args.count.i64(), value: 1}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_record_unsupported(ctx, node, sview("expression", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
         if sview_eq(kind, sview("CallExpr", 0, -1)):
-            callee_node: JsonValue = ast_child(node, 0)
+            callee_node: JsonValueHandle[r] = ast_child(node, 0)
             callee_name: mutable sview = typed_callee_name(callee_node)
             callee_index: mutable i64 = -1
+            header_inline_call: bool = ctx.project_mode and ast_callee_is_header_inline(ctx, callee_node, ctx.source)
             varargs_start: bool = sview_eq(callee_name, sview("__builtin_va_start", 0, -1))
             varargs_end: bool = sview_eq(callee_name, sview("__builtin_va_end", 0, -1))
+            varargs_copy: bool = sview_eq(callee_name, sview("__builtin_va_copy", 0, -1))
+            float_builtin_kind: i64 = typed_float_builtin_kind(callee_name)
+            if float_builtin_kind > 0:
+                # The payload passed to __builtin_nan* is a C encoding string
+                # rather than a runtime value. Elisa currently has no source
+                # spelling for payload-selected NaNs, so lower the generic C
+                # value to the compiler's IEEE quiet-NaN/infinity expression.
+                # Do not register an external: these builtins are pure and
+                # have no required ABI symbol.
+                required_arguments: i64 = 1 if float_builtin_kind == 1 else 0
+                if ast_child_count(node) - 1 != required_arguments:
+                    typed_record_unsupported(ctx, node, sview("floating builtin arguments", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: sview("__builtin_nan_value", 0, -1) if float_builtin_kind == 1 else sview("__builtin_inf_value", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            # `__builtin_expect(value, hint)` is a compiler branch-prediction
+            # annotation. It has the value and side effects of its first
+            # argument and has no linkable runtime symbol. Clang's second
+            # argument is required to be a compile-time expectation, so it is
+            # safe to erase the annotation at the source translation boundary.
+            if sview_eq(callee_name, sview("__builtin_expect", 0, -1)) and ast_child_count(node) > 1:
+                return typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            # `__builtin_object_size` is a Clang/GCC compile-time query, not a
+            # library call. Preserve it only when the complete fixed-size
+            # object is explicit; unknown pointer provenance is diagnosed
+            # rather than emitted as an unresolved or guessed function call.
+            if sview_eq(callee_name, sview("__builtin_object_size", 0, -1)) and ast_child_count(node) > 2:
+                # The mode is a required compile-time argument, not a runtime
+                # expression. Read Clang's evaluated ConstantExpr value
+                # directly so it never pollutes the executable expression IR.
+                mode: i64 = ast_compile_time_integer(ast_child(node, 2), -1)
+                if mode < 0 or mode > 3:
+                    typed_record_unsupported(ctx, node, sview("object-size mode", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
+                object_type: sview = typed_builtin_object_size_type(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                member_array: JsonValueHandle[r] = typed_builtin_object_size_member(ast_child(node, 1))
+                if not json_handle_is_null(member_array):
+                    if mode == 0 or mode == 2:
+                        parent_type: sview = typed_builtin_object_size_enclosing_record(ctx, member_array) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        if parent_type.len == 0:
+                            typed_record_unsupported(ctx, node, sview("object-size enclosing object", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            return -1
+                        return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.ObjectSizeRemaining, text: safe_identifier(ast_name(member_array)), type_name: parent_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if object_type.len > 0:
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sizeof, text: sview("", 0, 0), type_name: object_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if typed_builtin_object_size_is_unknown_pointer(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                    # C specifies (size_t)-1 when modes 0/1 cannot determine a
+                    # maximum extent, and zero for modes 2/3 when the minimum
+                    # extent is unknown. Spell the maximum from the Clang
+                    # result type width, not from the host translator width.
+                    unknown_size: sview = sview("0", 0, -1) if mode >= 2 else sview("255", 0, -1) if clang_target_type_integer_width(ctx.target_abi, type_name) == 8 else sview("65535", 0, -1) if clang_target_type_integer_width(ctx.target_abi, type_name) == 16 else sview("4294967295", 0, -1) if clang_target_type_integer_width(ctx.target_abi, type_name) == 32 else sview("18446744073709551615", 0, -1) if clang_target_type_integer_width(ctx.target_abi, type_name) == 64 and clang_target_type_is_unsigned(ctx.target_abi, type_name) else sview("", 0, 0)
+                    if unknown_size.len > 0:
+                        return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: unknown_size, type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_record_unsupported(ctx, node, sview("object-size result width", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1
+                typed_record_unsupported(ctx, ast_strip_condition(ast_child(node, 1)), sview("object-size pointer provenance", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
             named_function_callee: bool = ast_callee_is_named_function(callee_node)
             defined_named_function: bool = named_function_callee and ast_has_child(ast_find_function(ctx.root, callee_name), sview("CompoundStmt", 0, -1))
             # A named function pointer is still an expression callee. Lower it
             # as such instead of registering the local variable as an external
             # C function. This preserves typed indirect calls without adding a
             # target-library table.
-            if not varargs_start and not varargs_end and (callee_name.len == 0 or (c_type_is_function_pointer(ast_c_type(callee_node)) and not defined_named_function)):
+            callee_type: sview = typed_c_type(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if not varargs_start and not varargs_end and not varargs_copy and (callee_name.len == 0 or (c_type_is_function_pointer(callee_type) and not defined_named_function and not header_inline_call and not (ctx.source_language_is_cxx and named_function_callee))):
                 callee_index <- typed_lower_expr(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1 if callee_index < 0
             callee_name <- sview("llvm_va_start", 0, -1) if varargs_start
             callee_name <- sview("llvm_va_end", 0, -1) if varargs_end
-            typed_add_external(ctx, callee_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if callee_index < 0 and callee_name.len > 0 and not varargs_start and not varargs_end
+            callee_name <- sview("llvm_va_copy", 0, -1) if varargs_copy
+            typed_add_external(ctx, callee_name, callee_type, ast_callee_referenced_decl(callee_node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if callee_index < 0 and callee_name.len > 0 and not varargs_start and not varargs_end and not varargs_copy and not defined_named_function
             lowered_args: mutable darray[i64] = []
             first_argument: mutable i64 = 1
-            last_argument: mutable i64 = 2 if varargs_start or varargs_end else ast_child_count(node)
+            last_argument: mutable i64 = 2 if varargs_start or varargs_end else 3 if varargs_copy else ast_child_count(node)
             if last_argument > first_argument:
                 index: mutable i64 = first_argument
                 while index < last_argument |ctx, node, index, callee_name, lowered_args|:
@@ -221,282 +577,17 @@ extend CTranslator:
             args_start: i64 = ctx.expr_children.count.i64()
             for index in 0..<lowered_args.count |ctx, lowered_args|:
                 ctx.expr_children.push(lowered_args[index])
-            return typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Call, text: safe_identifier(callee_name), type_name: type_name, lhs: callee_index, rhs: -1, third: -1, args_start: args_start, args_count: ctx.expr_children.count.i64() - args_start, value: 1 if callee_index >= 0 else 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            call_value: mutable i64 = 2 if header_inline_call else (1 if callee_index >= 0 else 0)
+            if ctx.source_language_is_cxx and callee_index < 0 and ast_callee_is_named_function(callee_node):
+                selected_declaration: JsonValueHandle[r] = ast_callee_referenced_decl(callee_node)
+                selected_type: sview = typed_c_type(ctx, selected_declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                selected_declaration_id: sview = typed_decl_identity(ctx, selected_declaration)
+                selected_signature: i64 = typed_user_function_signature_index(ctx, selected_declaration_id, callee_name, selected_type)
+                if selected_signature >= 0:
+                    call_value <- typed_call_signature_value(selected_signature, header_inline_call)
+                else:
+                    selected_external: i64 = typed_external_signature_index(ctx, callee_name, selected_type, selected_declaration_id)
+                    call_value <- typed_call_external_value(selected_external, header_inline_call) if selected_external >= 0
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: safe_identifier(callee_name), type_name: type_name, lhs: callee_index, rhs: -1, third: -1, args_start: args_start, args_count: ctx.expr_children.count.i64() - args_start, value: call_value}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         typed_record_unsupported(ctx, node, sview("expression", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         return -1
-
-
-    def typed_make_block(ctx: mutable TypedContext&, children: darray[i64]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        children_start: i64 = ctx.stmt_children.count.i64()
-        for index in 0..<children.count |ctx, children|:
-            ctx.stmt_children.push(children[index])
-        return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: children_start, children_count: children.count.i64(), name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    struct TypedCondition:
-        expression: i64
-        assignment: i64
-        postfix: bool
-
-    def ast_strip_condition(node: JsonValue) -> JsonValue:
-        kind: sview = ast_kind(node)
-        if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
-            return ast_strip_condition(ast_child(node, 0))
-        return node
-
-    def typed_lower_condition(ctx: mutable TypedContext&, node: JsonValue) -> TypedCondition can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        stripped: JsonValue = ast_strip_condition(node)
-        if sview_eq(ast_kind(stripped), sview("UnaryOperator", 0, -1)):
-            opcode: sview = ast_string(ast_field(stripped, sview("opcode", 0, -1)))
-            if (sview_eq(opcode, sview("--", 0, -1)) or sview_eq(opcode, sview("++", 0, -1))) and ast_bool(ast_field(stripped, sview("isPostfix", 0, -1))):
-                operand: i64 = typed_lower_expr(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                assignment: i64 = typed_lower_expr(ctx, stripped) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                return TypedCondition{expression: operand, assignment: assignment, postfix: true}
-        if sview_eq(ast_kind(stripped), sview("BinaryOperator", 0, -1)):
-            opcode: sview = ast_string(ast_field(stripped, sview("opcode", 0, -1)))
-            left: JsonValue = ast_strip_condition(ast_child(stripped, 0))
-            if (sview_eq(opcode, sview("==", 0, -1)) or sview_eq(opcode, sview("!=", 0, -1))) and sview_eq(ast_kind(left), sview("BinaryOperator", 0, -1)) and sview_eq(ast_string(ast_field(left, sview("opcode", 0, -1))), sview("=", 0, -1)):
-                assigned_lhs: i64 = typed_lower_expr(ctx, ast_child(left, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                assigned_rhs: i64 = typed_lower_expr(ctx, ast_child(left, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                comparison_rhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                assignment: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: ast_qual_type(left), lhs: assigned_lhs, rhs: assigned_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                expression: i64 = typed_push_expr(ctx, TypedExpr{kind: TypedExprKind.Binary, text: opcode, type_name: ast_qual_type(stripped), lhs: assigned_lhs, rhs: comparison_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                return TypedCondition{expression: expression, assignment: assignment, postfix: false}
-        expression: i64 = typed_lower_expr(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        return TypedCondition{expression: expression, assignment: -1, postfix: false}
-
-    def typed_find_label(ctx: TypedContext&, id: sview) -> JsonValue:
-        for index in 0..<ctx.labels.count |ctx, id|:
-            label: TypedLabel = ctx.labels[index]
-            if sview_eq(label.id, id):
-                return label.node
-        return JsonValue.Null
-
-    def typed_label_index(ctx: TypedContext&, id: sview) -> i64:
-        for index in 0..<ctx.labels.count |ctx, id|:
-            return index if sview_eq(ctx.labels[index].id, id)
-        return -1
-
-    def typed_switch_stmt_terminates(ctx: TypedContext&, index: i64) -> bool:
-        return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if statement.kind == TypedStmtKind.SwitchBreak or statement.kind == TypedStmtKind.Return or statement.kind == TypedStmtKind.Goto
-        if statement.kind == TypedStmtKind.Block:
-            return false if statement.children_count == 0
-            return typed_switch_stmt_terminates(ctx, ctx.stmt_children[(statement.children_start + statement.children_count - 1).usize()])
-        if statement.kind == TypedStmtKind.If:
-            return statement.aux2 >= 0 and typed_switch_stmt_terminates(ctx, statement.aux) and typed_switch_stmt_terminates(ctx, statement.aux2)
-        if statement.kind == TypedStmtKind.Label:
-            return typed_switch_stmt_terminates(ctx, statement.expr)
-        return false
-
-    def typed_parse_integer_literal(text: sview, result: mutable i64&) -> bool:
-        return false if text.len == 0
-        cursor: mutable i64 = 0
-        sign: mutable i64 = 1
-        if string_view_index(text, 0) == 45:
-            sign <- -1
-            cursor <- 1
-        base: mutable i64 = 10
-        if cursor + 1 < text.len and string_view_index(text, cursor) == 48 and (string_view_index(text, cursor + 1) == 120 or string_view_index(text, cursor + 1) == 88):
-            base <- 16
-            cursor <- cursor + 2
-        value: mutable i64 = 0
-        digits: mutable i64 = 0
-        while cursor < text.len:
-            byte: i64 = string_view_index(text, cursor)
-            digit: mutable i64 = byte - 48
-            if byte >= 97 and byte <= 102:
-                digit <- byte - 97 + 10
-            elif byte >= 65 and byte <= 70:
-                digit <- byte - 65 + 10
-            if digit < 0 or digit >= base:
-                break
-            value <- value * base + digit
-            digits <- digits + 1
-            cursor <- cursor + 1
-        return false if digits == 0
-        result[0] <- value * sign
-        return true
-
-    def typed_eval_integer_constant(ctx: TypedContext&, index: i64, result: mutable i64&) -> bool:
-        return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        if expression.kind == TypedExprKind.Integer:
-            return typed_parse_integer_literal(expression.text, result)
-        if expression.kind == TypedExprKind.Character:
-            result[0] <- expression.value
-            return true
-        if expression.kind == TypedExprKind.Name and expression.value == 2:
-            result[0] <- expression.third
-            return true
-        if expression.kind == TypedExprKind.Cast:
-            return typed_eval_integer_constant(ctx, expression.lhs, result)
-        if expression.kind == TypedExprKind.Unary:
-            operand: mutable i64 = 0
-            return false if not typed_eval_integer_constant(ctx, expression.lhs, operand)
-            if sview_eq(expression.text, sview("+", 0, -1)):
-                result[0] <- operand
-                return true
-            if sview_eq(expression.text, sview("-", 0, -1)):
-                result[0] <- 0 - operand
-                return true
-            if sview_eq(expression.text, sview("~", 0, -1)):
-                result[0] <- ~operand
-                return true
-            return false
-        if expression.kind != TypedExprKind.Binary:
-            return false
-        left: mutable i64 = 0
-        right: mutable i64 = 0
-        return false if not typed_eval_integer_constant(ctx, expression.lhs, left) or not typed_eval_integer_constant(ctx, expression.rhs, right)
-        if sview_eq(expression.text, sview("+", 0, -1)):
-            result[0] <- left + right
-        elif sview_eq(expression.text, sview("-", 0, -1)):
-            result[0] <- left - right
-        elif sview_eq(expression.text, sview("*", 0, -1)):
-            result[0] <- left * right
-        elif sview_eq(expression.text, sview("/", 0, -1)):
-            return false if right == 0
-            result[0] <- left / right
-        elif sview_eq(expression.text, sview("%", 0, -1)):
-            return false if right == 0
-            result[0] <- left % right
-        elif sview_eq(expression.text, sview("<<", 0, -1)):
-            result[0] <- left << right
-        elif sview_eq(expression.text, sview(">>", 0, -1)):
-            result[0] <- left >> right
-        elif sview_eq(expression.text, sview("&", 0, -1)):
-            result[0] <- left & right
-        elif sview_eq(expression.text, sview("|", 0, -1)):
-            result[0] <- left | right
-        elif sview_eq(expression.text, sview("^", 0, -1)):
-            result[0] <- left ^ right
-        elif sview_eq(expression.text, sview("==", 0, -1)):
-            result[0] <- 1 if left == right else 0
-        elif sview_eq(expression.text, sview("!=", 0, -1)):
-            result[0] <- 1 if left != right else 0
-        elif sview_eq(expression.text, sview("<", 0, -1)):
-            result[0] <- 1 if left < right else 0
-        elif sview_eq(expression.text, sview(">", 0, -1)):
-            result[0] <- 1 if left > right else 0
-        elif sview_eq(expression.text, sview("<=", 0, -1)):
-            result[0] <- 1 if left <= right else 0
-        elif sview_eq(expression.text, sview(">=", 0, -1)):
-            result[0] <- 1 if left >= right else 0
-        elif sview_eq(expression.text, sview("and", 0, -1)):
-            result[0] <- 1 if left != 0 and right != 0 else 0
-        elif sview_eq(expression.text, sview("or", 0, -1)):
-            result[0] <- 1 if left != 0 or right != 0 else 0
-        else:
-            return false
-        return true
-
-    def typed_flush_switch_run(ctx: mutable TypedContext&, current_labels: mutable darray[JsonValue]&, current_body_nodes: mutable darray[JsonValue]&, current_is_default: bool, run_label_starts: mutable darray[i64]&, run_label_counts: mutable darray[i64]&, run_bodies: mutable darray[i64]&, run_defaults: mutable darray[bool]&, lowered_labels: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        if current_labels.count == 0 and current_body_nodes.count == 0 and not current_is_default:
-            return true
-        ctx.switch_depth <- ctx.switch_depth + 1
-        ctx.break_scopes.push(2)
-        lowered_body_nodes: mutable darray[i64] = []
-        for body_index in 0..<current_body_nodes.count |ctx, current_body_nodes, lowered_body_nodes|:
-            lowered: i64 = typed_lower_stmt(ctx, current_body_nodes[body_index]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            if lowered < 0:
-                ctx.switch_depth <- ctx.switch_depth - 1
-                _ = ctx.break_scopes.pop()
-                return false
-            lowered_body_nodes.push(lowered)
-        ctx.switch_depth <- ctx.switch_depth - 1
-        _ = ctx.break_scopes.pop()
-        lowered_body: i64 = typed_make_block(ctx, lowered_body_nodes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        run_label_starts.push(lowered_labels.count.i64())
-        run_label_counts.push(current_labels.count.i64())
-        run_bodies.push(lowered_body)
-        run_defaults.push(current_is_default)
-        for label_index in 0..<current_labels.count |ctx, current_labels, lowered_labels|:
-            label_value: i64 = typed_lower_expr(ctx, current_labels[label_index]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            if label_value < 0:
-                return false
-            lowered_labels.push(label_value)
-        current_labels <- []
-        current_body_nodes <- []
-        return true
-
-    def typed_lower_switch(ctx: mutable TypedContext&, node: JsonValue) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        subject: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-        body: JsonValue = ast_child(node, 1)
-        if subject < 0:
-            return -1
-        run_label_starts: mutable darray[i64] = []
-        run_label_counts: mutable darray[i64] = []
-        run_bodies: mutable darray[i64] = []
-        run_defaults: mutable darray[bool] = []
-        lowered_labels: mutable darray[i64] = []
-        current_labels: mutable darray[JsonValue] = []
-        current_body_nodes: mutable darray[JsonValue] = []
-        current_is_default: mutable bool = false
-        default_body: mutable i64 = -1
-
-        # Elisa has no C-style fall-through switch. Preserve the common C shape by
-        # grouping adjacent/nested labels and lowering each run to an if arm.
-        count: i64 = ast_child_count(body)
-        if count >= 0:
-            index: mutable i64 = 0
-            while index < count |ctx, body, current_labels, current_body_nodes, current_is_default, default_body, subject, index|:
-                child: JsonValue = ast_child(body, index)
-                kind: sview = ast_kind(child)
-                if sview_eq(kind, sview("CaseStmt", 0, -1)):
-                    if current_body_nodes.count > 0 or current_is_default:
-                        ok: bool = typed_flush_switch_run(ctx, current_labels, current_body_nodes, current_is_default, run_label_starts, run_label_counts, run_bodies, run_defaults, lowered_labels) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                        if not ok:
-                            return -1
-                        current_is_default <- false
-                    label_cursor: mutable JsonValue = child
-                    while sview_eq(ast_kind(label_cursor), sview("CaseStmt", 0, -1)) |label_cursor, current_labels|:
-                        current_labels.push(ast_child(label_cursor, 0))
-                        label_cursor <- ast_child(label_cursor, 1)
-                    if not ast_is_empty(label_cursor):
-                        current_body_nodes.push(label_cursor)
-                elif sview_eq(kind, sview("DefaultStmt", 0, -1)):
-                    if current_body_nodes.count > 0 or current_labels.count > 0 or current_is_default:
-                        ok: bool = typed_flush_switch_run(ctx, current_labels, current_body_nodes, current_is_default, run_label_starts, run_label_counts, run_bodies, run_defaults, lowered_labels) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                        if not ok:
-                            return -1
-                    current_labels <- []
-                    current_is_default <- true
-                    if ast_child_count(child) > 0:
-                        current_body_nodes.push(ast_child(child, 0))
-                else:
-                    if current_labels.count > 0 or current_is_default:
-                        current_body_nodes.push(child)
-                index <- index + 1
-            ok: bool = typed_flush_switch_run(ctx, current_labels, current_body_nodes, current_is_default, run_label_starts, run_label_counts, run_bodies, run_defaults, lowered_labels) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            if not ok:
-                return -1
-        switch_start: i64 = ctx.switch_cases.count.i64()
-        run_index: mutable i64 = 0
-        while run_index < run_bodies.count.i64() |ctx, run_bodies, run_index, run_label_starts, run_label_counts, lowered_labels, run_defaults, switch_start|:
-            suffix_children: mutable darray[i64] = []
-            suffix_index: mutable i64 = run_index
-            while suffix_index < run_bodies.count.i64() |ctx, run_bodies, suffix_children, suffix_index|:
-                suffix_children.push(run_bodies[suffix_index.usize()])
-                break if typed_switch_stmt_terminates(ctx, run_bodies[suffix_index.usize()])
-                suffix_index <- suffix_index + 1
-            suffix_body: i64 = typed_make_block(ctx, suffix_children) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            label_offset: i64 = run_label_starts[run_index.usize()]
-            label_count: i64 = run_label_counts[run_index.usize()]
-            for label_index in 0..<label_count |ctx, lowered_labels, label_offset, suffix_body, switch_start|:
-                value_index: i64 = lowered_labels[(label_offset + label_index).usize()]
-                constant_value: mutable i64 = 0
-                is_constant: bool = typed_eval_integer_constant(ctx, value_index, constant_value)
-                ctx.switch_cases.push(TypedSwitchCase{value: value_index, body: suffix_body, is_default: false, is_constant: is_constant, constant_value: constant_value})
-            if run_defaults[run_index.usize()]:
-                ctx.switch_cases.push(TypedSwitchCase{value: -1, body: suffix_body, is_default: true, is_constant: false, constant_value: 0})
-            run_index <- run_index + 1
-        return typed_push_stmt(ctx, TypedStmt{kind: TypedStmtKind.Switch, expr: subject, aux: -1, aux2: -1, children_start: switch_start, children_count: ctx.switch_cases.count.i64() - switch_start, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-
-    def typed_collect_labels(ctx: mutable TypedContext&, node: JsonValue) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        if sview_eq(ast_kind(node), sview("LabelStmt", 0, -1)):
-            ctx.labels.push(TypedLabel{id: ast_string(ast_field(node, sview("declId", 0, -1))), node: node})
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count |ctx, node|:
-                typed_collect_labels(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

@@ -1,0 +1,45 @@
+extend CTranslator:
+
+    def cli_default_frontend_output_limit() -> usize:
+        return 134217728.usize()
+
+    def cli_default_frontend_json_value_limit() -> usize:
+        return 1000000.usize()
+
+    def cli_parse_positive_usize(text: sview, result: mutable usize&) -> bool:
+        return false if text.len == 0
+        value: mutable i64 = 0
+        for index in 0..<text.len |text, value|:
+            byte: i64 = string_view_index(text, index)
+            return false if byte < 48 or byte > 57
+            digit: i64 = byte - 48
+            return false if value > 922337203685477580 or (value == 922337203685477580 and digit > 7)
+            value <- value * 10 + digit
+        return false if value == 0
+        result <- value.usize()
+        return true
+
+    def cli_default_frontend_timeout_seconds() -> usize:
+        return 600.usize()
+
+    def cli_parse_frontend_timeout_seconds(text: sview, result: mutable usize&) -> bool:
+        return false if text.len == 0
+        value: mutable i64 = 0
+        for index in 0..<text.len |text, value|:
+            byte: i64 = string_view_index(text, index)
+            return false if byte < 48 or byte > 57
+            digit: i64 = byte - 48
+            return false if value > 8640 or (value == 8640 and digit > 0)
+            value <- value * 10 + digit
+        return false if value == 0
+        result <- value.usize()
+        return true
+
+    def cli_emit_frontend_timeout_error(source: sview, timeout_seconds: usize) -> void can[Console, Unsafe.PointerCast, Memory.Allocate, Abort.Panic]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("elisa-c-transpiler: Clang frontend exceeded --frontend-timeout-seconds ", 0, -1))
+        append_i64(&output, timeout_seconds.i64())
+        append_view(&output, sview(" while processing ", 0, -1))
+        append_view(&output, source)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast

@@ -1,5 +1,7 @@
 int main(void)
 {
-    goto missing_label;
+    void *target = &&done;
+    goto *target;
+done:
     return 0;
 }

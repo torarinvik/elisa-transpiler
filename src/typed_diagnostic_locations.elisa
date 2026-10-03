@@ -1,0 +1,65 @@
+extend CTranslator:
+    # Clang elides `line` from many same-file AST locations while retaining a
+    # byte offset and column. Recover the line from the effective range-begin
+    # file only when needed. Cache the most recently scanned prefix so normal
+    # source-order diagnostics are linear in source size rather than rescanning
+    # the file from byte zero for each diagnostic.
+    def typed_source_line_for_offset[@r](ctx: mutable TypedContext[r]&, path: sview, offset: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return 0 if offset < 0
+        source_path: sview = path if path.len > 0 else sview(ctx.source, 0, -1)
+        resolved_path: mutable darray[u8] = []
+        return 0 if not (ast_json_resolve_path(source_path, ctx.source_working_directory, &resolved_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast)
+        resolved_view: sview = bytes_view(resolved_path)
+        scan_offset: mutable i64 = 0
+        line_number: mutable i64 = 1
+        previous_cr: mutable bool = false
+        cache_matches: bool = sview_eq(ctx.diagnostic_line_scan_path, resolved_view)
+        if cache_matches and ctx.diagnostic_line_scan_offset >= 0 and offset >= ctx.diagnostic_line_scan_offset:
+            scan_offset <- ctx.diagnostic_line_scan_offset
+            line_number <- ctx.diagnostic_line_scan_number
+            previous_cr <- ctx.diagnostic_line_scan_previous_cr
+        path_cstr: cstr = string_view_copy(resolved_view) can Memory.Allocate, Abort.Panic
+        stream: CFile? = c_fopen(path_cstr, "rb")
+        return 0 if stream == null
+        handle: CFile = stream
+        if scan_offset > 0 and c_fseek(handle, scan_offset, 0.i32()) != 0:
+            scan_offset <- 0
+            line_number <- 1
+            previous_cr <- false
+            if c_fseek(handle, 0, 0.i32()) != 0:
+                _ = c_fclose(handle)
+                return 0
+        remaining: mutable i64 = offset - scan_offset
+        chunk: mutable u8[8192] = zeroed
+        read_failed: mutable bool = false
+        while remaining > 0 |remaining, scan_offset, line_number, chunk, handle, read_failed|:
+            request: usize = 8192.usize() if remaining >= 8192 else remaining.usize()
+            count: usize = c_fread((&chunk[0]).cast[mutable void&], 1.usize(), request, handle)
+            if count == 0.usize():
+                read_failed <- true
+                break
+            for index in 0..<count |chunk, line_number|:
+                if chunk[index] == 13.u8():
+                    line_number <- line_number + 1
+                    previous_cr <- true
+                elif chunk[index] == 10.u8():
+                    line_number <- line_number + 1 if not previous_cr
+                    previous_cr <- false
+                else:
+                    previous_cr <- false
+            remaining <- remaining - count.i64()
+            scan_offset <- scan_offset + count.i64()
+        _ = c_fclose(handle)
+        return 0 if read_failed
+        if not cache_matches:
+            ctx.diagnostic_line_scan_path <- typed_copy_view_to_region(resolved_view) can Memory.Allocate, Abort.Panic
+        ctx.diagnostic_line_scan_offset <- scan_offset
+        ctx.diagnostic_line_scan_number <- line_number
+        ctx.diagnostic_line_scan_previous_cr <- previous_cr
+        return line_number
+
+    def ast_location_source_file[@r](node: JsonValueHandle[r]) -> sview @r:
+        begin: JsonValueHandle[r] = ast_field(ast_field(node, sview("range", 0, -1)), sview("begin", 0, -1))
+        expansion: JsonValueHandle[r] = ast_field(begin, sview("expansionLoc", 0, -1))
+        selected: JsonValueHandle[r] = expansion if not json_handle_is_null(expansion) else begin
+        return ast_string(ast_field(selected, sview("file", 0, -1)))

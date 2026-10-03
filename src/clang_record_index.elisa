@@ -1,0 +1,38 @@
+extend CTranslator:
+    def typed_record_index_at_location[@r](ctx: TypedContext[r]&, line: i64, column: i64) -> i64:
+        return -1 if line <= 0 or column <= 0
+        for index in 0..<ctx.records.count |ctx, line, column|:
+            record: TypedRecord[r] = ctx.records[index]
+            if record.source_line == line and record.source_column == column:
+                return index
+        return -1
+
+    def typed_record_index[@r](ctx: TypedContext[r]&, qual_type: sview) -> i64:
+        return typed_record_index(ctx, c_type_reference_base(qual_type)) if c_type_reference_count(qual_type) > 0
+        source_type: sview = c_type_named_base(qual_type)
+        for specialized in ctx.specialized_types |source_type|:
+            if sview_eq(specialized.source_type, source_type):
+                for index in 0..<ctx.records.count |ctx, specialized|:
+                    return index if sview_eq(ctx.records[index].name, specialized.emitted_name)
+        wanted: sview = safe_identifier(c_type_named_base(qual_type))
+        for index in 0..<ctx.records.count |ctx, wanted|:
+            if sview_eq(ctx.records[index].name, wanted):
+                return index
+        line: mutable i64 = 0
+        column: mutable i64 = 0
+        if typed_anonymous_type_location(qual_type, line, column):
+            return typed_record_index_at_location(ctx, line, column)
+        return -1
+
+    def typed_record_layout_unique_index[@r](ctx: TypedContext[r]&, qual_type: sview) -> i64:
+        record_index: i64 = typed_record_index(ctx, qual_type)
+        return -1 if record_index < 0
+        record: TypedRecord[r] = ctx.records[record_index.usize()]
+        for index in 0..<ctx.records.count |ctx, record_index, record|:
+            continue if index == record_index
+            candidate: TypedRecord[r] = ctx.records[index]
+            continue if not sview_eq(candidate.name, record.name)
+            same_declaration: bool = candidate.decl_id.len > 0 and record.decl_id.len > 0 and sview_eq(candidate.decl_id, record.decl_id)
+            same_source_location: bool = record.source_line > 0 and record.source_column > 0 and candidate.source_line == record.source_line and candidate.source_column == record.source_column
+            return -1 if not same_declaration and not same_source_location
+        return record_index

@@ -1,0 +1,113 @@
+extend CTranslator:
+    struct CliSource:
+        path: sview
+        canonical_path: sview
+        directory: sview
+        command: sview
+        argv_signature: sview
+        arguments: darray[sview]
+        has_arguments: bool
+        command_valid: bool
+        short_enums: bool
+
+    def cli_module_stem(source: sview) -> sview:
+        start: mutable i64 = 0
+        dot: mutable i64 = -1
+        for index in 0..<source.len |source, start, dot|:
+            start <- index + 1 if string_view_index(source, index) == 47
+            dot <- index if string_view_index(source, index) == 46
+        end: i64 = dot if dot > start else source.len
+        return string_view_prefix(string_view_suffix(source, start), end - start)
+
+    def cli_initializer_stem_equal(left: sview, right: sview) -> bool:
+        left_start: mutable i64 = 0
+        right_start: mutable i64 = 0
+        for index in 0..<left.len |left, left_start|:
+            left_start <- index + 1 if string_view_index(left, index) == 47
+        for index in 0..<right.len |right, right_start|:
+            right_start <- index + 1 if string_view_index(right, index) == 47
+        left_end: mutable i64 = left.len
+        right_end: mutable i64 = right.len
+        for index in left_start..<left.len |left, left_start, left_end|:
+            if string_view_index(left, index) == 46:
+                left_end <- index
+                break
+        for index in right_start..<right.len |right, right_start, right_end|:
+            if string_view_index(right, index) == 46:
+                right_end <- index
+                break
+        left_length: i64 = 4 if left_end <= left_start else left_end - left_start
+        right_length: i64 = 4 if right_end <= right_start else right_end - right_start
+        return false if left_length != right_length
+        for offset in 0..<left_length |left, right, left_start, right_start, left_end, right_end|:
+            left_byte: mutable i64 = string_view_index(left, left_start + offset) if left_end > left_start else 117 if offset == 0 else 110 if offset == 1 else 105 if offset == 2 else 116
+            right_byte: mutable i64 = string_view_index(right, right_start + offset) if right_end > right_start else 117 if offset == 0 else 110 if offset == 1 else 105 if offset == 2 else 116
+            left_byte <- 95 if left_byte != 95 and not ((left_byte >= 65 and left_byte <= 90) or (left_byte >= 97 and left_byte <= 122) or (left_byte >= 48 and left_byte <= 57))
+            right_byte <- 95 if right_byte != 95 and not ((right_byte >= 65 and right_byte <= 90) or (right_byte >= 97 and right_byte <= 122) or (right_byte >= 48 and right_byte <= 57))
+            return false if left_byte != right_byte
+        return true
+
+    def cli_project_source_names_conflict(left: CliSource, right: CliSource) -> bool:
+        return true if sview_eq(cli_module_stem(left.path), cli_module_stem(right.path))
+        return cli_initializer_stem_equal(left.path, right.path)
+
+    def cli_project_source_identity_equal(left: CliSource, right: CliSource) -> bool:
+        if left.canonical_path.len > 0 and right.canonical_path.len > 0:
+            return sview_eq(left.canonical_path, right.canonical_path)
+        return sview_eq(left.path, right.path) and sview_eq(left.directory, right.directory)
+
+    def cli_project_source_identity_hash(source: CliSource) -> i64:
+        if source.canonical_path.len > 0:
+            return (hash_sview(source.canonical_path) & 0x7fffffffffffffff).i64()
+        directory_hash: u64 = hash_sview(source.directory)
+        path_hash: u64 = hash_sview(source.path)
+        return ((directory_hash ^ (path_hash * 1099511628211)) & 0x7fffffffffffffff).i64()
+
+    def cli_project_path_precedes(left: sview, right: sview) -> bool:
+        shared_length: i64 = left.len if left.len < right.len else right.len
+        for index in 0..<shared_length |left, right|:
+            left_byte: i64 = string_view_index(left, index)
+            right_byte: i64 = string_view_index(right, index)
+            return left_byte < right_byte if left_byte != right_byte
+        return left.len < right.len
+
+    def cli_project_source_precedes(left: CliSource, right: CliSource) -> bool:
+        left_identity: sview = left.canonical_path if left.canonical_path.len > 0 else left.path
+        right_identity: sview = right.canonical_path if right.canonical_path.len > 0 else right.path
+        return cli_project_path_precedes(left_identity, right_identity) if not sview_eq(left_identity, right_identity)
+        return cli_project_path_precedes(left.directory, right.directory) if not sview_eq(left.directory, right.directory)
+        return cli_project_path_precedes(left.path, right.path)
+
+    def cli_sort_project_sources(sources: mutable darray[CliSource]&) -> void:
+        source_index: mutable i64 = 1
+        while source_index < sources.count.i64() |sources, source_index|:
+            selected: CliSource = sources[source_index.usize()]
+            insert_index: mutable i64 = source_index
+            while insert_index > 0 and cli_project_source_precedes(selected, sources[(insert_index - 1).usize()]) |sources, selected, insert_index|:
+                sources[insert_index.usize()] <- sources[(insert_index - 1).usize()]
+                insert_index <- insert_index - 1
+            sources[insert_index.usize()] <- selected
+            source_index <- source_index + 1
+
+    def cli_project_source_needs_suffix(sources: darray[CliSource], source_index: i64) -> bool:
+        source: CliSource = sources[source_index.usize()]
+        for other_index in 0..<sources.count.i64() |sources, source_index, source|:
+            continue if other_index == source_index
+            return true if cli_project_source_names_conflict(source, sources[other_index.usize()])
+        return false
+
+    def cli_project_name_hash_collision(sources: darray[CliSource], first: mutable i64&, second: mutable i64&) -> bool:
+        for left_index in 0..<sources.count.i64() |sources, first, second|:
+            left: CliSource = sources[left_index.usize()]
+            for right_index in left_index + 1..<sources.count.i64() |sources, left, left_index, first, second|:
+                right: CliSource = sources[right_index.usize()]
+                if cli_project_source_identity_equal(left, right) or (cli_project_source_names_conflict(left, right) and cli_project_source_identity_hash(left) == cli_project_source_identity_hash(right)):
+                    first <- left_index
+                    second <- right_index
+                    return true
+        return false
+
+    def cli_module_disambiguator(out: mutable darray[u8]&, sources: darray[CliSource], source_index: i64) -> void:
+        return if not cli_project_source_needs_suffix(sources, source_index)
+        append_view(out, sview("_", 0, -1))
+        append_i64(out, cli_project_source_identity_hash(sources[source_index.usize()]))

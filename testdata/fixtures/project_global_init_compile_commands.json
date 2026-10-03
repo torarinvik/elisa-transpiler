@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_global_init_main.c","command":"clang -std=c11 -c testdata/fixtures/project_global_init_main.c"},
+  {"directory":".","file":"testdata/fixtures/project_global_init.c","command":"clang -std=c11 -c testdata/fixtures/project_global_init.c"}
+]

@@ -1,0 +1,4 @@
+def main() -> i32:
+    nan_value: f64 = 0.0 / 0.0
+    infinity_value: f64 = 1.0 / 0.0
+    return 0 if nan_value != nan_value and infinity_value > 0.0 else 1

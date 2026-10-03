@@ -1,0 +1,592 @@
+extend CTranslator:
+    def ast_json_skip_string(text: sview, start: i64) -> i64:
+        cursor: mutable i64 = start + 1
+        while cursor < text.len:
+            # This scanner is on the hot path for every projection pass. The
+            # bounds are established by the loop, so read the mapped byte
+            # directly instead of calling the general-purpose view helper for
+            # every character in a header-heavy AST.
+            byte: i64 = text.data[cursor.usize()].i64()
+            if byte == 92:
+                cursor <- cursor + 2
+            elif byte == 34:
+                return cursor + 1
+            else:
+                cursor <- cursor + 1
+        return text.len
+
+    def ast_json_skip_value(text: sview, start: i64) -> i64:
+        cursor: mutable i64 = start
+        byte: mutable i64 = text.data[cursor.usize()].i64() if cursor < text.len else -1
+        return ast_json_skip_string(text, cursor) if byte == 34
+        if byte == 123 or byte == 91:
+            depth: mutable i64 = 0
+            while cursor < text.len:
+                byte <- text.data[cursor.usize()].i64()
+                if byte == 34:
+                    cursor <- ast_json_skip_string(text, cursor)
+                else:
+                    depth <- depth + 1 if byte == 123 or byte == 91
+                    depth <- depth - 1 if byte == 125 or byte == 93
+                    cursor <- cursor + 1
+                    return cursor if depth == 0
+            return text.len
+        while cursor < text.len:
+            byte <- text.data[cursor.usize()].i64()
+            break if byte == 44 or byte == 93 or byte == 125 or byte == 32 or byte == 9 or byte == 10 or byte == 13
+            cursor <- cursor + 1
+        return cursor
+
+    def ast_json_skip_space(text: sview, start: i64) -> i64:
+        cursor: mutable i64 = start
+        while cursor < text.len:
+            byte: i64 = text.data[cursor.usize()].i64()
+            break if byte != 32 and byte != 9 and byte != 10 and byte != 13
+            cursor <- cursor + 1
+        return cursor
+
+    def ast_json_key_is(text: sview, start: i64, stop: i64, wanted: sview) -> bool:
+        return stop > start + 1 and sview_eq(string_view_slice(text, start + 1, stop - 1), wanted)
+
+    def ast_json_location_matches(text: sview, start: i64, source: sview, canonical_source: sview, working_directory: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        has_direct_file: mutable bool = false
+        included_from_start: mutable i64 = -1
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("file", 0, -1)):
+                has_direct_file <- true
+                path_matches: bool = ast_json_path_matches(text, value_start, ast_json_skip_string(text, value_start), source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                return true if path_matches
+            if ast_json_key_is(text, key_start, key_stop, sview("spellingLoc", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("expansionLoc", 0, -1)):
+                nested_location_matches: bool = ast_json_location_matches(text, value_start, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                return true if nested_location_matches
+            if ast_json_key_is(text, key_start, key_stop, sview("includedFrom", 0, -1)):
+                # For declarations from a directly included C/C++ implementation
+                # Clang can omit the implementation path and leave only
+                # `includedFrom: <main source>`. Treat that edge as source
+                # provenance only when the location itself has no direct file.
+                # A normal header location has its own `file` and must not become
+                # source-owned merely because it was included by the source.
+                included_from_start <- value_start
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return ast_json_location_matches(text, included_from_start, source, canonical_source, working_directory) if not has_direct_file and included_from_start >= 0
+        return false
+
+    def ast_json_location_has_origin(text: sview, start: i64) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            return true if ast_json_key_is(text, key_start, key_stop, sview("spellingLoc", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("expansionLoc", 0, -1))
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_json_location_has_included_from(text: sview, start: i64) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            return true if ast_json_key_is(text, key_start, key_stop, sview("includedFrom", 0, -1))
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_json_range_has_offset(text: sview, start: i64) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("begin", 0, -1)):
+                return ast_json_object_has_offset(text, value_start)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_json_object_has_offset(text: sview, start: i64) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            return true if ast_json_key_is(text, key_start, key_stop, sview("offset", 0, -1))
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_json_type_token_is_ignored(token: sview) -> bool:
+        return sview_eq(token, sview("const", 0, -1)) or sview_eq(token, sview("volatile", 0, -1)) or sview_eq(token, sview("restrict", 0, -1)) or sview_eq(token, sview("struct", 0, -1)) or sview_eq(token, sview("union", 0, -1)) or sview_eq(token, sview("class", 0, -1)) or sview_eq(token, sview("signed", 0, -1)) or sview_eq(token, sview("unsigned", 0, -1)) or sview_eq(token, sview("short", 0, -1)) or sview_eq(token, sview("long", 0, -1)) or sview_eq(token, sview("int", 0, -1)) or sview_eq(token, sview("char", 0, -1)) or sview_eq(token, sview("void", 0, -1)) or sview_eq(token, sview("float", 0, -1)) or sview_eq(token, sview("double", 0, -1)) or sview_eq(token, sview("bool", 0, -1)) or sview_eq(token, sview("_Bool", 0, -1)) or sview_eq(token, sview("size_t", 0, -1)) or sview_eq(token, sview("ssize_t", 0, -1)) or sview_eq(token, sview("time_t", 0, -1))
+
+    def ast_json_add_type_candidate(names: mutable darray[sview]&, candidate: sview) -> void:
+        return if candidate.len == 0 or ast_json_type_token_is_ignored(candidate) or sview_starts_with(candidate, sview("__", 0, -1))
+        for existing in names |names, candidate|:
+            return if sview_eq(existing, candidate)
+        names.push(candidate)
+
+    def ast_json_collect_type_candidate(text: sview, start: i64, stop: i64, names: mutable darray[sview]&) -> void:
+        return if stop <= start + 1
+        type_name: sview = string_view_slice(text, start + 1, stop - 1)
+        token_start: mutable i64 = -1
+        for index in 0..<type_name.len |type_name, token_start|:
+            byte: i64 = string_view_index(type_name, index)
+            is_identifier: bool = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+            if is_identifier and token_start < 0:
+                token_start <- index
+            elif not is_identifier and token_start >= 0:
+                candidate: sview = string_view_slice(type_name, token_start, index)
+                if not ast_json_type_token_is_ignored(candidate):
+                    ast_json_add_type_candidate(names, candidate)
+                    return
+                token_start <- -1
+        if token_start >= 0:
+            ast_json_add_type_candidate(names, string_view_suffix(type_name, token_start))
+
+    def ast_json_location_is_main_source(text: sview, start: i64, source: sview, canonical_source: sview, working_directory: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        # A relative project include and the main source can share a directory.
+        # Keep their provenance distinct when Clang omits later `file` fields.
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("file", 0, -1)) and string_view_index(text, value_start) == 34:
+                return ast_json_path_is_main_source(text, value_start, value_stop, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            if ast_json_key_is(text, key_start, key_stop, sview("spellingLoc", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("expansionLoc", 0, -1)):
+                return true if (ast_json_location_is_main_source(text, value_start, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast)
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_json_node_source_state(text: sview, start: i64, source: sview, canonical_source: sview, working_directory: sview, inherited_source: bool, inherited_external: bool, inherited_project_include: bool, classify_project_include_path: bool) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        # Clang omits `file` for nodes in the main file and identifies them by
+        # an offset-only range instead. Match both forms so source expressions
+        # such as `struct termios raw` can pull in the complete system record
+        # they use without retaining every system declaration.
+        return 0 if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        has_location_file: mutable bool = false
+        has_origin: mutable bool = false
+        has_included_from: mutable bool = false
+        path_matches: mutable bool = false
+        project_include_location: mutable bool = false
+        main_source_location: mutable bool = false
+        range_start: mutable i64 = -1
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("loc", 0, -1)):
+                has_location_file <- ast_json_location_has_file(text, value_start)
+                has_origin <- ast_json_location_has_origin(text, value_start)
+                has_included_from <- ast_json_location_has_included_from(text, value_start)
+                path_matches <- ast_json_location_matches(text, value_start, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                if classify_project_include_path:
+                    project_include_location <- ast_json_location_is_relative(text, value_start)
+                    main_source_location <- ast_json_location_is_main_source(text, value_start, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast if project_include_location
+            elif ast_json_key_is(text, key_start, key_stop, sview("range", 0, -1)):
+                range_start <- value_start
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        has_explicit_provenance: bool = has_location_file or has_origin
+        # Once a parent declaration has explicit external provenance, a nested
+        # location such as `includedFrom: <main-file>` must not promote the
+        # child back into source ownership. Clang uses that shape for local
+        # declarations inside an included helper body. A direct file match is
+        # still authoritative for a later top-level source sibling after an
+        # external sibling established the inherited context.
+        # Clang commonly prints `file` only on the first declaration after it
+        # enters an included source file. Later siblings carry only
+        # `includedFrom: <main source>`. Preserve provenance only after an
+        # explicit relative project-file transition; main-file siblings and
+        # ambiguous external declarations remain fail-closed.
+        if has_included_from and not has_location_file:
+            return 8 if inherited_project_include
+            return 4
+        return 8 if project_include_location and not main_source_location
+        return 8 if inherited_project_include and path_matches and not classify_project_include_path
+        return 3 if path_matches and (not inherited_external or has_location_file)
+        return 4 if inherited_external
+        # A range offset proves membership in some file in Clang's source
+        # manager, not ownership by the main translation unit. Once traversal
+        # entered a directly included project implementation, keep sparse
+        # descendants in that implementation's provenance; otherwise every
+        # expression with an offset can seed dependencies as if it came from
+        # the user's main source file.
+        return 8 if inherited_project_include and range_start >= 0 and ast_json_range_has_offset(text, range_start)
+        return 3 if path_matches
+        return 4 if has_explicit_provenance
+        # `includedFrom` identifies a declaration originating in an included
+        # file even when Clang omits that file's own path. Do not let an
+        # earlier source sibling turn this location into main-file content.
+        return 4 if has_included_from
+        return 3 if range_start >= 0 and ast_json_range_has_offset(text, range_start)
+        return 1 if inherited_source
+        return 0
+
+    def ast_json_node_is_used_function(text: sview, start: i64, source: sview, canonical_source: sview, working_directory: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        kind_match: mutable bool = false
+        has_name: mutable bool = false
+        used_match: mutable bool = false
+        range_start: mutable i64 = -1
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: mutable i64 = value_start
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                value_stop <- ast_json_skip_string(text, value_start)
+                kind_match <- ast_json_key_is(text, value_start, value_stop, sview("FunctionDecl", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("name", 0, -1)):
+                value_stop <- ast_json_skip_string(text, value_start)
+                has_name <- value_stop > value_start + 1
+            elif ast_json_key_is(text, key_start, key_stop, sview("isUsed", 0, -1)):
+                value_stop <- ast_json_skip_value(text, value_start)
+                used_match <- sview_eq(string_view_slice(text, value_start, value_stop), sview("true", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("range", 0, -1)):
+                range_start <- value_start
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return kind_match and has_name and (used_match or ast_json_range_has_source_macro_expansion(text, range_start, source, canonical_source, working_directory))
+
+    def ast_json_referenced_enum_constant_name(text: sview, start: i64) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        kind_match: mutable bool = false
+        name: mutable sview = sview("", 0, 0)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                kind_match <- ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("EnumConstantDecl", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("name", 0, -1)):
+                name <- string_view_slice(text, value_start + 1, value_stop - 1)
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return name if kind_match else sview("", 0, 0)
+
+    def ast_json_node_has_enum_constant(text: sview, start: i64, names: darray[sview]) -> bool:
+        return false if start >= text.len
+        first: i64 = string_view_index(text, start)
+        if first == 91:
+            cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+            while cursor < text.len and string_view_index(text, cursor) != 93:
+                return true if ast_json_node_has_enum_constant(text, cursor, names)
+                cursor <- ast_json_skip_value(text, cursor)
+                cursor <- ast_json_skip_space(text, cursor)
+                cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+                cursor <- ast_json_skip_space(text, cursor)
+            return false
+        return false if first != 123
+        kind_match: mutable bool = false
+        name: mutable sview = sview("", 0, 0)
+        inner_start: mutable i64 = -1
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                kind_match <- ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("EnumConstantDecl", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("name", 0, -1)):
+                name <- string_view_slice(text, value_start + 1, value_stop - 1)
+            elif ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1)):
+                inner_start <- value_start if string_view_index(text, value_start) == 123 or string_view_index(text, value_start) == 91
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        if kind_match:
+            for candidate in names:
+                return true if sview_eq(candidate, name)
+        # Declaration containment in Clang's AST is represented by `inner`.
+        # Searching location/type metadata as well is both redundant and very
+        # expensive for standard-library headers, where a single top-level
+        # record can contain a large graph of unrelated JSON objects.
+        return inner_start >= 0 and ast_json_node_has_enum_constant(text, inner_start, names)
+
+    def ast_json_node_has_referenced_enum_constant(text: sview, start: i64) -> bool:
+        return false if start >= text.len
+        first: i64 = string_view_index(text, start)
+        if first == 91:
+            cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+            while cursor < text.len and string_view_index(text, cursor) != 93:
+                return true if ast_json_node_has_referenced_enum_constant(text, cursor)
+                cursor <- ast_json_skip_value(text, cursor)
+                cursor <- ast_json_skip_space(text, cursor)
+                cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+                cursor <- ast_json_skip_space(text, cursor)
+            return false
+        return false if first != 123
+        kind_match: mutable bool = false
+        referenced: mutable bool = false
+        inner_start: mutable i64 = -1
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                kind_match <- ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("EnumConstantDecl", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("isReferenced", 0, -1)):
+                referenced <- sview_eq(string_view_slice(text, value_start, value_stop), sview("true", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1)):
+                inner_start <- value_start if string_view_index(text, value_start) == 123 or string_view_index(text, value_start) == 91
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return true if kind_match and referenced
+        return inner_start >= 0 and ast_json_node_has_referenced_enum_constant(text, inner_start)
+
+    def ast_json_node_is_named_record(text: sview, start: i64, names: darray[sview]) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        kind_match: mutable bool = false
+        has_name: mutable bool = false
+        cxx_struct_or_union: mutable bool = false
+        cxx_kind: mutable bool = false
+        name_start: mutable i64 = -1
+        name_stop: mutable i64 = -1
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: mutable i64 = value_start
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                value_stop <- ast_json_skip_string(text, value_start)
+                kind_match <- ast_json_key_is(text, value_start, value_stop, sview("RecordDecl", 0, -1))
+                cxx_kind <- ast_json_key_is(text, value_start, value_stop, sview("CXXRecordDecl", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("name", 0, -1)):
+                value_stop <- ast_json_skip_string(text, value_start)
+                has_name <- value_stop > value_start + 1
+                name_start <- value_start + 1
+                name_stop <- value_stop - 1
+            elif ast_json_key_is(text, key_start, key_stop, sview("tagUsed", 0, -1)):
+                value_stop <- ast_json_skip_string(text, value_start)
+                cxx_struct_or_union <- ast_json_key_is(text, value_start, value_stop, sview("struct", 0, -1)) or ast_json_key_is(text, value_start, value_stop, sview("union", 0, -1))
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false if not has_name or (cxx_kind and not cxx_struct_or_union) or (not kind_match and not cxx_kind)
+        record_name: sview = string_view_slice(text, name_start, name_stop)
+        for candidate in names |record_name, names|:
+            return true if sview_eq(record_name, candidate)
+        return false
+
+    def ast_json_location_is_relative(text: sview, start: i64) -> bool:
+        # Project headers are commonly reported with relative spellings such as
+        # `./include/foo.h`. Keep this test structural: absolute paths and
+        # Clang's angle-bracket pseudo-files remain outside the project view.
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("file", 0, -1)) and value_stop > value_start + 1:
+                path: sview = string_view_slice(text, value_start + 1, value_stop - 1)
+                return path.len > 0 and string_view_index(path, 0) != 47 and string_view_index(path, 0) != 60
+            if ast_json_key_is(text, key_start, key_stop, sview("spellingLoc", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("expansionLoc", 0, -1)):
+                return true if ast_json_location_is_relative(text, value_start)
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_json_node_is_project_local_type(text: sview, start: i64) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        type_match: mutable bool = false
+        location_start: mutable i64 = -1
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                type_match <- ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("RecordDecl", 0, -1)) or ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("CXXRecordDecl", 0, -1)) or ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("EnumDecl", 0, -1)) or ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("TypedefDecl", 0, -1)) or ast_json_key_is(text, value_start, ast_json_skip_string(text, value_start), sview("TypeAliasDecl", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("loc", 0, -1)):
+                location_start <- value_start
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return type_match and location_start >= 0 and ast_json_location_is_relative(text, location_start)
+
+    def ast_json_project_include_type(kind: sview) -> bool:
+        return sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1)) or sview_eq(kind, sview("TypedefDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasDecl", 0, -1))
+
+    def ast_json_range_has_source_macro_expansion(text: sview, range_start: i64, source: sview, canonical_source: sview, working_directory: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return false if range_start < 0 or range_start >= text.len or string_view_index(text, range_start) != 123
+        begin_start: mutable i64 = -1
+        cursor: mutable i64 = ast_json_skip_space(text, range_start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            begin_start <- value_start if ast_json_key_is(text, key_start, key_stop, sview("begin", 0, -1))
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false if begin_start < 0 or string_view_index(text, begin_start) != 123
+        expansion_start: mutable i64 = -1
+        expansion_value_start: mutable i64 = 0
+        cursor <- ast_json_skip_space(text, begin_start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            expansion_value_start <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            expansion_value_start <- ast_json_skip_space(text, expansion_value_start)
+            expansion_start <- expansion_value_start if ast_json_key_is(text, key_start, key_stop, sview("expansionLoc", 0, -1))
+            cursor <- ast_json_skip_value(text, expansion_value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false if expansion_start < 0 or not ast_json_object_has_offset(text, expansion_start)
+        return true if (ast_json_location_matches(text, expansion_start, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast)
+        # Clang omits the file when the expansion is in the main file. A
+        # header-origin expansion carries either its own path or includedFrom.
+        return not ast_json_location_has_file(text, expansion_start) and not ast_json_location_has_included_from(text, expansion_start)
+
+    def ast_json_node_is_user(text: sview, start: i64, source: cstr, canonical_source: sview, working_directory: sview, names: darray[sview], enum_names: darray[sview], dependency_ids: AstDependencySet, inherited_source: bool, inherited_external: bool, inherited_project_include: bool) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        source_view: sview = sview(source, 0, -1)
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        has_location_file: mutable bool = false
+        has_origin: mutable bool = false
+        has_included_from: mutable bool = false
+        location_matches: mutable bool = false
+        range_start: mutable i64 = -1
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("loc", 0, -1)):
+                has_location_file <- ast_json_location_has_file(text, value_start)
+                has_origin <- ast_json_location_has_origin(text, value_start)
+                has_included_from <- ast_json_location_has_included_from(text, value_start)
+                location_matches <- ast_json_location_matches(text, value_start, source_view, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            elif ast_json_key_is(text, key_start, key_stop, sview("range", 0, -1)):
+                range_start <- value_start
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        # LinkageSpecDecl is only a wrapper. Retaining every wrapper would
+        # pull complete unused system-header subtrees into large C++ units;
+        # source location and declaration-ID evidence already retains a
+        # wrapper when it owns a source declaration or a referenced child.
+        # An external declaration may share a spelling with a source type.  Its
+        # layout must be retained through the ID/dependency closure, not by the
+        # source-name fallback; otherwise an unrelated external record such as
+        # an unused header helper can leak into the projected unit.
+        # `includedFrom` can point at the main file even when the declaration
+        # itself is an external header sibling. Match a location only when it
+        # has a direct file spelling, or when it has no includedFrom marker and
+        # has not inherited external provenance.
+        location_proves_source: bool = location_matches and (has_location_file or (not inherited_external and not has_included_from))
+        # Retain layouts from a project implementation included into the main
+        # TU, but do not promote every sparse-location function/variable in that
+        # file to a source root. Their callable/data dependencies remain driven
+        # by Clang declaration IDs and ordinary use evidence.
+        project_include_type: bool = inherited_project_include and ast_json_project_include_type(ast_json_object_kind(text, start))
+        # Enum fallbacks are only meaningful when the source walk actually
+        # observed an enum reference. Without this guard, every unrelated
+        # header declaration recursively searches its `inner` tree for enum
+        # constants, which is disproportionately expensive for template-heavy
+        # C++ headers. Referenced enum declarations are also retained by their
+        # dependency IDs once the source walk has found such a reference.
+        enum_evidence: bool = enum_names.count > 0.usize()
+        # `isUsed` is translation-unit-wide: a declaration in an included
+        # implementation can be marked used only because an otherwise unused
+        # included function refers to it. Source/dependency IDs already retain
+        # functions actually reached from the main source; do not use this
+        # coarse fallback to import unrelated included implementation code.
+        return true if location_proves_source or project_include_type or ((not inherited_external and not inherited_project_include) and ast_json_node_is_used_function(text, start, source_view, canonical_source, working_directory)) or (not inherited_external and not inherited_project_include and ast_json_node_is_named_record(text, start, names)) or ast_json_node_is_project_local_type(text, start) or (enum_evidence and ast_json_node_has_enum_constant(text, start, enum_names)) or (enum_evidence and ast_json_node_has_referenced_enum_constant(text, start)) or ast_json_node_has_dependency_id(text, start, dependency_ids)
+        return not inherited_external and not inherited_project_include and (inherited_source or (not has_location_file and not has_origin and range_start >= 0 and ast_json_range_has_offset(text, range_start)))
+
+    def ast_json_location_has_file(text: sview, start: i64) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            return true if ast_json_key_is(text, key_start, key_stop, sview("file", 0, -1))
+            return true if ast_json_key_is(text, key_start, key_stop, sview("spellingLoc", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("expansionLoc", 0, -1))
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false

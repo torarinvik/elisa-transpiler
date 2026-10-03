@@ -1,0 +1,28 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/compile_command_quoted.c",
+    "arguments": [
+      "clang",
+      "-std=c11",
+      "-Itestdata/fixtures/quoted include",
+      "-c",
+      "testdata/fixtures/compile_command_quoted.c",
+      "-o",
+      "/dev/null"
+    ]
+  },
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/compile_command_quoted.c",
+    "arguments": [
+      "clang",
+      "-std=c11",
+      "-Itestdata/fixtures/quoted include",
+      "-c",
+      "testdata/fixtures/compile_command_quoted.c",
+      "-o",
+      "/dev/null"
+    ]
+  }
+]

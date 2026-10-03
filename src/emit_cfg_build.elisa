@@ -1,0 +1,410 @@
+extend CTranslator:
+    def typed_flow_expr_uses_name[@r](ctx: TypedContext[r]&, index: i64, name: sview) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        pending: mutable darray[i64] = []
+        seen: mutable darray[bool] = []
+        for expression_index in 0..<ctx.exprs.count |seen|:
+            seen.push(false)
+        pending.push(index)
+        while pending.count > 0.usize() |ctx, pending, seen, name|:
+            current: i64 = pending[pending.count - 1.usize()]
+            _ = pending.pop()
+            continue if current < 0 or current >= ctx.exprs.count.i64() or seen[current.usize()]
+            seen[current.usize()] <- true
+            expression: TypedExpr[r] = typed_expr_at(ctx, current)
+            return true if expression.kind == TypedExprKind.Name and sview_eq(expression.text, name)
+            pending.push(expression.lhs) if expression.lhs >= 0
+            pending.push(expression.rhs) if expression.rhs >= 0
+            pending.push(expression.third) if expression.third >= 0
+            if expression.args_count > 0 and expression.args_start >= 0:
+                for offset in 0..<expression.args_count |ctx, expression, pending|:
+                    child_index: i64 = expression.args_start + offset
+                    if child_index >= 0 and child_index < ctx.expr_children.count.i64():
+                        pending.push(ctx.expr_children[child_index.usize()])
+        return false
+    def typed_flow_stmt_uses_name[@r](ctx: TypedContext[r]&, index: i64, name: sview) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+        return true if statement.kind == TypedStmtKind.Declaration and sview_eq(statement.name, name)
+        return true if typed_flow_expr_uses_name(ctx, statement.expr, name)
+        if statement.kind == TypedStmtKind.Block:
+            for offset in 0..<statement.children_count |ctx, statement, name|:
+                return true if typed_flow_stmt_uses_name(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], name)
+        elif statement.kind == TypedStmtKind.If:
+            return true if typed_flow_stmt_uses_name(ctx, statement.aux, name)
+            return typed_flow_stmt_uses_name(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.For:
+            return true if typed_flow_stmt_uses_name(ctx, statement.children_start, name)
+            return true if typed_flow_stmt_uses_name(ctx, statement.aux, name)
+            return typed_flow_stmt_uses_name(ctx, statement.aux2, name)
+        elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile:
+            return true if typed_flow_stmt_uses_name(ctx, statement.aux, name)
+            return typed_flow_stmt_uses_name(ctx, statement.aux2, name) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
+        elif statement.kind == TypedStmtKind.Label:
+            return typed_flow_stmt_uses_name(ctx, statement.expr, name)
+        return false
+    def typed_context_name_conflicts[@r](ctx: TypedContext[r]&, name: sview) -> bool:
+        for index in 0..<ctx.globals.count |ctx, name|:
+            return true if sview_eq(ctx.globals[index].name, name)
+        for index in 0..<ctx.user_function_names.count |ctx, name|:
+            return true if sview_eq(ctx.user_function_names[index], name)
+        for index in 0..<ctx.externs.count |ctx, name|:
+            return true if sview_eq(ctx.externs[index].name, name)
+        for index in 0..<ctx.extern_globals.count |ctx, name|:
+            return true if sview_eq(ctx.extern_globals[index].name, name)
+        return false
+    def typed_flow_name_conflicts[@r](ctx: TypedContext[r]&, function: TypedFunction[r], name: sview) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return true if typed_context_name_conflicts(ctx, name)
+        for index in 0..<function.params_count |ctx, function, name|:
+            return true if sview_eq(ctx.params[(function.params_start + index).usize()].name, name)
+        return typed_flow_stmt_uses_name(ctx, function.body, name)
+    def typed_flow_state_name[@r](ctx: TypedContext[r]&, function: TypedFunction[r]) -> sview @r can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return sview("control_state", 0, -1) if not typed_flow_name_conflicts(ctx, function, sview("control_state", 0, -1))
+        return sview("flow_state", 0, -1) if not typed_flow_name_conflicts(ctx, function, sview("flow_state", 0, -1))
+        return sview("elisa_control_state", 0, -1) if not typed_flow_name_conflicts(ctx, function, sview("elisa_control_state", 0, -1))
+        return sview("state_machine", 0, -1)
+    def typed_goto_state_name[@r](ctx: TypedContext[r]&, function: TypedFunction[r]) -> sview @r can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return sview("goto_state", 0, -1) if not typed_flow_name_conflicts(ctx, function, sview("goto_state", 0, -1))
+        return sview("control_transfer", 0, -1) if not typed_flow_name_conflicts(ctx, function, sview("control_transfer", 0, -1))
+        return sview("elisa_goto_state", 0, -1) if not typed_flow_name_conflicts(ctx, function, sview("elisa_goto_state", 0, -1))
+        return sview("branch_state", 0, -1)
+
+    def typed_flow_new_block[@r](builder: mutable TypedFlowBuilder[r]&) -> i64:
+        builder.blocks.push(TypedFlowBlock[r]{term_type: sview("", 0, 0), statements_count: 0, term_expr: -1, target: -1, true_target: -1, false_target: -1, switch_start: -1, switch_count: 0, term_kind: TypedFlowTermKind.Open, target_is_label: false})
+        return builder.blocks.count.i64() - 1
+
+    def typed_flow_open[@r](builder: mutable TypedFlowBuilder[r]&) -> void:
+        if builder.current >= 0:
+            block: TypedFlowBlock[r] = builder.blocks[builder.current.usize()]
+            return if block.term_kind == TypedFlowTermKind.Open
+        builder.current <- typed_flow_new_block(builder)
+
+    def typed_flow_close_jump[@r](builder: mutable TypedFlowBuilder[r]&, target: i64, target_is_label: bool) -> void:
+        typed_flow_open(builder)
+        current: i64 = builder.current
+        block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+        block.term_kind <- TypedFlowTermKind.Jump
+        block.target <- target
+        block.target_is_label <- target_is_label
+        builder.blocks[current.usize()] <- block
+        builder.current <- -1
+
+    def typed_flow_close_return[@r](builder: mutable TypedFlowBuilder[r]&, statement: TypedStmt[r]) -> void:
+        typed_flow_open(builder)
+        current: i64 = builder.current
+        block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+        block.term_kind <- TypedFlowTermKind.Return
+        block.term_expr <- statement.expr
+        block.term_type <- statement.type_name
+        builder.blocks[current.usize()] <- block
+        builder.current <- -1
+
+    def typed_flow_append_statement[@r](builder: mutable TypedFlowBuilder[r]&, index: i64) -> void:
+        typed_flow_open(builder)
+        current: i64 = builder.current
+        block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+        builder.statements.push(TypedFlowStatement{block: current, statement: index})
+        block.statements_count <- block.statements_count + 1
+        builder.blocks[current.usize()] <- block
+    def typed_flow_add_declaration[@r](builder: mutable TypedFlowBuilder[r]&, ctx: TypedContext[r]&, index: i64) -> void:
+        declaration: TypedStmt[r] = typed_stmt_at(ctx, index)
+        return if declaration.name.len == 0
+        for offset in 0..<builder.declarations.count |builder, ctx, declaration|:
+            previous: TypedStmt[r] = typed_stmt_at(ctx, builder.declarations[offset.usize()])
+            return if sview_eq(previous.name, declaration.name)
+        builder.declarations.push(index)
+
+    def typed_flow_split_before_label[@r](builder: mutable TypedFlowBuilder[r]&) -> i64:
+        typed_flow_open(builder)
+        current: i64 = builder.current
+        block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+        return current if block.statements_count == 0
+        next: i64 = typed_flow_new_block(builder)
+        block.term_kind <- TypedFlowTermKind.Jump
+        block.target <- next
+        block.target_is_label <- false
+        builder.blocks[current.usize()] <- block
+        builder.current <- next
+        return next
+
+    def typed_flow_set_branch[@r](builder: mutable TypedFlowBuilder[r]&, block_index: i64, expression: i64, true_target: i64, false_target: i64) -> void:
+        return if block_index < 0 or block_index >= builder.blocks.count.i64()
+        block: TypedFlowBlock[r] = builder.blocks[block_index.usize()]
+        block.term_kind <- TypedFlowTermKind.Branch
+        block.term_expr <- expression
+        block.true_target <- true_target
+        block.false_target <- false_target
+        builder.blocks[block_index.usize()] <- block
+    def typed_flow_lower_stmt[@r](builder: mutable TypedFlowBuilder[r]&, ctx: TypedContext[r]&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+        match statement.kind:
+            TypedStmtKind.Block:
+                if statement.children_count > 0:
+                    for offset in 0..<statement.children_count |builder, ctx, statement|:
+                        typed_flow_lower_stmt(builder, ctx, ctx.stmt_children[(statement.children_start + offset).usize()]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            TypedStmtKind.Declaration:
+                typed_flow_add_declaration(builder, ctx, index)
+                typed_flow_append_statement(builder, index)
+            TypedStmtKind.Expression:
+                typed_flow_append_statement(builder, index)
+            TypedStmtKind.Null:
+                pass
+            TypedStmtKind.Return:
+                typed_flow_close_return(builder, statement)
+            TypedStmtKind.Goto:
+                typed_flow_close_jump(builder, statement.aux, true)
+            TypedStmtKind.Label:
+                label_block: i64 = typed_flow_split_before_label(builder)
+                if statement.aux >= 0 and statement.aux < builder.label_blocks.count.i64():
+                    builder.label_blocks[statement.aux.usize()] <- label_block
+                typed_flow_lower_stmt(builder, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            TypedStmtKind.If:
+                typed_flow_open(builder)
+                condition_block: i64 = builder.current
+                then_block: i64 = typed_flow_new_block(builder)
+                after_block: i64 = typed_flow_new_block(builder)
+                else_block: mutable i64 = after_block
+                if statement.aux2 >= 0:
+                    else_block <- typed_flow_new_block(builder)
+                typed_flow_set_branch(builder, condition_block, statement.expr, then_block, else_block)
+                builder.current <- then_block
+                typed_flow_lower_stmt(builder, ctx, statement.aux) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if builder.current >= 0:
+                    typed_flow_close_jump(builder, after_block, false)
+                if statement.aux2 >= 0:
+                    builder.current <- else_block
+                    typed_flow_lower_stmt(builder, ctx, statement.aux2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    if builder.current >= 0:
+                        typed_flow_close_jump(builder, after_block, false)
+                builder.current <- after_block
+            TypedStmtKind.While:
+                typed_flow_open(builder)
+                condition_block: i64 = typed_flow_new_block(builder)
+                body_block: i64 = typed_flow_new_block(builder)
+                after_block: i64 = typed_flow_new_block(builder)
+                typed_flow_close_jump(builder, condition_block, false)
+                typed_flow_set_branch(builder, condition_block, statement.expr, body_block, after_block)
+                builder.break_targets.push(after_block)
+                builder.continue_targets.push(condition_block)
+                builder.current <- body_block
+                typed_flow_lower_stmt(builder, ctx, statement.aux) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if builder.current >= 0:
+                    typed_flow_close_jump(builder, condition_block, false)
+                _ = builder.break_targets.pop()
+                _ = builder.continue_targets.pop()
+                builder.current <- after_block
+            TypedStmtKind.DoWhile:
+                typed_flow_open(builder)
+                body_block: i64 = typed_flow_new_block(builder)
+                condition_block: i64 = typed_flow_new_block(builder)
+                after_block: i64 = typed_flow_new_block(builder)
+                typed_flow_close_jump(builder, body_block, false)
+                builder.break_targets.push(after_block)
+                builder.continue_targets.push(condition_block)
+                builder.current <- body_block
+                typed_flow_lower_stmt(builder, ctx, statement.aux) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if builder.current >= 0:
+                    typed_flow_close_jump(builder, condition_block, false)
+                builder.current <- condition_block
+                typed_flow_lower_stmt(builder, ctx, statement.aux2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.aux2 >= 0
+                typed_flow_open(builder)
+                typed_flow_set_branch(builder, builder.current, statement.expr, body_block, after_block)
+                _ = builder.break_targets.pop()
+                _ = builder.continue_targets.pop()
+                builder.current <- after_block
+            TypedStmtKind.For:
+                if statement.children_start >= 0:
+                    typed_flow_lower_stmt(builder, ctx, statement.children_start) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                condition_block: i64 = typed_flow_new_block(builder)
+                body_block: i64 = typed_flow_new_block(builder)
+                increment_block: i64 = typed_flow_new_block(builder)
+                after_block: i64 = typed_flow_new_block(builder)
+                typed_flow_close_jump(builder, condition_block, false)
+                typed_flow_set_branch(builder, condition_block, statement.expr, body_block, after_block)
+                builder.break_targets.push(after_block)
+                builder.continue_targets.push(increment_block)
+                builder.current <- body_block
+                typed_flow_lower_stmt(builder, ctx, statement.aux) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if builder.current >= 0:
+                    typed_flow_close_jump(builder, increment_block, false)
+                builder.current <- increment_block
+                if statement.aux2 >= 0:
+                    typed_flow_lower_stmt(builder, ctx, statement.aux2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if builder.current >= 0:
+                    typed_flow_close_jump(builder, condition_block, false)
+                _ = builder.break_targets.pop()
+                _ = builder.continue_targets.pop()
+                builder.current <- after_block
+            TypedStmtKind.Switch:
+                # Model the selection itself in the CFG so gotos nested in a
+                # case body share the same state variable as the surrounding
+                # function.  The lowered switch cases already contain their
+                # source-order suffixes, so each target preserves C fallthrough
+                # without duplicating case bodies.
+                typed_flow_open(builder)
+                switch_block: i64 = builder.current
+                after_block: i64 = typed_flow_new_block(builder)
+                switch_start: i64 = builder.switch_targets.count.i64()
+                unique_bodies: mutable darray[i64] = []
+                unique_targets: mutable darray[i64] = []
+                default_target: mutable i64 = after_block
+                builder.break_targets.push(after_block)
+                for offset in 0..<statement.children_count |builder, ctx, statement, unique_bodies, unique_targets, after_block, switch_start, offset|:
+                    case_index: i64 = statement.children_start + offset
+                    switch_case: TypedSwitchCase = ctx.switch_cases[case_index.usize()]
+                    target: mutable i64 = -1
+                    for prior in 0..<unique_bodies.count |unique_bodies, unique_targets, switch_case, target, prior|:
+                        if unique_bodies[prior.usize()] == switch_case.body:
+                            target <- unique_targets[prior.usize()]
+                            break
+                    if target < 0:
+                        target <- typed_flow_new_block(builder)
+                        unique_bodies.push(switch_case.body)
+                        unique_targets.push(target)
+                    builder.switch_targets.push(TypedFlowSwitchTarget{case_index: case_index, target: target})
+                    default_target <- target if switch_case.is_default
+                block: TypedFlowBlock[r] = builder.blocks[switch_block.usize()]
+                block.term_kind <- TypedFlowTermKind.Switch
+                block.term_expr <- statement.expr
+                block.target <- default_target
+                block.switch_start <- switch_start
+                block.switch_count <- statement.children_count
+                builder.blocks[switch_block.usize()] <- block
+                for body_offset in 0..<unique_bodies.count |builder, ctx, unique_bodies, unique_targets, body_offset|:
+                    builder.current <- unique_targets[body_offset.usize()]
+                    typed_flow_lower_stmt(builder, ctx, unique_bodies[body_offset.usize()]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    if builder.current >= 0:
+                        typed_flow_close_jump(builder, after_block, false)
+                _ = builder.break_targets.pop()
+                builder.current <- after_block
+            TypedStmtKind.Break:
+                if builder.break_targets.count > 0:
+                    typed_flow_close_jump(builder, builder.break_targets[(builder.break_targets.count - 1).usize()], false)
+                else:
+                    typed_flow_open(builder)
+                    current: i64 = builder.current
+                    block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+                    block.term_kind <- TypedFlowTermKind.Stop
+                    builder.blocks[current.usize()] <- block
+                    builder.current <- -1
+            TypedStmtKind.SwitchBreak:
+                if builder.break_targets.count > 0:
+                    typed_flow_close_jump(builder, builder.break_targets[(builder.break_targets.count - 1).usize()], false)
+                else:
+                    typed_flow_open(builder)
+                    current: i64 = builder.current
+                    block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+                    block.term_kind <- TypedFlowTermKind.Stop
+                    builder.blocks[current.usize()] <- block
+                    builder.current <- -1
+            TypedStmtKind.Continue:
+                if builder.continue_targets.count > 0:
+                    typed_flow_close_jump(builder, builder.continue_targets[(builder.continue_targets.count - 1).usize()], false)
+                else:
+                    typed_flow_open(builder)
+                    current: i64 = builder.current
+                    block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+                    block.term_kind <- TypedFlowTermKind.Stop
+                    builder.blocks[current.usize()] <- block
+                    builder.current <- -1
+            _:
+                typed_flow_append_statement(builder, index)
+    def typed_build_flow[@r](builder: mutable TypedFlowBuilder[r]&, ctx: TypedContext[r]&, function: TypedFunction[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        for index in 0..<typed_function_label_count(function) |builder|:
+            builder.label_blocks.push(-1)
+        typed_flow_new_block(builder)
+        builder.current <- 0
+        typed_flow_lower_stmt(builder, ctx, function.body) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if builder.current >= 0:
+            current: i64 = builder.current
+            block: TypedFlowBlock[r] = builder.blocks[current.usize()]
+            block.term_kind <- TypedFlowTermKind.Stop
+            builder.blocks[current.usize()] <- block
+            builder.current <- -1
+        for index in 0..<builder.blocks.count |builder|:
+            block: TypedFlowBlock[r] = builder.blocks[index.usize()]
+            if block.term_kind == TypedFlowTermKind.Open:
+                block.term_kind <- TypedFlowTermKind.Stop
+                builder.blocks[index.usize()] <- block
+            if block.term_kind == TypedFlowTermKind.Jump and block.target_is_label:
+                label_target: i64 = builder.label_blocks[block.target.usize()] if block.target >= 0 and block.target < builder.label_blocks.count.i64() else -1
+                block.target <- label_target
+                block.target_is_label <- false
+                builder.blocks[index.usize()] <- block
+        typed_flow_optimize(builder)
+
+    def typed_flow_resolve_jump[@r](builder: TypedFlowBuilder[r]&, target: i64) -> i64:
+        resolved: mutable i64 = target
+        hops: mutable i64 = 0
+        while hops < builder.blocks.count.i64() |builder, resolved, hops|:
+            return resolved if resolved < 0 or resolved >= builder.blocks.count.i64()
+            block: TypedFlowBlock[r] = builder.blocks[resolved.usize()]
+            return resolved if block.statements_count > 0 or block.term_kind != TypedFlowTermKind.Jump or block.target_is_label or block.target == resolved
+            resolved <- block.target
+            hops <- hops + 1
+        return resolved
+
+    def typed_flow_optimize[@r](builder: mutable TypedFlowBuilder[r]&) -> void:
+        # Redirect empty jump chains to a fixed point. The old single pass left
+        # a second empty dispatcher block behind when a label followed a
+        # structured branch, which made otherwise simple gotos noisier than
+        # necessary.
+        pass_index: mutable i64 = 0
+        while pass_index < 3 |builder, pass_index|:
+            changed: mutable bool = false
+            for index in 0..<builder.blocks.count |builder, changed|:
+                block: TypedFlowBlock[r] = builder.blocks[index.usize()]
+                if block.term_kind == TypedFlowTermKind.Jump:
+                    resolved: i64 = typed_flow_resolve_jump(builder, block.target)
+                    changed <- true if resolved != block.target
+                    block.target <- resolved
+                elif block.term_kind == TypedFlowTermKind.Branch:
+                    resolved_true: i64 = typed_flow_resolve_jump(builder, block.true_target)
+                    resolved_false: i64 = typed_flow_resolve_jump(builder, block.false_target)
+                    changed <- true if resolved_true != block.true_target or resolved_false != block.false_target
+                    block.true_target <- resolved_true
+                    block.false_target <- resolved_false
+                elif block.term_kind == TypedFlowTermKind.Switch:
+                    resolved_default: i64 = typed_flow_resolve_jump(builder, block.target)
+                    changed <- true if resolved_default != block.target
+                    block.target <- resolved_default
+                    for offset in 0..<block.switch_count |builder, block, changed, offset|:
+                        target_index: i64 = block.switch_start + offset
+                        switch_target: TypedFlowSwitchTarget = builder.switch_targets[target_index.usize()]
+                        resolved: i64 = typed_flow_resolve_jump(builder, switch_target.target)
+                        changed <- true if resolved != switch_target.target
+                        switch_target.target <- resolved
+                        builder.switch_targets[target_index.usize()] <- switch_target
+                builder.blocks[index.usize()] <- block
+            pass_index <- pass_index + 1
+            break if not changed
+
+    def typed_flow_mark_reachable(reachable: mutable darray[bool]&, queue: mutable darray[i64]&, target: i64) -> void:
+        return if target < 0 or target >= reachable.count.i64() or reachable[target.usize()]
+        reachable[target.usize()] <- true
+        queue.push(target)
+
+    def typed_flow_reachable_blocks[@r](builder: TypedFlowBuilder[r]&) -> darray[bool]:
+        reachable: mutable darray[bool] = []
+        for index in 0..<builder.blocks.count |reachable|:
+            reachable.push(false)
+        return reachable if builder.blocks.count == 0
+        queue: mutable darray[i64] = []
+        reachable[0] <- true
+        queue.push(0)
+        cursor: mutable i64 = 0
+        while cursor < queue.count |builder, reachable, queue, cursor|:
+            block_index: i64 = queue[cursor.usize()]
+            cursor <- cursor + 1
+            block: TypedFlowBlock[r] = builder.blocks[block_index.usize()]
+            if block.term_kind == TypedFlowTermKind.Jump:
+                typed_flow_mark_reachable(reachable, queue, block.target)
+            elif block.term_kind == TypedFlowTermKind.Branch:
+                typed_flow_mark_reachable(reachable, queue, block.true_target)
+                typed_flow_mark_reachable(reachable, queue, block.false_target)
+            elif block.term_kind == TypedFlowTermKind.Switch:
+                typed_flow_mark_reachable(reachable, queue, block.target)
+                for offset in 0..<block.switch_count |builder, block, reachable, queue, offset|:
+                    switch_target: TypedFlowSwitchTarget = builder.switch_targets[(block.switch_start + offset).usize()]
+                    typed_flow_mark_reachable(reachable, queue, switch_target.target)
+        return reachable

@@ -1,0 +1,5 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_internal_linkage/main.c","command":"clang -std=c11 -c testdata/fixtures/project_internal_linkage/main.c"},
+  {"directory":".","file":"testdata/fixtures/project_internal_linkage/beta.c","command":"clang -std=c11 -Itestdata/fixtures/project_internal_linkage -c testdata/fixtures/project_internal_linkage/beta.c"},
+  {"directory":".","file":"testdata/fixtures/project_internal_linkage/alpha.c","command":"clang -std=c11 -Itestdata/fixtures/project_internal_linkage -c testdata/fixtures/project_internal_linkage/alpha.c"}
+]

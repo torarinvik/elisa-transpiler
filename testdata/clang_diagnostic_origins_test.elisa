@@ -1,0 +1,61 @@
+include "../src/.compiler_std/elisacore_runtime.elisa"
+include "../src/.compiler_std/elisacore_json.elisa"
+
+module CTranslator:
+    struct ClangDiagnosticOriginsTestModule:
+        _unused: u8
+
+extend CTranslator:
+    def ast_field[@r](node: JsonValueHandle[r], key: sview) -> JsonValueHandle[r]:
+        return try json_handle_get(node, key) else json_handle_null(node)
+
+    def typed_number[@r](value: JsonValueHandle[r]) -> i64:
+        number: f64 = try json_handle_as_number(value) else 0.0
+        return number.i64()
+
+include "../src/clang_diagnostic_origins.elisa"
+
+extend CTranslator:
+    def diagnostic_origin_offsets_match(text: sview, expected_start: i64, expected_end: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        region clang_diagnostic_origin_test_arena(65536):
+            parsed: JsonParseResult = json_parse_checked(&clang_diagnostic_origin_test_arena, text)
+            return false if parsed.code != JsonErrorCode.OK
+            root: JsonValueHandle = json_handle_from_result(parsed)
+            return false if ast_range_has_origin(root, sview("spellingLoc", 0, -1)) or ast_range_has_origin(root, sview("expansionLoc", 0, -1))
+            return ast_range_endpoint_offset(root, sview("begin", 0, -1), false) == expected_start and ast_range_endpoint_offset(root, sview("end", 0, -1), true) == expected_end
+
+    def diagnostic_macro_origins_match(text: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        region clang_diagnostic_origin_test_arena(65536):
+            parsed: JsonParseResult = json_parse_checked(&clang_diagnostic_origin_test_arena, text)
+            return false if parsed.code != JsonErrorCode.OK
+            root: JsonValueHandle = json_handle_from_result(parsed)
+            begin: sview = sview("begin", 0, -1)
+            end: sview = sview("end", 0, -1)
+            spelling: sview = sview("spellingLoc", 0, -1)
+            expansion: sview = sview("expansionLoc", 0, -1)
+            return false if not ast_range_has_origin(root, spelling) or not ast_range_has_origin(root, expansion)
+            return false if ast_range_origin_offset(root, begin, sview("", 0, 0), false) != 13 or ast_range_origin_offset(root, end, sview("", 0, 0), true) != 34
+            return false if ast_range_origin_offset(root, begin, spelling, false) != 101 or ast_range_origin_offset(root, end, spelling, true) != 110
+            return false if not sview_eq(ast_range_origin_file(root, begin, sview("", 0, 0)), sview("main.c", 0, -1))
+            return false if not sview_eq(ast_range_origin_file(root, begin, spelling), sview("macro.h", 0, -1))
+            return false if not sview_eq(ast_range_origin_included_from(root, begin, spelling), sview("main.c", 0, -1))
+            return true
+
+    def run_clang_diagnostic_origin_checks() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        ordinary: sview = sview("{\"range\":{\"begin\":{\"offset\":10,\"tokLen\":1},\"end\":{\"offset\":20,\"tokLen\":2}}}", 0, -1)
+        return 1 if not diagnostic_origin_offsets_match(ordinary, 10, 22) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        macro: sview = sview("{\"loc\":{\"file\":\"main.c\"},\"range\":{\"begin\":{\"offset\":101,\"tokLen\":1,\"spellingLoc\":{\"file\":\"macro.h\",\"offset\":101,\"tokLen\":1,\"includedFrom\":{\"file\":\"main.c\"}},\"expansionLoc\":{\"file\":\"main.c\",\"offset\":13,\"tokLen\":2}},\"end\":{\"offset\":109,\"tokLen\":1,\"spellingLoc\":{\"file\":\"macro.h\",\"offset\":109,\"tokLen\":1,\"includedFrom\":{\"file\":\"main.c\"}},\"expansionLoc\":{\"file\":\"main.c\",\"offset\":30,\"tokLen\":4}}}}", 0, -1)
+        return 2 if not diagnostic_origin_offsets_match(macro, 13, 34) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return 5 if not diagnostic_macro_origins_match(macro) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        missing_end_token: sview = sview("{\"range\":{\"begin\":{\"offset\":9},\"end\":{\"offset\":18}}}", 0, -1)
+        return 3 if not diagnostic_origin_offsets_match(missing_end_token, 9, -1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        missing_range: sview = sview("{}", 0, -1)
+        return 4 if not diagnostic_origin_offsets_match(missing_range, -1, -1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        print("Clang diagnostic source-range checks passed\n")
+        return 0
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    return CTranslator::run_clang_diagnostic_origin_checks() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

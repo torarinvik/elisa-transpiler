@@ -1,0 +1,484 @@
+extend CTranslator:
+    def typed_stmt_has_name_suffix[@r](ctx: TypedContext[r]&, index: i64, prefix: sview, suffix: sview) -> bool:
+            return false if index < 0 or index >= ctx.stmts.count.i64()
+            statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+            return true if statement.kind == TypedStmtKind.Declaration and typed_name_matches_suffix(statement.name, prefix, suffix)
+            if statement.kind == TypedStmtKind.Block:
+                for offset in 0..<statement.children_count |ctx, statement, prefix, suffix|:
+                    return true if typed_stmt_has_name_suffix(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], prefix, suffix)
+            elif statement.kind == TypedStmtKind.If:
+                return true if typed_stmt_has_name_suffix(ctx, statement.aux, prefix, suffix)
+                return statement.aux2 >= 0 and typed_stmt_has_name_suffix(ctx, statement.aux2, prefix, suffix)
+            elif statement.kind == TypedStmtKind.For:
+                return true if typed_stmt_has_name_suffix(ctx, statement.children_start, prefix, suffix)
+                return true if typed_stmt_has_name_suffix(ctx, statement.aux, prefix, suffix)
+                return statement.aux2 >= 0 and typed_stmt_has_name_suffix(ctx, statement.aux2, prefix, suffix)
+            elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
+                return typed_stmt_has_name_suffix(ctx, statement.expr, prefix, suffix) if statement.kind == TypedStmtKind.Label
+                return true if typed_stmt_has_name_suffix(ctx, statement.aux, prefix, suffix)
+                return typed_stmt_has_name_suffix(ctx, statement.aux2, prefix, suffix) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
+            elif statement.kind == TypedStmtKind.Switch:
+                for offset in 0..<statement.children_count |ctx, statement, prefix, suffix|:
+                    switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                    return true if typed_stmt_has_name_suffix(ctx, switch_case.body, prefix, suffix)
+            return false
+    def typed_parameter_alias_conflicts[@r](ctx: TypedContext[r]&, function: TypedFunction[r], parameter: TypedParam[r], suffix: sview) -> bool:
+            for offset in 0..<function.params_count |ctx, function, parameter, suffix|:
+                other: TypedParam[r] = ctx.params[(function.params_start + offset).usize()]
+                return true if not sview_eq(other.name, parameter.name) and typed_name_matches_suffix(other.name, parameter.name, suffix)
+            return typed_stmt_has_name_suffix(ctx, function.body, parameter.name, suffix)
+    def typed_parameter_needs_alias[@r](ctx: TypedContext[r]&, function: TypedFunction[r], parameter: TypedParam[r]) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+            # C++ reference parameters already retain caller-visible writes through
+            # their reference slot. A local cursor alias would copy the referred
+            # pointer and silently lose updates such as `ptr += 2`.
+            return false if c_type_reference_count(parameter.type_name) > 0
+            return false if c_type_pointer_count(parameter.type_name) == 0 or c_type_is_function(parameter.type_name)
+            return typed_stmt_binding_effect(ctx, function.body, -1, parameter.name, true, true)
+    def typed_parameter_alias_suffix[@r](ctx: TypedContext[r]&, function: TypedFunction[r], parameter: TypedParam[r]) -> sview @r:
+            cursor: sview = sview("_cursor", 0, -1)
+            return cursor if not typed_parameter_alias_conflicts(ctx, function, parameter, cursor) else sview("_alias", 0, -1) if not typed_parameter_alias_conflicts(ctx, function, parameter, sview("_alias", 0, -1)) else sview("_value", 0, -1)
+    def typed_stmt_is_declaration_group[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+            statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+            return true if statement.kind == TypedStmtKind.Declaration
+            return false if statement.kind != TypedStmtKind.Block or statement.children_count == 0
+            for offset in 0..<statement.children_count |ctx, statement|:
+                return false if not typed_stmt_is_declaration_group(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+            return true
+    def typed_stmt_guarantees_exit[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+            return false if index < 0 or index >= ctx.stmts.count.i64()
+            statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+            return true if statement.kind == TypedStmtKind.Return
+            if statement.kind == TypedStmtKind.Block:
+                for offset in 0..<statement.children_count |ctx, statement|:
+                    return true if typed_stmt_guarantees_exit(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+                return false
+            if statement.kind == TypedStmtKind.If:
+                constant: mutable i64 = 0
+                if typed_eval_integer_constant(ctx, statement.expr, constant):
+                    return typed_stmt_guarantees_exit(ctx, statement.aux) if constant != 0
+                    return statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux2)
+                return statement.aux >= 0 and statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux) and typed_stmt_guarantees_exit(ctx, statement.aux2)
+            if statement.kind == TypedStmtKind.Switch:
+                has_default: mutable bool = false
+                for offset in 0..<statement.children_count |ctx, statement, has_default|:
+                    switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                    has_default <- true if switch_case.is_default
+                    return false if typed_stmt_contains_switch_break(ctx, switch_case.body)
+                    return false if not typed_stmt_guarantees_exit(ctx, switch_case.body)
+                return has_default and statement.children_count > 0
+            if statement.kind == TypedStmtKind.Label:
+                return typed_stmt_guarantees_exit(ctx, statement.expr)
+            if statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.For:
+                return typed_expr_is_always_true(ctx, statement.expr) and typed_stmt_guarantees_exit(ctx, statement.aux)
+            return false
+    def typed_condition_nonnull_name[@r](ctx: TypedContext[r]&, index: i64, wants_true: bool) -> sview @r:
+            return typed_null_guard_name(ctx, index, true) if wants_true else typed_null_guard_name(ctx, index, false)
+    def typed_condition_nonnull_expr[@r](ctx: TypedContext[r]&, index: i64, wants_true: bool) -> i64:
+            return -1 if index < 0 or index >= ctx.exprs.count.i64()
+            expression: TypedExpr[r] = typed_expr_at(ctx, index)
+            expected_opcode: sview = sview("!=", 0, -1) if wants_true else sview("==", 0, -1)
+            return -1 if expression.kind != TypedExprKind.Binary or not sview_eq(expression.text, expected_opcode)
+            lhs: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
+            rhs: TypedExpr[r] = typed_expr_at(ctx, expression.rhs)
+            # Facts are attached to places, not just identifiers. This covers
+            # nullable struct fields and indexed pointer slots while keeping the
+            # same conservative requirement: one side must be a null literal and
+            # the other side must still have a nullable C pointer type.
+            return expression.lhs if c_type_value_optional(lhs.type_name) and typed_expr_is_null_value(ctx, expression.rhs)
+            return expression.rhs if c_type_value_optional(rhs.type_name) and typed_expr_is_null_value(ctx, expression.lhs)
+            return -1
+    def typed_push_condition_nonnull_facts[@r](ctx: mutable TypedContext[r]&, index: i64, wants_true: bool) -> i64:
+            return 0 if index < 0 or index >= ctx.exprs.count.i64()
+            # A call in the condition can mutate a pointer checked earlier in the
+            # same logical expression. Keeping no fact is safer than assuming C's
+            # opaque call preserved the object graph.
+            return 0 if typed_expr_contains_call(ctx, index)
+            expression: TypedExpr[r] = typed_expr_at(ctx, index)
+            before: i64 = ctx.current_nonnull_exprs.count.i64()
+            fact: sview = typed_condition_nonnull_name(ctx, index, wants_true)
+            fact_expr: i64 = typed_condition_nonnull_expr(ctx, index, wants_true)
+            if fact_expr >= 0:
+                # Keep the parallel fact arrays aligned. An empty name represents
+                # a member/indexed place and is intentionally ignored by the name
+                # fast path.
+                ctx.current_nonnull_names.push(fact)
+                ctx.current_nonnull_exprs.push(fact_expr)
+            if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("and", 0, -1)) and wants_true:
+                typed_push_condition_nonnull_facts(ctx, expression.lhs, true)
+                typed_push_condition_nonnull_facts(ctx, expression.rhs, true)
+            elif expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("or", 0, -1)) and not wants_true:
+                typed_push_condition_nonnull_facts(ctx, expression.lhs, false)
+                typed_push_condition_nonnull_facts(ctx, expression.rhs, false)
+            return ctx.current_nonnull_exprs.count.i64() - before
+    def typed_pop_nonnull_facts[@r](ctx: mutable TypedContext[r]&, count: i64) -> void:
+            cursor: mutable i64 = 0
+            while cursor < count and ctx.current_nonnull_exprs.count > 0:
+                _ = ctx.current_nonnull_exprs.pop()
+                if ctx.current_nonnull_names.count > 0:
+                    _ = ctx.current_nonnull_names.pop()
+                cursor <- cursor + 1
+    def typed_invalidate_nonnull_facts[@r](ctx: mutable TypedContext[r]&, index: i64) -> void:
+            return if index < 0 or index >= ctx.exprs.count.i64()
+            expression: TypedExpr[r] = typed_expr_at(ctx, index)
+            # A call may mutate an object reachable through a writable pointer
+            # argument or a global. Remove only the facts whose roots can actually
+            # be affected; unrelated facts survive read-only calls.
+            if typed_expr_contains_call(ctx, index):
+                cursor: mutable i64 = 0
+                while cursor < ctx.current_nonnull_exprs.count.i64():
+                    fact_expr: i64 = ctx.current_nonnull_exprs[cursor.usize()]
+                    root: sview = typed_expr_root_name(ctx, fact_expr)
+                    if root.len > 0 and typed_call_may_mutate_root(ctx, index, root):
+                        last: i64 = ctx.current_nonnull_exprs.count.i64() - 1
+                        ctx.current_nonnull_exprs[cursor.usize()] <- ctx.current_nonnull_exprs[last.usize()]
+                        _ = ctx.current_nonnull_exprs.pop()
+                        if cursor < ctx.current_nonnull_names.count.i64():
+                            last_name: i64 = ctx.current_nonnull_names.count.i64() - 1
+                            ctx.current_nonnull_names[cursor.usize()] <- ctx.current_nonnull_names[last_name.usize()]
+                            _ = ctx.current_nonnull_names.pop()
+                    else:
+                        cursor <- cursor + 1
+                return
+            if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("<-", 0, -1)):
+                cursor: mutable i64 = 0
+                while cursor < ctx.current_nonnull_exprs.count.i64():
+                    fact_expr: i64 = ctx.current_nonnull_exprs[cursor.usize()]
+                    lhs: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
+                    same_root_write: bool = lhs.kind == TypedExprKind.Name and sview_eq(typed_expr_root_name(ctx, fact_expr), lhs.text)
+                    if typed_expr_is_same_place(ctx, expression.lhs, fact_expr) or same_root_write:
+                        last: i64 = ctx.current_nonnull_exprs.count.i64() - 1
+                        ctx.current_nonnull_exprs[cursor.usize()] <- ctx.current_nonnull_exprs[last.usize()]
+                        _ = ctx.current_nonnull_exprs.pop()
+                        if cursor < ctx.current_nonnull_names.count.i64():
+                            last_name: i64 = ctx.current_nonnull_names.count.i64() - 1
+                            ctx.current_nonnull_names[cursor.usize()] <- ctx.current_nonnull_names[last_name.usize()]
+                            _ = ctx.current_nonnull_names.pop()
+                    else:
+                        cursor <- cursor + 1
+            typed_invalidate_nonnull_facts(ctx, expression.lhs) if expression.kind == TypedExprKind.Sequence
+            typed_invalidate_nonnull_facts(ctx, expression.rhs) if expression.kind == TypedExprKind.Sequence
+    def typed_emit_stmt_body[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+            statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+            typed_emit_callback_guards(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.expr >= 0
+            match statement.kind:
+                TypedStmtKind.Block:
+                    declared_start: usize = ctx.current_declared_names.count
+                    alias_start: usize = ctx.current_name_aliases.count
+                    declaration_group: bool = statement.aux == TYPED_STMT_AUX_C_DECLARATION_GROUP
+                    ctx.current_declared_scope_starts.push(declared_start) if not declaration_group
+                    if statement.children_count > 0:
+                        guarded_switch: bool = ctx.current_switch_done_index >= 0 and typed_stmt_needs_switch_done(ctx, index)
+                        initial_output_size: i64 = out.count.i64()
+                        for offset in 0..<statement.children_count |out, ctx, statement, level, guarded_switch|:
+                            child_index: i64 = ctx.stmt_children[(statement.children_start + offset).usize()]
+                            child: TypedStmt[r] = typed_stmt_at(ctx, child_index)
+                            continue if statement.children_count > 1 and typed_stmt_is_empty(ctx, child_index)
+                            if child.kind == TypedStmtKind.SwitchBreak:
+                                typed_emit_stmt(out, ctx, child_index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ctx.current_switch_done_index >= 0
+                                break
+                            child_level: mutable i64 = level
+                            if guarded_switch:
+                                append_indent(out, level)
+                                append_view(out, sview("if not ", 0, -1))
+                                typed_append_switch_done_name(out, ctx)
+                                append_view(out, sview(":\n", 0, -1))
+                                child_level <- level + 1
+                            if ctx.current_emit_has_goto and child.kind != TypedStmtKind.Label and not typed_stmt_is_declaration_group(ctx, child_index):
+                                append_indent(out, child_level)
+                                append_view(out, sview("if ", 0, -1))
+                                append_view(out, ctx.current_emit_goto_name)
+                                append_view(out, sview(" == 0:\n", 0, -1))
+                                typed_emit_stmt(out, ctx, child_index, child_level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            else:
+                                typed_emit_stmt(out, ctx, child_index, child_level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            break if not ctx.current_emit_has_goto and typed_stmt_guarantees_exit(ctx, child_index)
+                        if out.count.i64() == initial_output_size:
+                            append_indent(out, level)
+                            append_view(out, sview("pass\n", 0, -1))
+                    else:
+                        append_indent(out, level)
+                        append_view(out, sview("pass\n", 0, -1))
+                    if not declaration_group:
+                        typed_restore_declared_names(ctx, declared_start)
+                        while ctx.current_name_aliases.count > alias_start:
+                            _ = ctx.current_name_aliases.pop()
+                        _ = ctx.current_declared_scope_starts.pop()
+                TypedStmtKind.Return:
+                    if statement.expr >= 0 and typed_expr_at(ctx, statement.expr).kind == TypedExprKind.Binary and sview_eq(typed_expr_at(ctx, statement.expr).text, sview("<-", 0, -1)):
+                        typed_emit_expression_statement(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        append_indent(out, level)
+                        append_view(out, sview("return ", 0, -1))
+                        typed_emit_target_value(out, ctx, typed_assignment_result(ctx, statement.expr), statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        append_view(out, sview("\n", 0, -1))
+                        return
+                    append_indent(out, level)
+                    append_view(out, sview("return", 0, -1))
+                    if statement.expr >= 0:
+                        append_view(out, sview(" ", 0, -1))
+                        typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("\n", 0, -1))
+                TypedStmtKind.Declaration:
+                    if typed_name_declared_in_current_scope(ctx, statement.name):
+                        append_indent(out, level)
+                        append_view(out, statement.name)
+                        append_view(out, sview(" <- ", 0, -1))
+                        if statement.expr < 0:
+                            append_view(out, sview("zeroed", 0, -1))
+                        else:
+                            typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        append_view(out, sview("\n", 0, -1))
+                        return
+                    # C permits a nested block to shadow an outer binding. The
+                    # typed IR deliberately keeps the source spelling, so create
+                    # one lexical output alias at the declaration boundary and
+                    # let every expression in this scope use the newest alias.
+                    # This keeps names readable without confusing a shadowed
+                    # source variable with an assignment to its parent.
+                    shadow_suffix: mutable sview = sview("", 0, 0)
+                    if typed_source_name_is_bound(ctx, statement.name):
+                        shadow_suffix <- typed_new_shadow_suffix(ctx, statement.name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        ctx.current_name_aliases.push(TypedNameAlias[r]{source: statement.name, suffix: shadow_suffix})
+                    emitted_name: sview = typed_copy_name_with_suffix(statement.name, shadow_suffix) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    ctx.current_declared_names.push(emitted_name)
+                    append_indent(out, level)
+                    is_pointer_local: bool = c_type_pointer_count(statement.type_name) > 0 and statement.aux != TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR
+                    if is_pointer_local:
+                        # C's top-level pointer `const` only makes the pointer slot
+                        # immutable. Elisa bindings are immutable by default, so the
+                        # const-pointer case uses the ordinary `name:` spelling;
+                        # emit `mutable name:` only when C permits rebinding it.
+                        append_view(out, sview("mutable ", 0, -1)) if typed_local_pointer_binding_is_mutable(ctx, statement, index)
+                        append_view(out, emitted_name)
+                        append_view(out, sview(": ", 0, -1))
+                        append_view(out, sview("mutable ", 0, -1)) if not c_type_pointer_layers_composable(statement.type_name) and not c_type_is_function_pointer(statement.type_name) and c_type_pointer_can_write(statement.type_name)
+                    else:
+                        append_view(out, emitted_name)
+                        append_view(out, sview(": mutable ", 0, -1)) if typed_declaration_is_mutable(ctx, statement, index) else append_view(out, sview(": ", 0, -1))
+                    if statement.aux == TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR:
+                        append_cpp_unordered_map_iterator_type(out, statement.type_name)
+                    else:
+                        append_c_type_contextual(out, ctx, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("?", 0, -1)) if statement.aux != TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR and c_type_pointer_outer_optional_suffix_needed(statement.type_name)
+                    append_view(out, sview(" = ", 0, -1))
+                    if statement.expr < 0:
+                        append_view(out, sview("zeroed", 0, -1))
+                    else:
+                        typed_emit_target_value(out, ctx, statement.expr, statement.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("\n", 0, -1))
+                TypedStmtKind.If:
+                    constant: mutable i64 = 0
+                    if typed_eval_integer_constant(ctx, statement.expr, constant):
+                        if constant != 0:
+                            typed_emit_stmt(out, ctx, statement.aux, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        elif statement.aux2 >= 0:
+                            typed_emit_stmt(out, ctx, statement.aux2, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        else:
+                            append_indent(out, level)
+                            append_view(out, sview("pass\n", 0, -1))
+                        return
+                    typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
+                    append_indent(out, level)
+                    append_view(out, sview("if ", 0, -1))
+                    typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview(":\n", 0, -1))
+                    then_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
+                    typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_pop_nonnull_facts(ctx, then_facts)
+                    if statement.aux2 >= 0:
+                        append_indent(out, level)
+                        append_view(out, sview("else:\n", 0, -1))
+                        else_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, false)
+                        typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        typed_pop_nonnull_facts(ctx, else_facts)
+                    # An early-return guard establishes the opposite fact on the
+                    # path that continues after the `if`. Carry that fact forward
+                    # instead of reasserting the same nullable pointer at every
+                    # later dereference.
+                    if statement.aux2 < 0 and typed_stmt_guarantees_exit(ctx, statement.aux):
+                        _ = typed_push_condition_nonnull_facts(ctx, statement.expr, false)
+                    elif statement.aux2 >= 0 and typed_stmt_guarantees_exit(ctx, statement.aux2):
+                        _ = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
+                TypedStmtKind.While:
+                    typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
+                    append_indent(out, level)
+                    if ctx.current_emit_has_goto and typed_expr_is_always_true(ctx, statement.expr):
+                        append_view(out, sview("while ", 0, -1))
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" == 0", 0, -1))
+                    elif ctx.current_emit_has_goto:
+                        append_view(out, sview("while ((", 0, -1))
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" == 0) and (", 0, -1))
+                        typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        append_view(out, sview("))", 0, -1))
+                    elif typed_expr_is_always_true(ctx, statement.expr):
+                        append_view(out, sview("while true", 0, -1))
+                    else:
+                        append_view(out, sview("while ", 0, -1))
+                        typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview(":\n", 0, -1))
+                    loop_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
+                    typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_pop_nonnull_facts(ctx, loop_facts)
+                TypedStmtKind.DoWhile:
+                    typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
+                    append_indent(out, level)
+                    append_view(out, sview("while true:\n", 0, -1))
+                    typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.aux2 >= 0
+                    if ctx.current_emit_has_goto:
+                        append_indent(out, level + 1)
+                        append_view(out, sview("break if ", 0, -1))
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" != 0\n", 0, -1))
+                    append_indent(out, level + 1)
+                    append_view(out, sview("break if not ", 0, -1))
+                    typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("\n", 0, -1))
+                TypedStmtKind.For:
+                    # A C `for` statement introduces a scope, including when its
+                    # body is a single statement without braces. Keep declarations
+                    # such as `for (int j = 0; ...)` local to this loop so a later
+                    # sibling loop may use the same source name.
+                    typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
+                    aliases_before_for: usize = ctx.current_name_aliases.count
+                    for_scope_start: usize = ctx.current_declared_names.count
+                    ctx.current_declared_scope_starts.push(for_scope_start)
+                    if statement.children_start >= 0:
+                        typed_emit_stmt(out, ctx, statement.children_start, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    # Elisa keeps the initializer at the surrounding statement
+                    # scope, so a later sibling loop can reuse the emitted name
+                    # with an assignment. Declarations introduced by nested loops
+                    # remain above this boundary and are removed with the loop.
+                    declared_after_init: usize = ctx.current_declared_names.count
+                    append_indent(out, level)
+                    if ctx.current_emit_has_goto:
+                        append_view(out, sview("while ((", 0, -1))
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" == 0) and (", 0, -1))
+                        typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        append_view(out, sview("))", 0, -1))
+                    else:
+                        append_view(out, sview("while ", 0, -1))
+                        typed_emit_condition(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview(":\n", 0, -1))
+                    loop_facts: i64 = typed_push_condition_nonnull_facts(ctx, statement.expr, true)
+                    typed_emit_stmt(out, ctx, statement.aux, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    # A C `for` increment runs after each body iteration, not after
+                    # the loop. `continue` already carries its increment in the
+                    # lowered body, so this handles the fall-through path.
+                    typed_emit_stmt(out, ctx, statement.aux2, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.aux2 >= 0 and not typed_stmt_guarantees_exit(ctx, statement.aux)
+                    typed_pop_nonnull_facts(ctx, loop_facts)
+                    typed_restore_declared_names(ctx, declared_after_init)
+                    while ctx.current_name_aliases.count > aliases_before_for:
+                        _ = ctx.current_name_aliases.pop()
+                    _ = ctx.current_declared_scope_starts.pop()
+                TypedStmtKind.Break:
+                    append_indent(out, level)
+                    append_view(out, sview("break\n", 0, -1))
+                TypedStmtKind.Continue:
+                    typed_emit_stmt(out, ctx, statement.aux, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if statement.aux >= 0
+                    append_indent(out, level)
+                    append_view(out, sview("continue\n", 0, -1))
+                TypedStmtKind.Switch:
+                    typed_invalidate_nonnull_facts(ctx, statement.expr) if typed_expr_contains_call(ctx, statement.expr)
+                    saved_switch_done_index: i64 = ctx.current_switch_done_index
+                    needs_switch_done: bool = typed_switch_needs_done(ctx, index)
+                    ctx.current_switch_done_index <- index if needs_switch_done else -1
+                    if needs_switch_done:
+                        append_indent(out, level)
+                        typed_append_switch_done_name(out, ctx)
+                        append_view(out, sview(": mutable bool = false\n", 0, -1))
+                    selector_name: mutable sview = sview("", 0, 0)
+                    if typed_switch_selector_needs_temp(ctx, statement.expr):
+                        selector_name <- typed_emit_switch_selector(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_indent(out, level)
+                    append_view(out, sview("match ", 0, -1))
+                    if selector_name.len > 0:
+                        append_view(out, selector_name)
+                    else:
+                        typed_emit_expr(out, ctx, statement.expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview(":\n", 0, -1))
+                    has_default: mutable bool = false
+                    offset: mutable i64 = 0
+                    while offset < statement.children_count |out, ctx, statement, level, has_default, offset|:
+                        switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
+                        declared_start: usize = ctx.current_declared_names.count
+                        alias_start: usize = ctx.current_name_aliases.count
+                        append_indent(out, level + 1)
+                        if switch_case.is_default:
+                            append_view(out, sview("_:\n", 0, -1))
+                            has_default <- true
+                        else:
+                            group_end: mutable i64 = offset + 1
+                            while group_end < statement.children_count |ctx, statement, switch_case, group_end|:
+                                next_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + group_end).usize()]
+                                break if next_case.is_default or next_case.body != switch_case.body
+                                group_end <- group_end + 1
+                            typed_emit_switch_case_pattern(out, ctx, statement, offset, group_end) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                            offset <- group_end - 1
+                            append_view(out, sview(":\n", 0, -1))
+                        typed_emit_switch_case_body(out, ctx, switch_case.body, level + 2) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        typed_restore_declared_names(ctx, declared_start)
+                        while ctx.current_name_aliases.count > alias_start:
+                            _ = ctx.current_name_aliases.pop()
+                        offset <- offset + 1
+                    if not has_default:
+                        append_indent(out, level + 1)
+                        append_view(out, sview("_:\n", 0, -1))
+                        append_indent(out, level + 2)
+                        append_view(out, sview("pass\n", 0, -1))
+                    ctx.current_switch_done_index <- saved_switch_done_index
+                TypedStmtKind.SwitchBreak:
+                    if ctx.current_switch_done_index >= 0:
+                        append_indent(out, level)
+                        typed_append_switch_done_name(out, ctx)
+                        append_view(out, sview(" <- true\n", 0, -1))
+                TypedStmtKind.Goto:
+                    append_indent(out, level)
+                    append_view(out, ctx.current_emit_goto_name)
+                    append_view(out, sview(" <- ", 0, -1))
+                    append_i64(out, statement.aux + 1)
+                    append_view(out, sview("\n", 0, -1))
+                TypedStmtKind.Label:
+                    if ctx.current_emit_has_goto:
+                        append_indent(out, level)
+                        append_view(out, sview("if ((", 0, -1))
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" == 0) or (", 0, -1))
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" == ", 0, -1))
+                        append_i64(out, statement.aux + 1)
+                        append_view(out, sview(")):\n", 0, -1))
+                        append_indent(out, level + 1)
+                        append_view(out, sview("if ", 0, -1))
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" == ", 0, -1))
+                        append_i64(out, statement.aux + 1)
+                        append_view(out, sview(":\n", 0, -1))
+                        append_indent(out, level + 2)
+                        append_view(out, ctx.current_emit_goto_name)
+                        append_view(out, sview(" <- 0\n", 0, -1))
+                        typed_emit_stmt(out, ctx, statement.expr, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    else:
+                        typed_emit_stmt(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                TypedStmtKind.Expression:
+                    typed_invalidate_nonnull_facts(ctx, statement.expr)
+                    typed_emit_expression_statement(out, ctx, statement.expr, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                TypedStmtKind.Null:
+                    append_indent(out, level)
+                    append_view(out, sview("pass\n", 0, -1))
+                _:
+                    append_indent(out, level)
+                    append_view(out, sview("<invalid-ir>\n", 0, -1))
+    def typed_emit_stmt[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, index: i64, level: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+            source_span: i64 = typed_begin_statement_source_span(out, ctx, index) can Memory.Allocate, Abort.Panic
+            if ctx.mode == TypedTranslationMode.Idiomatic and ctx.current_trusted_depth == 0 and typed_stmt_directly_needs_unsafe(ctx, index):
+                append_indent(out, level)
+                append_view(out, sview("trusted Unsafe.StaleRef:\n", 0, -1))
+                ctx.current_trusted_depth <- ctx.current_trusted_depth + 1
+                typed_emit_stmt_body(out, ctx, index, level + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                ctx.current_trusted_depth <- ctx.current_trusted_depth - 1
+            else:
+                typed_emit_stmt_body(out, ctx, index, level) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_finish_statement_source_span(out, ctx, source_span) can Memory.Allocate, Abort.Panic

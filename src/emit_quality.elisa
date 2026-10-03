@@ -1,10 +1,140 @@
 extend CTranslator:
+    # The fidelity mode is a semantic-preservation aid: keep the typed
+    # lowering and required ABI conversions, but do not apply optional
+    # readability rewrites that erase source-level expression structure.
+    # Keeping this gate in one predicate makes future rewrite rules explicit
+    # and prevents a new rule from silently changing fidelity output.
+    def typed_readability_rewrites_enabled[@r](ctx: TypedContext[r]&) -> bool:
+        return ctx.mode == TypedTranslationMode.Idiomatic
+
+    def typed_increment_type_id(type_key: sview) -> i64:
+        return 0 if sview_eq(type_key, sview("i8", 0, -1))
+        return 1 if sview_eq(type_key, sview("u8", 0, -1))
+        return 2 if sview_eq(type_key, sview("i16", 0, -1))
+        return 3 if sview_eq(type_key, sview("u16", 0, -1))
+        return 4 if sview_eq(type_key, sview("i32", 0, -1))
+        return 5 if sview_eq(type_key, sview("u32", 0, -1))
+        return 6 if sview_eq(type_key, sview("i64", 0, -1))
+        return 7 if sview_eq(type_key, sview("u64", 0, -1))
+        return 8 if sview_eq(type_key, sview("usize", 0, -1))
+        return 9 if sview_eq(type_key, sview("isize", 0, -1))
+        return 10 if sview_eq(type_key, sview("f32", 0, -1))
+        return 11 if sview_eq(type_key, sview("f64", 0, -1))
+        return 12 if sview_eq(type_key, sview("bool", 0, -1))
+        return -1
+
+    def typed_increment_type_name(type_id: i64) -> sview:
+        return sview("i8", 0, -1) if type_id == 0
+        return sview("u8", 0, -1) if type_id == 1
+        return sview("i16", 0, -1) if type_id == 2
+        return sview("u16", 0, -1) if type_id == 3
+        return sview("i32", 0, -1) if type_id == 4
+        return sview("u32", 0, -1) if type_id == 5
+        return sview("i64", 0, -1) if type_id == 6
+        return sview("u64", 0, -1) if type_id == 7
+        return sview("usize", 0, -1) if type_id == 8
+        return sview("isize", 0, -1) if type_id == 9
+        return sview("f32", 0, -1) if type_id == 10
+        return sview("f64", 0, -1) if type_id == 11
+        return sview("bool", 0, -1) if type_id == 12
+        return sview("", 0, 0)
+
+    def typed_increment_mode_name(mode: i64) -> sview:
+        return sview("post_increment", 0, -1) if mode == 1
+        return sview("pre_increment", 0, -1) if mode == 2
+        return sview("post_decrement", 0, -1) if mode == 3
+        return sview("pre_decrement", 0, -1) if mode == 4
+        return sview("invalid_increment", 0, -1)
+    def typed_increment_helper_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, type_key: sview, mode: i64) -> void:
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        append_view(out, sview("__elisa_transpiler_inc_", 0, -1))
+        append_i64(out, hash.i64())
+        append_view(out, sview("_", 0, -1))
+        append_view(out, typed_increment_mode_name(mode))
+        append_view(out, sview("_", 0, -1))
+        append_view(out, type_key)
+    def typed_increment_helper_mask[@r](ctx: TypedContext[r]&) -> i64:
+        mask: mutable i64 = 0
+        for index in 0..<ctx.exprs.count.i64() |ctx, mask|:
+            expression: TypedExpr[r] = typed_expr_at(ctx, index)
+            if expression.kind == TypedExprKind.Sequence and expression.value >= 1 and expression.value <= 4:
+                type_id: i64 = typed_increment_type_id(typed_increment_scalar_key(ctx, expression.type_name))
+                mask <- mask | (1 << (type_id * 4 + expression.value - 1)) if type_id >= 0
+        return mask
+
+    def typed_increment_helper_is_used(mask: i64, type_id: i64, mode: i64) -> bool:
+        return type_id >= 0 and (mask & (1 << (type_id * 4 + mode - 1))) != 0
+
+    def typed_expr_is_increment_sequence[@r](expression: TypedExpr[r]) -> bool:
+        return expression.kind == TypedExprKind.Sequence and expression.value >= 1 and expression.value <= 4
+
+    def typed_expr_is_assignment_value_sequence[@r](expression: TypedExpr[r]) -> bool:
+        return expression.kind == TypedExprKind.Sequence and expression.value == 5
+
+    def typed_expr_is_compound_assignment_value_sequence[@r](expression: TypedExpr[r]) -> bool:
+        return expression.kind == TypedExprKind.Sequence and expression.value >= 6 and expression.value <= 15
+    def typed_compound_assignment_value_helper_is_first[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+        current: TypedExpr[r] = typed_expr_at(ctx, index)
+        return false if not typed_expr_is_compound_assignment_value_sequence(current)
+        current_assignment: TypedExpr[r] = typed_expr_at(ctx, current.lhs)
+        current_update: TypedExpr[r] = typed_expr_at(ctx, current_assignment.rhs)
+        current_target_type: sview = typed_expr_at(ctx, current_assignment.lhs).type_name
+        current_value_type: sview = typed_expr_at(ctx, current_update.rhs).type_name
+        for previous_index in 0..<index |ctx, current, current_assignment, current_update, current_target_type, current_value_type|:
+            previous: TypedExpr[r] = typed_expr_at(ctx, previous_index)
+            if typed_expr_is_compound_assignment_value_sequence(previous) and previous.value == current.value:
+                previous_assignment: TypedExpr[r] = typed_expr_at(ctx, previous.lhs)
+                previous_update: TypedExpr[r] = typed_expr_at(ctx, previous_assignment.rhs)
+                previous_target_type: sview = typed_expr_at(ctx, previous_assignment.lhs).type_name
+                previous_value_type: sview = typed_expr_at(ctx, previous_update.rhs).type_name
+                return false if sview_eq(previous_target_type, current_target_type) and sview_eq(previous_value_type, current_value_type)
+        return true
+
+    def typed_compound_assignment_surface_opcode(opcode: sview) -> sview:
+        return sview("+=", 0, -1) if sview_eq(opcode, sview("+", 0, -1))
+        return sview("-=", 0, -1) if sview_eq(opcode, sview("-", 0, -1))
+        return sview("*=", 0, -1) if sview_eq(opcode, sview("*", 0, -1))
+        return sview("/=", 0, -1) if sview_eq(opcode, sview("/", 0, -1))
+        return sview("%=", 0, -1) if sview_eq(opcode, sview("%", 0, -1))
+        return sview("&=", 0, -1) if sview_eq(opcode, sview("&", 0, -1))
+        return sview("|=", 0, -1) if sview_eq(opcode, sview("|", 0, -1))
+        return sview("^=", 0, -1) if sview_eq(opcode, sview("^", 0, -1))
+        return sview("<<=", 0, -1) if sview_eq(opcode, sview("<<", 0, -1))
+        return sview(">>=", 0, -1) if sview_eq(opcode, sview(">>", 0, -1))
+        return sview("", 0, 0)
+
+    # These effects are represented as separate statements by the current
+    # lowering (comma/assignment expressions and increment/decrement). Calls
+    # are deliberately not classified here: Elisa's compound operator can
+    # evaluate a call directly, once, as part of either operand.
+    def typed_expr_has_lowered_sequence_effect[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        return false if typed_expr_is_increment_sequence(expression)
+        return true if expression.kind == TypedExprKind.Sequence
+        return true if expression.kind == TypedExprKind.ArrayIndex and expression.value >= 0
+        if expression.kind == TypedExprKind.Binary or expression.kind == TypedExprKind.ArrayIndex:
+            return typed_expr_has_lowered_sequence_effect(ctx, expression.lhs) or typed_expr_has_lowered_sequence_effect(ctx, expression.rhs)
+        if expression.kind == TypedExprKind.Unary or expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.Member:
+            return typed_expr_has_lowered_sequence_effect(ctx, expression.lhs)
+        if expression.kind == TypedExprKind.Conditional:
+            return typed_expr_has_lowered_sequence_effect(ctx, expression.lhs) or typed_expr_has_lowered_sequence_effect(ctx, expression.rhs) or typed_expr_has_lowered_sequence_effect(ctx, expression.third)
+        if expression.kind == TypedExprKind.Call:
+            return typed_expr_has_lowered_sequence_effect(ctx, expression.lhs)
+        return false
+
     # Small semantic predicates shared by the readability pass. These operate
     # on the typed IR rather than on a target project's spelling, so they are
     # safe to reuse for every translated C program.
-    def typed_expr_is_side_effect_free(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_is_side_effect_free[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        # A read from a volatile or atomic-qualified object is observable even
+        # when its typed-IR node is only a Name/Member/ArrayIndex. Be
+        # conservative across pointer qualification layers here; a missed
+        # readability rewrite is preferable to erasing an observable access.
+        return false if typed_type_spelling_has_word(expression.type_name, sview("volatile", 0, -1)) or typed_type_spelling_has_word(expression.type_name, sview("_Atomic", 0, -1))
         if expression.kind == TypedExprKind.Integer or expression.kind == TypedExprKind.Floating or expression.kind == TypedExprKind.String or expression.kind == TypedExprKind.Character or expression.kind == TypedExprKind.Name or expression.kind == TypedExprKind.Null or expression.kind == TypedExprKind.Zeroed or expression.kind == TypedExprKind.Sizeof:
             return true
         if expression.kind == TypedExprKind.Call:
@@ -26,49 +156,42 @@ extend CTranslator:
         if expression.kind == TypedExprKind.Sequence:
             return typed_expr_is_side_effect_free(ctx, expression.lhs) and typed_expr_is_side_effect_free(ctx, expression.rhs)
         return false
-
-    def typed_expr_is_zero_literal(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_is_zero_literal[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return true if expression.kind == TypedExprKind.Character and expression.value == 0
         return expression.kind == TypedExprKind.Integer and (sview_eq(expression.text, sview("0", 0, -1)) or sview_eq(expression.text, sview("-0", 0, -1)))
-
-    def typed_expr_is_one_literal(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_is_one_literal[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return true if expression.kind == TypedExprKind.Character and expression.value == 1
         return expression.kind == TypedExprKind.Integer and sview_eq(expression.text, sview("1", 0, -1))
-
-    def typed_expr_is_sizeof_value(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_is_sizeof_value[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return true if expression.kind == TypedExprKind.Sizeof
         return typed_expr_is_sizeof_value(ctx, expression.lhs) if expression.kind == TypedExprKind.Cast else false
-
-    def typed_expr_is_redundant_cast(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_is_redundant_cast[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return false if expression.kind != TypedExprKind.Cast or expression.lhs < 0 or expression.lhs >= ctx.exprs.count.i64()
-        operand: TypedExpr = typed_expr_at(ctx, expression.lhs)
+        operand: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
         # Qualifier-only scalar casts do not change the Elisa representation.
         # For pointers, preserve pointee constness: dropping a `const T *` to
         # `T *` is an intentional capability change, not a redundant cast.
         return true if sview_eq(operand.type_name, expression.type_name)
         return false if c_type_pointer_count(operand.type_name) > 0 or c_type_pointer_count(expression.type_name) > 0
         return sview_eq(c_type_without_qualifiers(operand.type_name), c_type_without_qualifiers(expression.type_name))
-
-    def typed_expr_is_identity_binary(ctx: TypedContext&, index: i64) -> i64:
+    def typed_expr_identity_binary_candidate_operand[@r](ctx: TypedContext[r]&, index: i64) -> i64:
         return -1 if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return -1 if expression.kind != TypedExprKind.Binary
-        if not typed_expr_is_side_effect_free(ctx, expression.rhs) or not typed_expr_is_side_effect_free(ctx, expression.lhs):
-            return -1
+        return -1 if expression.lhs < 0 or expression.lhs >= ctx.exprs.count.i64() or expression.rhs < 0 or expression.rhs >= ctx.exprs.count.i64()
         # `sizeof` keeps its operand type in the IR for rendering, so its
         # expression type is not itself an integer ABI type. It is nevertheless
         # a pure size value and `sizeof(T) * 1`/`/ 1` are still identities.
         if typed_expr_is_sizeof_value(ctx, expression.lhs) and (sview_eq(expression.text, sview("*", 0, -1)) or sview_eq(expression.text, sview("/", 0, -1))) and typed_expr_is_one_literal(ctx, expression.rhs):
             return expression.lhs
-        return -1 if not c_type_is_integer(expression.type_name)
         if (sview_eq(expression.text, sview("+", 0, -1)) or sview_eq(expression.text, sview("-", 0, -1)) or sview_eq(expression.text, sview("|", 0, -1)) or sview_eq(expression.text, sview("^", 0, -1)) or sview_eq(expression.text, sview("<<", 0, -1)) or sview_eq(expression.text, sview(">>", 0, -1))) and typed_expr_is_zero_literal(ctx, expression.rhs):
             return expression.lhs
         if (sview_eq(expression.text, sview("+", 0, -1)) or sview_eq(expression.text, sview("|", 0, -1)) or sview_eq(expression.text, sview("^", 0, -1))) and typed_expr_is_zero_literal(ctx, expression.lhs):
@@ -78,3 +201,15 @@ extend CTranslator:
         if sview_eq(expression.text, sview("*", 0, -1)) and typed_expr_is_one_literal(ctx, expression.lhs):
             return expression.rhs
         return -1
+    def typed_expr_is_identity_binary[@r](ctx: TypedContext[r]&, index: i64) -> i64:
+        return -1 if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        return -1 if expression.kind != TypedExprKind.Binary or not c_type_is_integer(expression.type_name)
+        return -1 if not typed_expr_is_side_effect_free(ctx, expression.rhs) or not typed_expr_is_side_effect_free(ctx, expression.lhs)
+        return typed_expr_identity_binary_candidate_operand(ctx, index)
+    def typed_expr_identity_binary_decline_reason[@r](ctx: TypedContext[r]&, index: i64) -> sview:
+        return sview("", 0, 0) if typed_expr_identity_binary_candidate_operand(ctx, index) < 0
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        return sview("result-not-integer", 0, -1) if not c_type_is_integer(expression.type_name)
+        return sview("operand-has-side-effects", 0, -1) if not typed_expr_is_side_effect_free(ctx, expression.rhs) or not typed_expr_is_side_effect_free(ctx, expression.lhs)
+        return sview("", 0, 0)

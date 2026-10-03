@@ -1,0 +1,5 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_anonymous_namespace/alpha.cpp","command":"clang++ -std=c++17 -c testdata/fixtures/project_anonymous_namespace/alpha.cpp"},
+  {"directory":".","file":"testdata/fixtures/project_anonymous_namespace/beta.cpp","command":"clang++ -std=c++17 -c testdata/fixtures/project_anonymous_namespace/beta.cpp"},
+  {"directory":".","file":"testdata/fixtures/project_anonymous_namespace/main.cpp","command":"clang++ -std=c++17 -c testdata/fixtures/project_anonymous_namespace/main.cpp"}
+]

@@ -1,0 +1,16 @@
+extern va_list
+
+extern va_arg[T](storage: mutable void&) -> T
+
+extern llvm_va_start(storage: mutable void&) -> void
+extern llvm_va_end(storage: mutable void&) -> void
+
+def probe(tag: i32, ...) -> i32:
+    ap: mutable va_list = zeroed
+    llvm_va_start((&ap).cast[mutable void&])
+    value: i32 = va_arg[i32]((&ap).cast[mutable void&])
+    llvm_va_end((&ap).cast[mutable void&])
+    return value + tag
+
+def main() -> i32:
+    return probe(1, 41) - 42

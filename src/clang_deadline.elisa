@@ -1,0 +1,79 @@
+struct ClangPollDescriptor:
+    descriptor: mutable i32
+    events: mutable i16
+    returned_events: mutable i16
+
+struct ClangMonotonicTime:
+    seconds: i64
+    nanoseconds: i64
+
+@link_name("poll")
+extern clang_poll(descriptors: mutable ClangPollDescriptor&, count: usize, timeout_milliseconds: i32) -> i32
+@link_name("clock_gettime")
+extern clang_clock_gettime(clock_id: i32, value: mutable ClangMonotonicTime&) -> i32
+@link_name("waitpid")
+extern clang_waitpid(process: i32, status: mutable i32&, options: i32) -> i32
+
+extend CTranslator:
+
+    # Darwin uses CLOCK_MONOTONIC=6; Linux provides CLOCK_BOOTTIME=6 and
+    # CLOCK_MONOTONIC=1. Trying 6 first keeps the process deadline monotonic on
+    # both hosts, with Linux's MONOTONIC as a fallback where BOOTTIME is absent.
+    def clang_monotonic_milliseconds(milliseconds: mutable i64&) -> bool:
+        current: mutable ClangMonotonicTime = zeroed
+        clock_id: mutable i32 = 6
+        if clang_clock_gettime(clock_id, &current) != 0:
+            clock_id <- 1
+            return false if clang_clock_gettime(clock_id, &current) != 0
+        return false if current.seconds < 0 or current.nanoseconds < 0 or current.nanoseconds >= 1000000000
+        subsecond_milliseconds: i64 = current.nanoseconds / 1000000
+        return false if current.seconds > (9223372036854775807 - subsecond_milliseconds) / 1000
+        milliseconds <- current.seconds * 1000 + subsecond_milliseconds
+        return true
+
+    # Checks are repeated after every poll wakeup so stdout activity cannot
+    # extend the absolute monotonic deadline.
+    def clang_deadline_after_seconds(seconds: usize, deadline_milliseconds: mutable i64&) -> bool:
+        return false if seconds == 0.usize() or seconds > 86400.usize()
+        now: mutable i64 = 0
+        return false if not clang_monotonic_milliseconds(&now)
+        duration: i64 = seconds.i64() * 1000
+        return false if now > 9223372036854775807 - duration
+        deadline_milliseconds <- now + duration
+        return true
+
+    # Return 1 when the descriptor is ready, 0 when the absolute deadline
+    # expires, and -1 if the host clock or poll operation fails.
+    def clang_poll_until_ready(descriptor: i32, deadline_milliseconds: i64) -> i32:
+        state: mutable ClangPollDescriptor = zeroed
+        state.descriptor <- descriptor
+        state.events <- 1
+        while true |state, deadline_milliseconds|:
+            now: mutable i64 = 0
+            return -1 if not clang_monotonic_milliseconds(&now)
+            remaining: i64 = deadline_milliseconds - now
+            return 0 if remaining <= 0
+            wait_milliseconds: i32 = 100 if remaining > 100 else remaining.i32()
+            state.returned_events <- 0
+            ready: i32 = clang_poll(&state, 1.usize(), wait_milliseconds)
+            return 1 if ready > 0
+            return -1 if ready < 0
+        return -1
+
+    # WNOHANG plus poll with no descriptors handles the case where Clang closes
+    # stdout but keeps running. The same absolute deadline covers both capture
+    # and process completion; no blocking wait can outlive it.
+    def clang_wait_child_until(process: i32, deadline_milliseconds: i64, status: mutable i32&) -> i32:
+        idle: mutable ClangPollDescriptor = zeroed
+        while true |process, deadline_milliseconds, status, idle|:
+            waited: i32 = clang_waitpid(process, status, 1.i32())
+            return 1 if waited == process
+            return -1 if waited < 0
+            now: mutable i64 = 0
+            return -1 if not clang_monotonic_milliseconds(&now)
+            remaining: i64 = deadline_milliseconds - now
+            return 0 if remaining <= 0
+            wait_milliseconds: i32 = 100 if remaining > 100 else remaining.i32()
+            result: i32 = clang_poll(&idle, 0.usize(), wait_milliseconds)
+            return -1 if result < 0
+        return -1

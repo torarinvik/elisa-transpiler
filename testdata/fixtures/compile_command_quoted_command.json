@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/compile_command_quoted.c",
+    "command": "ELISA_TRANSLATOR_ARGV_TEST=1 clang -std=c11 -I'testdata/fixtures/quoted include' -c testdata/fixtures/compile_command_quoted.c -o /dev/null"
+  }
+]

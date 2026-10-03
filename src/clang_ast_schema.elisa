@@ -1,0 +1,56 @@
+extend CTranslator:
+    # Validate the raw Clang envelope before projection. Projection always
+    # writes its own compact TranslationUnitDecl wrapper, so checking only the
+    # projected DOM would hide a malformed frontend root.
+    def ast_json_root_schema_issue(text: sview) -> sview:
+        cursor: mutable i64 = ast_json_skip_space(text, 0)
+        return sview("root-not-object", 0, -1) if cursor >= text.len or string_view_index(text, cursor) != 123
+        cursor <- ast_json_skip_space(text, cursor + 1)
+        kind_seen: mutable bool = false
+        kind_is_valid: mutable bool = false
+        inner_seen: mutable bool = false
+        inner_is_valid: mutable bool = false
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)) and not kind_seen:
+                kind_seen <- true
+                kind_is_valid <- string_view_index(text, value_start) == 34 and ast_json_key_is(text, value_start, value_stop, sview("TranslationUnitDecl", 0, -1))
+            elif ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1)) and not inner_seen:
+                inner_seen <- true
+                inner_is_valid <- string_view_index(text, value_start) == 91
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("missing-required-field:root.kind", 0, -1) if not kind_seen
+        return sview("unsupported-root-kind", 0, -1) if not kind_is_valid
+        return sview("missing-required-field:root.inner", 0, -1) if not inner_seen or not inner_is_valid
+        return sview("", 0, 0)
+
+    # Validate the translator-owned compact projection envelope after parsing.
+    # The raw Clang schema is checked before projection above; this second
+    # contract ensures the lowering pipeline never silently consumes an
+    # unversioned or unknown compact representation. Nested Clang nodes remain
+    # intentionally permissive because their optional shapes vary by release.
+    def ast_root_schema_issue[@r](root: JsonValueHandle[r]) -> sview @r:
+        return sview("root-not-object", 0, -1) if not json_handle_is_object(root)
+        kind: JsonValueHandle[r] = ast_field(root, sview("kind", 0, -1))
+        return sview("missing-required-field:root.kind", 0, -1) if not json_handle_is_string(kind)
+        return sview("unsupported-root-kind", 0, -1) if not sview_eq(ast_string(kind), sview("TranslationUnitDecl", 0, -1))
+        version_fields: mutable i64 = 0
+        for index in 0..<json_handle_object_len(root) |root, version_fields|:
+            key: sview = try json_handle_key_at(root, index) else sview("", 0, 0)
+            version_fields <- version_fields + 1 if sview_eq(key, sview("elisaProjectionVersion", 0, -1))
+        return sview("duplicate-field:root.elisaProjectionVersion", 0, -1) if version_fields > 1
+        projection_version: JsonValueHandle[r] = ast_field(root, sview("elisaProjectionVersion", 0, -1))
+        return sview("missing-required-field:root.elisaProjectionVersion", 0, -1) if not json_handle_has(root, sview("elisaProjectionVersion", 0, -1))
+        return sview("invalid-type:root.elisaProjectionVersion", 0, -1) if not json_handle_is_number(projection_version)
+        parsed_projection_version: f64 = try json_handle_as_number(projection_version) else -1.0
+        return sview("unsupported-projection-version", 0, -1) if parsed_projection_version != 2.0
+        children: JsonValueHandle[r] = ast_field(root, sview("inner", 0, -1))
+        return sview("missing-required-field:root.inner", 0, -1) if not json_handle_is_array(children)
+        return sview("", 0, 0)

@@ -1,0 +1,567 @@
+extern CFile
+
+@link_name("pipe")
+extern clang_pipe(descriptors: mutable i32&) -> i32
+@link_name("fork")
+extern clang_fork() -> i32
+@link_name("setpgid")
+extern clang_setpgid(process: i32, group: i32) -> i32
+@link_name("dup2")
+extern clang_dup2(old_descriptor: i32, new_descriptor: i32) -> i32
+@link_name("close")
+extern clang_close(descriptor: i32) -> i32
+@link_name("chdir")
+extern clang_chdir(path: cstr) -> i32
+@link_name("execvp")
+extern clang_execvp(file: cstr, arguments: mutable cstr&&) -> i32
+@link_name("_exit")
+extern clang_exit(status: i32) -> void
+@link_name("kill")
+extern clang_kill(process: i32, signal: i32) -> i32
+@link_name("read")
+extern clang_read(descriptor: i32, buffer: mutable void&, count: usize) -> i64
+@link_name("fread")
+extern c_fread(buffer: mutable void&, size: usize, count: usize, stream: CFile) -> usize
+@link_name("fopen")
+extern c_fopen(path: cstr, mode: cstr) -> CFile?
+@link_name("fwrite")
+extern c_fwrite(buffer: void&, size: usize, count: usize, stream: CFile) -> usize
+@link_name("fclose")
+extern c_fclose(stream: CFile) -> i32
+@link_name("tmpfile")
+extern c_tmpfile() -> CFile?
+@link_name("fileno")
+extern c_fileno(stream: CFile) -> i32
+@link_name("fflush")
+extern c_fflush(stream: CFile) -> i32
+@link_name("ftello")
+extern c_ftello(stream: CFile) -> i64
+@link_name("fseek")
+extern c_fseek(stream: CFile, offset: i64, origin: i32) -> i32
+@link_name("ferror")
+extern c_ferror(stream: CFile) -> i32
+@link_name("rename")
+extern clang_rename(old_path: cstr, new_path: cstr) -> i32
+@link_name("unlink")
+extern clang_unlink(path: cstr) -> i32
+@link_name("getpid")
+extern clang_getpid() -> i32
+@link_name("mmap")
+extern clang_mmap(address: uintptr, length: usize, protection: i32, flags: i32, descriptor: i32, offset: i64) -> uintptr
+@link_name("munmap")
+extern clang_munmap(address: mutable void&, length: usize) -> i32
+@link_name("realpath")
+extern clang_realpath(path: cstr, resolved_path: void&?) -> u8&?
+
+module CTranslator:
+
+    # Clang may fork cc1 and helper processes that inherit stdout. Kill the
+    # whole dedicated process group so no descendant can keep our pipe open.
+    def terminate_clang_process_group(process: i32) -> void:
+        _ = clang_kill(-process, 9)
+        _ = clang_kill(process, 9)
+
+    def append_literal(out: mutable darray[u8]&, value: sview) -> void:
+        for index in 0..<value.len |out, value|:
+            out.push(string_view_index(value, index).u8())
+
+    def shell_word_is_environment_assignment(word: sview) -> bool:
+        return false if word.len < 2
+        first: i64 = string_view_index(word, 0)
+        return false if not ((first >= 65 and first <= 90) or (first >= 97 and first <= 122) or first == 95)
+        for index in 1..<word.len:
+            byte: i64 = string_view_index(word, index)
+            return true if byte == 61
+            return false if not ((byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 95)
+        return false
+
+    def append_argv_view(text: mutable darray[u8]&, offsets: mutable darray[usize]&, value: sview) -> void:
+        offsets.push(text.count)
+        append_view(text, value)
+        text.push(0)
+
+    def append_compile_argv_word(text: mutable darray[u8]&, offsets: mutable darray[usize]&, word: sview, word_index: i64, allow_environment_prefix: bool) -> void:
+        if allow_environment_prefix and word_index == 0 and shell_word_is_environment_assignment(word):
+            append_argv_view(text, offsets, sview("env", 0, -1))
+        append_argv_view(text, offsets, word)
+
+    # Parse shell-like word quoting without evaluating a shell. `reject_shell_syntax`
+    # is true for compile_commands `command` strings; response files use argv
+    # quoting only, so metacharacters there remain ordinary literal bytes.
+    def tokenize_compile_command(text: sview, argv_text: mutable darray[u8]&, argv_offsets: mutable darray[usize]&, valid: mutable bool&, allow_environment_prefix: bool, reject_shell_syntax: bool) -> void:
+        valid <- false
+        token: mutable darray[u8] = []
+        cursor: mutable i64 = 0
+        quote: mutable i64 = 0
+        token_started: mutable bool = false
+        word_count: mutable i64 = 0
+        while cursor < text.len |text, token, cursor, quote, token_started, word_count, argv_text, argv_offsets, allow_environment_prefix, reject_shell_syntax|:
+            byte: i64 = string_view_index(text, cursor)
+            return if byte == 0
+            if quote == 1:
+                if byte == 39:
+                    quote <- 0
+                else:
+                    token.push(byte.u8())
+                token_started <- true
+                cursor <- cursor + 1
+            elif quote == 2:
+                if byte == 34:
+                    quote <- 0
+                    cursor <- cursor + 1
+                elif reject_shell_syntax and (byte == 36 or byte == 96):
+                    return
+                elif byte == 92:
+                    return if cursor + 1 >= text.len
+                    escaped: i64 = string_view_index(text, cursor + 1)
+                    if escaped == 10:
+                        cursor <- cursor + 2
+                    elif escaped == 34 or escaped == 92 or escaped == 36 or escaped == 96:
+                        token.push(escaped.u8())
+                        token_started <- true
+                        cursor <- cursor + 2
+                    else:
+                        token.push(byte.u8())
+                        token.push(escaped.u8())
+                        token_started <- true
+                        cursor <- cursor + 2
+                else:
+                    token.push(byte.u8())
+                    token_started <- true
+                    cursor <- cursor + 1
+            elif byte == 32 or byte == 9 or byte == 10 or byte == 13 or byte == 11 or byte == 12:
+                if token_started:
+                    append_compile_argv_word(argv_text, argv_offsets, bytes_view(token), word_count, allow_environment_prefix)
+                    word_count <- word_count + 1
+                    token.count <- 0.usize()
+                    token_started <- false
+                cursor <- cursor + 1
+            elif byte == 39:
+                quote <- 1
+                token_started <- true
+                cursor <- cursor + 1
+            elif byte == 34:
+                quote <- 2
+                token_started <- true
+                cursor <- cursor + 1
+            elif byte == 92:
+                return if cursor + 1 >= text.len
+                escaped: i64 = string_view_index(text, cursor + 1)
+                if escaped != 10:
+                    token.push(escaped.u8())
+                    token_started <- true
+                cursor <- cursor + 2
+            elif reject_shell_syntax and byte == 35:
+                return if not token_started
+                token.push(byte.u8())
+                cursor <- cursor + 1
+            elif reject_shell_syntax and (byte == 36 or byte == 96 or byte == 59 or byte == 38 or byte == 124 or byte == 60 or byte == 62 or byte == 40 or byte == 41 or byte == 123 or byte == 125 or byte == 42 or byte == 63 or byte == 91 or byte == 93 or byte == 126):
+                return
+            else:
+                token.push(byte.u8())
+                token_started <- true
+                cursor <- cursor + 1
+        return if quote != 0
+        if token_started:
+            append_compile_argv_word(argv_text, argv_offsets, bytes_view(token), word_count, allow_environment_prefix)
+            word_count <- word_count + 1
+        valid <- word_count > 0
+
+    def build_c_argv(text: darray[u8], offsets: darray[usize], storage: mutable darray[cstr]&) -> void can[Memory.Allocate, Unsafe.PointerCast]:
+        storage.count <- 0.usize()
+        return if offsets.count == 0.usize()
+        text_base: uintptr = (&text[0]).cast[uintptr] can Unsafe.PointerCast
+        for index in 0..<offsets.count |storage, offsets|:
+            argument_address: uintptr = text_base + offsets[index].uintptr()
+            storage.push(argument_address.cast[cstr]) can Unsafe.PointerCast
+        storage.push(0.uintptr().cast[cstr]) can Unsafe.PointerCast
+
+    def argv_word_equals(text: darray[u8], offset: usize, wanted: sview) -> bool:
+        cursor: mutable usize = offset
+        for index in 0..<wanted.len |text, cursor, wanted|:
+            return false if cursor >= text.count or text[cursor] != string_view_index(wanted, index).u8()
+            cursor <- cursor + 1.usize()
+        return cursor < text.count and text[cursor] == 0
+
+    def argv_word_starts_with(text: darray[u8], offset: usize, prefix: sview) -> bool:
+        cursor: mutable usize = offset
+        for index in 0..<prefix.len |text, cursor, prefix|:
+            return false if cursor >= text.count or text[cursor] != string_view_index(prefix, index).u8()
+            cursor <- cursor + 1.usize()
+        return cursor < text.count and text[cursor] != 0
+
+    def copy_argv_word(source_text: darray[u8], source_offset: usize, target_text: mutable darray[u8]&, target_offsets: mutable darray[usize]&) -> void:
+        target_offsets.push(target_text.count)
+        cursor: mutable usize = source_offset
+        while cursor < source_text.count |source_text, cursor, target_text|:
+            byte: u8 = source_text[cursor]
+            break if byte == 0
+            target_text.push(byte)
+            cursor <- cursor + 1.usize()
+        target_text.push(0)
+
+    # Remove only action/output/dependency switches that can conflict with AST
+    # extraction or create build artifacts. Semantic options (language, target,
+    # defines, includes, forced includes, ABI flags) are copied byte-for-byte.
+    def normalize_compile_argv(source_text: darray[u8], source_offsets: darray[usize], target_text: mutable darray[u8]&, target_offsets: mutable darray[usize]&, valid: mutable bool&) -> void:
+        valid <- false
+        return if source_offsets.count == 0.usize()
+        copy_argv_word(source_text, source_offsets[0], target_text, target_offsets)
+        index: mutable usize = 1.usize()
+        options_ended: mutable bool = false
+        while index < source_offsets.count |source_text, source_offsets, target_text, target_offsets, index, options_ended|:
+            offset: usize = source_offsets[index]
+            if options_ended:
+                copy_argv_word(source_text, offset, target_text, target_offsets)
+                index <- index + 1.usize()
+            elif argv_word_equals(source_text, offset, sview("--", 0, -1)):
+                copy_argv_word(source_text, offset, target_text, target_offsets)
+                options_ended <- true
+                index <- index + 1.usize()
+            elif argv_word_equals(source_text, offset, sview("-Xclang", 0, -1)) or argv_word_equals(source_text, offset, sview("-Xlinker", 0, -1)) or argv_word_equals(source_text, offset, sview("-Xpreprocessor", 0, -1)):
+                copy_argv_word(source_text, offset, target_text, target_offsets)
+                index <- index + 1.usize()
+                if index < source_offsets.count:
+                    copy_argv_word(source_text, source_offsets[index], target_text, target_offsets)
+                    index <- index + 1.usize()
+            elif argv_word_equals(source_text, offset, sview("-o", 0, -1)) or argv_word_equals(source_text, offset, sview("-MF", 0, -1)) or argv_word_equals(source_text, offset, sview("-MT", 0, -1)) or argv_word_equals(source_text, offset, sview("-MQ", 0, -1)) or argv_word_equals(source_text, offset, sview("-MJ", 0, -1)) or argv_word_equals(source_text, offset, sview("-dependency-file", 0, -1)) or argv_word_equals(source_text, offset, sview("-serialize-diagnostics", 0, -1)) or argv_word_equals(source_text, offset, sview("--serialize-diagnostics", 0, -1)):
+                return if index + 1.usize() >= source_offsets.count
+                index <- index + 2.usize()
+            elif argv_word_equals(source_text, offset, sview("-c", 0, -1)) or argv_word_equals(source_text, offset, sview("-S", 0, -1)) or argv_word_equals(source_text, offset, sview("-E", 0, -1)) or argv_word_equals(source_text, offset, sview("-M", 0, -1)) or argv_word_equals(source_text, offset, sview("-MM", 0, -1)) or argv_word_equals(source_text, offset, sview("-MD", 0, -1)) or argv_word_equals(source_text, offset, sview("-MMD", 0, -1)) or argv_word_equals(source_text, offset, sview("-MG", 0, -1)) or argv_word_equals(source_text, offset, sview("-MP", 0, -1)) or argv_word_equals(source_text, offset, sview("-save-temps", 0, -1)) or argv_word_equals(source_text, offset, sview("-ftime-trace", 0, -1)):
+                index <- index + 1.usize()
+            elif argv_word_starts_with(source_text, offset, sview("-o", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-MF", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-MT", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-MQ", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-MJ", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-save-temps=", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-ftime-trace=", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-Wp,-MD,", 0, -1)) or argv_word_starts_with(source_text, offset, sview("-Wp,-MMD,", 0, -1)):
+                index <- index + 1.usize()
+            else:
+                copy_argv_word(source_text, offset, target_text, target_offsets)
+                index <- index + 1.usize()
+        valid <- target_offsets.count > 0.usize()
+
+    def source_is_cxx(path: cstr) -> bool:
+        value: sview = sview(path, 0, -1)
+        return sview_ends_with(value, sview(".cc", 0, -1)) or sview_ends_with(value, sview(".cpp", 0, -1)) or sview_ends_with(value, sview(".cxx", 0, -1)) or sview_ends_with(value, sview(".C", 0, -1))
+
+    # Read a bounded file directly; compilation-database loading must not launch
+    # `cat` or interpret the database path as command text.
+    def run_file_output(path: cstr, output: mutable darray[u8]&, succeeded: mutable bool&, limit_exceeded: mutable bool&, max_output_bytes: usize) -> void can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        succeeded <- false
+        limit_exceeded <- false
+        output.count <- 0.usize()
+        stream: CFile? = c_fopen(path, "rb")
+        if stream == null:
+            return
+        handle: CFile = stream
+        chunk: mutable u8[8192] = zeroed
+        overflow: mutable bool = false
+        read_failed: mutable bool = false
+        while true |output, chunk, handle, overflow, read_failed, max_output_bytes|:
+            count: usize = c_fread((&chunk[0]).cast[mutable void&], 1.usize(), 8192.usize(), handle)
+            if count == 0.usize():
+                read_failed <- c_ferror(handle) != 0
+                break
+            if count > max_output_bytes - output.count:
+                overflow <- true
+                break
+            for index in 0..<count |output, chunk|:
+                output.push(chunk[index])
+            break if overflow
+        _ = c_fclose(handle)
+        limit_exceeded <- overflow
+        succeeded <- not read_failed and not overflow
+
+    def clang_capture_stdout(process: i32, descriptor: i32, spool: CFile, max_output_bytes: usize, deadline_milliseconds: i64, spooled_bytes: mutable usize&, observed_bytes: mutable usize&, output_overflow: mutable bool&, spool_failed: mutable bool&, capture_failed: mutable bool&, timeout_exceeded: mutable bool&) -> void can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        chunk: mutable u8[8192] = zeroed
+        while true |chunk, process, descriptor, spool, max_output_bytes, deadline_milliseconds, spooled_bytes, observed_bytes, output_overflow, spool_failed, capture_failed, timeout_exceeded|:
+            readiness: i32 = clang_poll_until_ready(descriptor, deadline_milliseconds)
+            if readiness == 0:
+                timeout_exceeded <- true
+                terminate_clang_process_group(process)
+                break
+            elif readiness < 0:
+                capture_failed <- true
+                terminate_clang_process_group(process)
+                break
+            bytes_read: i64 = clang_read(descriptor, (&chunk[0]).cast[mutable void&], 8192.usize())
+            break if bytes_read == 0
+            if bytes_read < 0:
+                capture_failed <- true
+                terminate_clang_process_group(process)
+                break
+            chunk_count: usize = bytes_read.usize()
+            if observed_bytes <= max_output_bytes:
+                observed_bytes <- max_output_bytes + 1.usize() if chunk_count > max_output_bytes - observed_bytes else observed_bytes + chunk_count
+            if not output_overflow[0] and not spool_failed[0]:
+                if chunk_count > max_output_bytes - spooled_bytes:
+                    output_overflow <- true
+                    terminate_clang_process_group(process)
+                else:
+                    written: usize = c_fwrite((&chunk[0]).cast[void&], 1.usize(), chunk_count, spool)
+                    if written != chunk_count:
+                        spool_failed <- true
+                        terminate_clang_process_group(process)
+                    else:
+                        spooled_bytes <- spooled_bytes + chunk_count
+
+    def clang_finish_frontend_child(process: i32, deadline_milliseconds: i64, status: mutable i32&, timed_out_before_wait: bool, timeout_exceeded: mutable bool&, capture_failed: mutable bool&) -> i32:
+        waited: mutable i32 = process
+        if timed_out_before_wait:
+            waited <- clang_waitpid(process, status, 0.i32())
+        else:
+            child_result: i32 = clang_wait_child_until(process, deadline_milliseconds, status)
+            if child_result == 1:
+                waited <- process
+            elif child_result == 0:
+                timeout_exceeded <- true
+                terminate_clang_process_group(process)
+                waited <- clang_waitpid(process, status, 0.i32())
+            else:
+                capture_failed <- true
+                terminate_clang_process_group(process)
+                waited <- clang_waitpid(process, status, 0.i32())
+        return waited
+
+    # Execute a NUL-terminated argv directly. stdout is streamed through a pipe
+    # and spooled under the configured byte limit; stderr is redirected to a
+    # separate temporary file, then copied into a bounded diagnostics buffer.
+    # Keeping stderr off a pipe avoids the classic two-pipe deadlock while the
+    # parent consumes the potentially very large AST stream.
+    def run_ast_argv_projected(arguments: mutable cstr&&, working_directory: cstr, use_working_directory: bool, source: cstr, output: mutable darray[u8]&, diagnostics: mutable darray[u8]&, succeeded: mutable bool&, limit_exceeded: mutable bool&, malformed_ast: mutable bool&, capture_failed: mutable bool&, timeout_exceeded: mutable bool&, raw_output_bytes: mutable usize&, max_output_bytes: usize, timeout_seconds: usize, project_ast_output: bool, record_layout_dump: mutable darray[u8]&) -> void can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        succeeded <- false
+        limit_exceeded <- false
+        malformed_ast <- false
+        capture_failed <- false
+        timeout_exceeded <- false
+        diagnostics.count <- 0.usize()
+        record_layout_dump.count <- 0.usize()
+        stdout_spool: CFile? = c_tmpfile()
+        stderr_spool: CFile? = c_tmpfile()
+        if stdout_spool == null or stderr_spool == null:
+            capture_failed <- true
+            if stdout_spool != null:
+                _ = c_fclose(stdout_spool)
+            if stderr_spool != null:
+                _ = c_fclose(stderr_spool)
+            return
+        stdout_file: CFile = stdout_spool
+        stderr_file: CFile = stderr_spool
+        stdout_file_descriptor: i32 = c_fileno(stdout_file)
+        stderr_file_descriptor: i32 = c_fileno(stderr_file)
+        if stdout_file_descriptor < 0 or stderr_file_descriptor < 0:
+            capture_failed <- true
+            _ = c_fclose(stdout_file)
+            _ = c_fclose(stderr_file)
+            return
+        stdout_pipe: mutable i32[2] = zeroed
+        if clang_pipe((&stdout_pipe[0]).cast[mutable i32&]) != 0:
+            capture_failed <- true
+            _ = c_fclose(stdout_file)
+            _ = c_fclose(stderr_file)
+            return
+        stdout_read_descriptor: i32 = stdout_pipe[0]
+        stdout_write_descriptor: i32 = stdout_pipe[1]
+        process: i32 = clang_fork()
+        if process < 0:
+            capture_failed <- true
+            _ = clang_close(stdout_pipe[0])
+            _ = clang_close(stdout_pipe[1])
+            _ = c_fclose(stdout_file)
+            _ = c_fclose(stderr_file)
+            return
+        if process == 0:
+            if clang_setpgid(0, 0) != 0:
+                clang_exit(126.i32())
+            _ = clang_close(stdout_read_descriptor)
+            if clang_dup2(stderr_file_descriptor, 2.i32()) < 0:
+                clang_exit(126.i32())
+            if clang_dup2(stdout_write_descriptor, 1.i32()) < 0:
+                clang_exit(126.i32())
+            if stdout_write_descriptor > 2:
+                _ = clang_close(stdout_write_descriptor)
+            if stdout_file_descriptor > 2:
+                _ = clang_close(stdout_file_descriptor)
+            if stderr_file_descriptor > 2:
+                _ = clang_close(stderr_file_descriptor)
+            if use_working_directory and clang_chdir(working_directory) != 0:
+                clang_exit(126.i32())
+            _ = clang_execvp(arguments[0].cast[cstr], arguments)
+            clang_exit(127.i32())
+        _ = clang_setpgid(process, process)
+        parent_close_status: i32 = clang_close(stdout_write_descriptor)
+        if parent_close_status != 0:
+            capture_failed <- true
+            terminate_clang_process_group(process)
+            _ = clang_close(stdout_read_descriptor)
+            abandoned_status: mutable i32 = 0
+            _ = clang_waitpid(process, &abandoned_status, 0.i32())
+            _ = c_fclose(stdout_file)
+            _ = c_fclose(stderr_file)
+            return
+        deadline_milliseconds: mutable i64 = 0
+        if not clang_deadline_after_seconds(timeout_seconds, &deadline_milliseconds):
+            capture_failed <- true
+            terminate_clang_process_group(process)
+            _ = clang_close(stdout_read_descriptor)
+            abandoned_status: mutable i32 = 0
+            _ = clang_waitpid(process, &abandoned_status, 0.i32())
+            _ = c_fclose(stdout_file)
+            _ = c_fclose(stderr_file)
+            return
+        stdout_descriptor: i32 = stdout_read_descriptor
+        spooled_bytes: mutable usize = 0.usize()
+        observed_bytes: mutable usize = 0.usize()
+        output_overflow: mutable bool = false
+        spool_failed: mutable bool = false
+        clang_capture_stdout(process, stdout_descriptor, stdout_file, max_output_bytes, deadline_milliseconds, &spooled_bytes, &observed_bytes, &output_overflow, &spool_failed, capture_failed, timeout_exceeded) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        _ = clang_close(stdout_descriptor)
+        wait_status: mutable i32 = 0
+        timed_out_before_wait: bool = timeout_exceeded
+        waited_process: i32 = clang_finish_frontend_child(process, deadline_milliseconds, &wait_status, timed_out_before_wait, timeout_exceeded, capture_failed)
+        execution_failed: mutable bool = false
+        if waited_process != process:
+            capture_failed <- true
+            execution_failed <- true
+        stderr_length: mutable i64 = -1
+        if c_fseek(stderr_file, 0, 2.i32()) == 0:
+            stderr_length <- c_ftello(stderr_file)
+        else:
+            capture_failed <- true
+            execution_failed <- true
+        if stderr_length < 0:
+            capture_failed <- true
+            execution_failed <- true
+        elif c_fseek(stderr_file, 0, 0.i32()) != 0:
+            capture_failed <- true
+            execution_failed <- true
+        else:
+            stderr_limit: usize = 1048576.usize()
+            stderr_remaining: mutable usize = stderr_length.usize() if stderr_length.usize() < stderr_limit else stderr_limit
+            stderr_chunk: mutable u8[8192] = zeroed
+            while stderr_remaining > 0.usize() |stderr_file, diagnostics, stderr_chunk, stderr_remaining, capture_failed|:
+                request: usize = 8192.usize() if stderr_remaining > 8192.usize() else stderr_remaining
+                stderr_read: usize = c_fread((&stderr_chunk[0]).cast[mutable void&], 1.usize(), request, stderr_file)
+                if stderr_read == 0.usize():
+                    if c_ferror(stderr_file) != 0:
+                        capture_failed <- true
+                        execution_failed <- true
+                    break
+                for index in 0..<stderr_read |diagnostics, stderr_chunk|:
+                    diagnostics.push(stderr_chunk[index])
+                stderr_remaining <- stderr_remaining - stderr_read
+            if stderr_length.usize() > stderr_limit:
+                append_literal(diagnostics, "\n[Clang diagnostics truncated at 1048576 bytes]\n")
+        _ = c_fclose(stderr_file)
+        limit_exceeded <- output_overflow
+        raw_output_bytes <- observed_bytes
+        if spool_failed:
+            capture_failed <- true
+            execution_failed <- true
+        if output_overflow:
+            _ = c_fclose(stdout_file)
+            return
+        if spool_failed:
+            _ = c_fclose(stdout_file)
+            return
+        if execution_failed:
+            _ = c_fclose(stdout_file)
+            return
+        if wait_status != 0:
+            _ = c_fclose(stdout_file)
+            return
+        flush_status: i32 = c_fflush(stdout_file)
+        file_size: i64 = c_ftello(stdout_file)
+        if flush_status != 0 or file_size < 0 or file_size.usize() != spooled_bytes:
+            capture_failed <- true
+            _ = c_fclose(stdout_file)
+            return
+        if file_size == 0:
+            succeeded <- true
+            _ = c_fclose(stdout_file)
+            return
+        descriptor: i32 = c_fileno(stdout_file)
+        mapped_address: uintptr = clang_mmap(0.uintptr(), file_size.usize(), 1.i32(), 2.i32(), descriptor, 0)
+        if mapped_address == (0.uintptr() - 1.uintptr()) or mapped_address == 0.uintptr():
+            capture_failed <- true
+            _ = c_fclose(stdout_file)
+            return
+        text: mutable sview = sview("", 0, 0)
+        trusted Unsafe.PointerCast:
+            text <- StringView{data: mapped_address.cast[u8&], len: file_size}
+        if project_ast_output:
+            json_start: mutable i64 = sview_find_byte(text, 123)
+            # A real Clang AST root is an object, and the optional layout dump
+            # may precede it. Keep that robust first-object search, but when no
+            # object exists, validate from the first non-space byte so a valid
+            # non-object JSON root (for example `[]`) reaches the schema
+            # validator instead of being misclassified as malformed.
+            json_start <- ast_json_skip_space(text, 0) if json_start < 0
+            if json_start < 0:
+                malformed_ast <- true
+            else:
+                for index in 0..<json_start |text, record_layout_dump|:
+                    record_layout_dump.push(string_view_index(text, index).u8())
+                ast_text: sview = string_view_suffix(text, json_start)
+                if not ast_json_is_well_formed(ast_text):
+                    malformed_ast <- true
+                else:
+                    schema_issue: sview = ast_json_root_schema_issue(ast_text)
+                    if schema_issue.len > 0:
+                        malformed_ast <- true
+                        append_literal(diagnostics, "elisa-c-transpiler: Clang AST schema violation: ")
+                        append_view(diagnostics, schema_issue)
+                        append_literal(diagnostics, " while processing ")
+                        append_view(diagnostics, sview(source, 0, -1))
+                        append_literal(diagnostics, "\n")
+                    else:
+                        source_working_directory: sview = sview(working_directory, 0, -1) if use_working_directory else sview("", 0, 0)
+                        ast_compact_json_into(ast_text, source, source_working_directory, output) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        else:
+            for index in 0..<file_size.usize() |text, output|:
+                output.push(text[index])
+        _ = clang_munmap(mapped_address.cast[mutable void&], file_size.usize())
+        _ = c_fclose(stdout_file)
+        succeeded <- true
+
+    def run_clang_ast(path: cstr, max_output_bytes: usize, timeout_seconds: usize, succeeded: mutable bool&, limit_exceeded: mutable bool&, malformed_ast: mutable bool&, capture_failed: mutable bool&, timeout_exceeded: mutable bool&, raw_output_bytes: mutable usize&, target_macros: mutable darray[u8]&, target_macros_succeeded: mutable bool&, diagnostics: mutable darray[u8]&, record_layout_dump: mutable darray[u8]&) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+        timeout_exceeded <- false
+        macro_arguments: mutable darray[cstr] = []
+        macro_arguments.push("clang++".cast[cstr]) if source_is_cxx(path) else macro_arguments.push("clang".cast[cstr])
+        macro_arguments.push("-std=gnu++11".cast[cstr]) if source_is_cxx(path) else macro_arguments.push("-std=c11".cast[cstr])
+        macro_arguments.push("-Wno-everything".cast[cstr])
+        macro_arguments.push("-dM".cast[cstr])
+        macro_arguments.push("-E".cast[cstr])
+        macro_arguments.push(path)
+        macro_arguments.push(0.uintptr().cast[cstr]) can Unsafe.PointerCast
+        macro_argv: mutable cstr&& = (&macro_arguments[0]).cast[mutable cstr&&] can Unsafe.PointerCast
+        macro_diagnostics: mutable darray[u8] = []
+        macro_limit_exceeded: mutable bool = false
+        macro_malformed: mutable bool = false
+        macro_capture_failed: mutable bool = false
+        macro_timeout_exceeded: mutable bool = false
+        macro_output_bytes: mutable usize = 0.usize()
+        macro_layout_dump: mutable darray[u8] = []
+        run_ast_argv_projected(macro_argv, "".cast[cstr], false, path, target_macros, &macro_diagnostics, target_macros_succeeded, &macro_limit_exceeded, &macro_malformed, &macro_capture_failed, &macro_timeout_exceeded, &macro_output_bytes, max_output_bytes, timeout_seconds, false, &macro_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        if macro_timeout_exceeded:
+            timeout_exceeded <- true
+            return []
+        emit_view_fd(bytes_view(macro_diagnostics), 2) can Console, Unsafe.PointerCast if not target_macros_succeeded[0] and macro_diagnostics.count > 0.usize()
+
+        ast_arguments: mutable darray[cstr] = []
+        if source_is_cxx(path):
+            ast_arguments.push("clang++".cast[cstr])
+            ast_arguments.push("-std=gnu++11".cast[cstr])
+        else:
+            ast_arguments.push("clang".cast[cstr])
+            ast_arguments.push("-std=c11".cast[cstr])
+        ast_arguments.push("-Wno-everything".cast[cstr])
+        ast_arguments.push("-Xclang".cast[cstr])
+        ast_arguments.push("-fparse-all-comments".cast[cstr])
+        ast_arguments.push("-Xclang".cast[cstr])
+        ast_arguments.push("-ast-dump=json".cast[cstr])
+        ast_arguments.push("-Xclang".cast[cstr])
+        ast_arguments.push("-fdump-record-layouts-simple".cast[cstr])
+        ast_arguments.push("-fsyntax-only".cast[cstr])
+        ast_arguments.push(path)
+        ast_arguments.push(0.uintptr().cast[cstr]) can Unsafe.PointerCast
+        argv: mutable cstr&& = (&ast_arguments[0]).cast[mutable cstr&&] can Unsafe.PointerCast
+        output: mutable darray[u8] = []
+        run_ast_argv_projected(argv, "".cast[cstr], false, path, &output, diagnostics, succeeded, limit_exceeded, malformed_ast, capture_failed, timeout_exceeded, raw_output_bytes, max_output_bytes, timeout_seconds, true, record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+        return output

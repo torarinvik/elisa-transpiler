@@ -1,0 +1,70 @@
+extend CTranslator:
+    def typed_intern_source_map_text[@r](cache: mutable darray[TypedSourceMapText[r]]& @r, value: sview) -> sview @r can[Memory.Allocate, Abort.Panic]:
+        for index in 0..<cache.count |cache, value|:
+            entry: TypedSourceMapText[r] = cache[index]
+            return entry.value if sview_eq(entry.value, value)
+        copied: sview @r = typed_copy_view_to_region(value) can Memory.Allocate, Abort.Panic
+        cache.push(TypedSourceMapText[r]{value: copied})
+        return copied
+
+    def typed_copy_source_range[@source, @target](source: TypedOwnedSourceRange[source], cache: mutable darray[TypedSourceMapText[target]]& @target) -> TypedOwnedSourceRange[target] can[Memory.Allocate, Abort.Panic]:
+        return TypedOwnedSourceRange[target]{file: typed_intern_source_map_text(cache, source.file), included_from: typed_intern_source_map_text(cache, source.included_from), start_offset: source.start_offset, end_offset: source.end_offset}
+
+    def typed_copy_generated_source_spans[@source, @target](spans: darray[TypedGeneratedSourceSpan[source]] @source) -> darray[TypedGeneratedSourceSpan[target]] @target can[Memory.Allocate, Abort.Panic]:
+        copied: mutable darray[TypedGeneratedSourceSpan[target]] @target = []
+        text_cache: mutable darray[TypedSourceMapText[target]] @target = []
+        for index in 0..<spans.count |spans, copied, text_cache|:
+            span: TypedGeneratedSourceSpan[source] = spans[index]
+            copied.push(TypedGeneratedSourceSpan[target]{generated_start: span.generated_start, generated_end: span.generated_end, source: typed_copy_source_range(span.source, &text_cache), spelling: typed_copy_source_range(span.spelling, &text_cache), expansion: typed_copy_source_range(span.expansion, &text_cache), synthesized_reason: typed_intern_source_map_text(&text_cache, span.synthesized_reason)})
+        return copied
+
+    def typed_copy_diagnostics[@source, @target](diagnostics: darray[TypedDiagnostic] @source) -> darray[TypedDiagnostic] @target can[Memory.Allocate, Abort.Panic]:
+        copied: mutable darray[TypedDiagnostic] @target = []
+        for index in 0..<diagnostics.count |diagnostics, copied|:
+            diagnostic: TypedDiagnostic = diagnostics[index]
+            copied.push(TypedDiagnostic{
+                category: typed_copy_view_to_region(diagnostic.category),
+                kind: typed_copy_view_to_region(diagnostic.kind),
+                subject_type: typed_copy_view_to_region(diagnostic.subject_type),
+                required_capability: typed_copy_view_to_region(diagnostic.required_capability),
+                source: typed_copy_view_to_region(diagnostic.source),
+                canonical_source: typed_copy_view_to_region(diagnostic.canonical_source),
+                spelling_source: typed_copy_view_to_region(diagnostic.spelling_source),
+                spelling_canonical_source: typed_copy_view_to_region(diagnostic.spelling_canonical_source),
+                spelling_included_from: typed_copy_view_to_region(diagnostic.spelling_included_from),
+                spelling_included_from_canonical: typed_copy_view_to_region(diagnostic.spelling_included_from_canonical),
+                expansion_source: typed_copy_view_to_region(diagnostic.expansion_source),
+                expansion_canonical_source: typed_copy_view_to_region(diagnostic.expansion_canonical_source),
+                expansion_included_from: typed_copy_view_to_region(diagnostic.expansion_included_from),
+                expansion_included_from_canonical: typed_copy_view_to_region(diagnostic.expansion_included_from_canonical),
+                range_start_offset: diagnostic.range_start_offset,
+                range_end_offset: diagnostic.range_end_offset,
+                line: diagnostic.line,
+                column: diagnostic.column,
+                spelling_line: diagnostic.spelling_line,
+                spelling_column: diagnostic.spelling_column,
+                expansion_line: diagnostic.expansion_line,
+                expansion_column: diagnostic.expansion_column
+            })
+        return copied
+
+    def typed_owned_source_range[@r](source: TypedSourceRange[r]) -> TypedOwnedSourceRange[r] can[Memory.Allocate, Abort.Panic]:
+        return TypedOwnedSourceRange[r]{file: source.file, included_from: source.included_from, start_offset: source.start_offset, end_offset: source.end_offset}
+
+    def typed_begin_statement_source_span[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, index: i64) -> i64 can[Memory.Allocate, Abort.Panic]:
+        return -1 if not ctx.source_mapping_enabled or index < 0 or index >= ctx.stmt_source_origins.count.i64()
+        origin: TypedIRSourceOrigin[r] = ctx.stmt_source_origins[index.usize()]
+        return -1 if json_handle_is_null(origin.node)
+        span_index: i64 = ctx.generated_source_spans.count.i64()
+        source: TypedOwnedSourceRange[r] = typed_owned_source_range(origin.source) can Memory.Allocate, Abort.Panic
+        spelling: TypedOwnedSourceRange[r] = typed_owned_source_range(origin.spelling) can Memory.Allocate, Abort.Panic
+        expansion: TypedOwnedSourceRange[r] = typed_owned_source_range(origin.expansion) can Memory.Allocate, Abort.Panic
+        reason: sview @r = origin.synthesized_reason
+        ctx.generated_source_spans.push(TypedGeneratedSourceSpan[r]{generated_start: out.count.i64(), generated_end: -1, source: source, spelling: spelling, expansion: expansion, synthesized_reason: reason})
+        return span_index
+
+    def typed_finish_statement_source_span[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, span_index: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        return if span_index < 0 or span_index >= ctx.generated_source_spans.count.i64()
+        span: mutable TypedGeneratedSourceSpan[r] = ctx.generated_source_spans[span_index.usize()]
+        span.generated_end <- out.count.i64()
+        ctx.generated_source_spans[span_index.usize()] <- span

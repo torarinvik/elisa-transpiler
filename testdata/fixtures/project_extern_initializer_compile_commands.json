@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_extern_initializer/definition.c","command":"clang -std=c11 -Wno-extern-initializer -c testdata/fixtures/project_extern_initializer/definition.c"},
+  {"directory":".","file":"testdata/fixtures/project_extern_initializer/main.c","command":"clang -std=c11 -Wno-extern-initializer -c testdata/fixtures/project_extern_initializer/main.c"}
+]

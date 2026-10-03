@@ -1,0 +1,314 @@
+# Translator-owned C++ compatibility helpers.
+#
+# The compiler only provides the language protocol (`Index` / `[]`). C++ library
+# emulation belongs here so the translator can grow a source-level compatibility
+# layer without coupling Elisa's standard library to one foreign language.
+
+global mutable cpp_compatibility_library_directory: cstr = ""
+global mutable cpp_compatibility_std_directory: cstr = ""
+
+extend CTranslator:
+
+    # Clang wraps returned C++ objects in cleanup/materialization nodes. For
+    # the adapter recognizers below, remove only one-child expression wrappers
+    # so the query remains structural and cannot accidentally select a nested
+    # call from a conditional or comma expression.
+    def cpp_unwrap_expression[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r]:
+        kind: sview = ast_kind(node)
+        wrapped: bool = sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)) or sview_eq(kind, sview("ExprWithCleanups", 0, -1)) or sview_eq(kind, sview("MaterializeTemporaryExpr", 0, -1)) or sview_eq(kind, sview("CXXBindTemporaryExpr", 0, -1))
+        return cpp_unwrap_expression(ast_child(node, 0)) if wrapped and ast_child_count(node) == 1 else node
+
+    # In C++11, `auto it = map.find(key)` is represented as a one-argument
+    # CXXConstructExpr around the returned iterator. Treat only same-type,
+    # single-child constructions as transparent; a converting constructor
+    # must not make an unrelated initializer look like a map iterator.
+    def cpp_unwrap_identity_construction[@r](ctx: mutable TypedContext[r]&, node: mutable JsonValueHandle[r]) -> JsonValueHandle[r] @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        node <- cpp_unwrap_expression(node)
+        return node if not sview_eq(ast_kind(node), sview("CXXConstructExpr", 0, -1)) or ast_child_count(node) != 1
+        constructed_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        operand: JsonValueHandle[r] = ast_child(node, 0)
+        operand_type: sview = typed_c_type(ctx, operand) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if constructed_type.len > 0 and sview_eq(constructed_type, operand_type):
+            return cpp_unwrap_identity_construction(ctx, operand) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return node
+    def cpp_unordered_map_member_receiver_type[@r](ctx: mutable TypedContext[r]&, call: mutable JsonValueHandle[r], wanted_member: sview) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        call <- cpp_unwrap_expression(call)
+        return sview("", 0, 0) if not sview_eq(ast_kind(call), sview("CXXMemberCallExpr", 0, -1)) or ast_child_count(call) == 0
+        callee: JsonValueHandle[r] = cpp_unwrap_expression(ast_child(call, 0))
+        callee_name: mutable sview = ast_expr_name(callee)
+        callee_name <- ast_name(callee) if callee_name.len == 0
+        return sview("", 0, 0) if not sview_eq(ast_kind(callee), sview("MemberExpr", 0, -1)) or not sview_eq(callee_name, wanted_member) or ast_child_count(callee) == 0
+        receiver_type: sview = typed_c_type(ctx, ast_child(callee, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return receiver_type if cpp_type_is_unordered_map(receiver_type) else sview("", 0, 0)
+    def cpp_unordered_map_find_initializer_type[@r](ctx: mutable TypedContext[r]&, initializer: mutable JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        initializer <- cpp_unwrap_identity_construction(ctx, initializer) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return cpp_unordered_map_member_receiver_type(ctx, initializer, sview("find", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def cpp_record_unordered_map_iterator_decl_type[@r](ctx: mutable TypedContext[r]&, declaration: JsonValueHandle[r], map_type: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        declaration_id: sview = ast_string(ast_field(declaration, sview("id", 0, -1)))
+        return if map_type.len == 0
+        declaration_name: sview = safe_identifier(ast_name(declaration))
+        declaration_line: i64 = ast_location_line(declaration)
+        if declaration_id.len > 0:
+            _ = typed_resolve_decl(ctx, declaration) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            for index in 0..<ctx.decl_infos.count.i64() |ctx, declaration_id, map_type|:
+                info: mutable TypedDeclInfo[r] = ctx.decl_infos[index.usize()]
+                if sview_eq(info.id, declaration_id):
+                    info.cpp_iterator_map_type <- map_type
+                    info.cpp_iterator_decl_name <- declaration_name
+                    info.cpp_iterator_decl_line <- declaration_line
+                    ctx.decl_infos[index.usize()] <- info
+                    return
+        # If Clang omits declaration IDs entirely, later references are
+        # resolved from the already-lowered declaration statement instead of
+        # attaching this type to an unrelated same-scope declaration.
+    def cpp_unordered_map_iterator_decl_type[@r](ctx: TypedContext[r]&, declaration_id: sview) -> sview @r:
+        for index in 0..<ctx.decl_infos.count.i64() |ctx, declaration_id|:
+            info: TypedDeclInfo[r] = ctx.decl_infos[index.usize()]
+            return info.cpp_iterator_map_type if sview_eq(info.id, declaration_id)
+        return sview("", 0, 0)
+    def cpp_unordered_map_iterator_map_type[@r](ctx: mutable TypedContext[r]&, expression: mutable JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        expression <- cpp_unwrap_expression(expression)
+        kind: sview = ast_kind(expression)
+        if sview_eq(kind, sview("CXXMemberCallExpr", 0, -1)):
+            map_type: sview = cpp_unordered_map_member_receiver_type(ctx, expression, sview("find", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return map_type if map_type.len > 0
+            return cpp_unordered_map_member_receiver_type(ctx, expression, sview("end", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if sview_eq(kind, sview("DeclRefExpr", 0, -1)):
+            referenced: JsonValueHandle[r] = ast_field(expression, sview("referencedDecl", 0, -1))
+            declaration_id: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
+            iterator_map_type: sview = cpp_unordered_map_iterator_decl_type(ctx, declaration_id)
+            return iterator_map_type if iterator_map_type.len > 0
+            referenced_name: mutable sview = safe_identifier(ast_name(referenced))
+            referenced_name <- safe_identifier(ast_expr_name(expression)) if referenced_name.len == 0
+            # Expression locations are often omitted by the bounded AST
+            # projection. Resolve those references against declarations already
+            # lowered in this function before consulting the broader declaration
+            # index, which may contain unrelated same-named locals from headers.
+            statement_map_type: mutable sview = sview("", 0, 0)
+            statement_map_ambiguous: mutable bool = false
+            for index in 0..<ctx.stmts.count.i64() |ctx, referenced_name, statement_map_type, statement_map_ambiguous|:
+                statement: TypedStmt[r] = ctx.stmts[index.usize()]
+                continue if statement.kind != TypedStmtKind.Declaration or statement.aux != TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR or not sview_eq(statement.name, referenced_name)
+                if statement_map_type.len == 0:
+                    statement_map_type <- statement.type_name
+                elif not sview_eq(statement_map_type, statement.type_name):
+                    statement_map_ambiguous <- true
+            return sview("", 0, 0) if statement_map_ambiguous
+            return statement_map_type if statement_map_type.len > 0
+            reference_line: i64 = ast_location_line(expression)
+            best_line: mutable i64 = -1
+            best_type: mutable sview = sview("", 0, 0)
+            ambiguous: mutable bool = false
+            for index in 0..<ctx.decl_infos.count.i64() |ctx, referenced_name, reference_line, best_line, best_type, ambiguous|:
+                info: TypedDeclInfo[r] = ctx.decl_infos[index.usize()]
+                continue if info.cpp_iterator_map_type.len == 0 or not sview_eq(info.cpp_iterator_decl_name, referenced_name)
+                continue if reference_line > 0 and info.cpp_iterator_decl_line > reference_line
+                if reference_line > 0:
+                    if info.cpp_iterator_decl_line >= best_line:
+                        best_line <- info.cpp_iterator_decl_line
+                        best_type <- info.cpp_iterator_map_type
+                elif best_type.len == 0:
+                    best_type <- info.cpp_iterator_map_type
+                else:
+                    ambiguous <- true if not sview_eq(best_type, info.cpp_iterator_map_type)
+            return sview("", 0, 0) if ambiguous
+            return best_type if best_type.len > 0
+        return sview("", 0, 0)
+    def cpp_type_is_unordered_map_iterator[@r](ctx: mutable TypedContext[r]&, expression: JsonValueHandle[r]) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return cpp_unordered_map_iterator_map_type(ctx, expression).len > 0 can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def cpp_unordered_map_iterator_member[@r](ctx: mutable TypedContext[r]&, member: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return sview("", 0, 0) if not sview_eq(ast_kind(member), sview("MemberExpr", 0, -1)) or ast_child_count(member) == 0
+        arrow: JsonValueHandle[r] = cpp_unwrap_expression(ast_child(member, 0))
+        return sview("", 0, 0) if not sview_eq(ast_kind(arrow), sview("CXXOperatorCallExpr", 0, -1)) or ast_child_count(arrow) < 2
+        return sview("", 0, 0) if not sview_eq(ast_expr_name(ast_child(arrow, 0)), sview("operator->", 0, -1)) or cpp_unordered_map_iterator_map_type(ctx, ast_child(arrow, 1)).len == 0
+        name: sview = ast_name(member)
+        return name if sview_eq(name, sview("first", 0, -1)) or sview_eq(name, sview("second", 0, -1)) else sview("", 0, 0)
+
+    # Find iterator element projections in reference/address contexts without
+    # recursive AST descent; large macro-expanded expression trees can be deep.
+    def cpp_unordered_map_iterator_element_member[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        pending: mutable darray[JsonValueHandle[r]] = []
+        pending.push(node)
+        while pending.count > 0.usize() |ctx, pending|:
+            current: JsonValueHandle[r] = pending[pending.count - 1.usize()]
+            _ = pending.pop()
+            element_member: sview = cpp_unordered_map_iterator_member(ctx, current) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return element_member if element_member.len > 0
+            child_count: i64 = ast_child_count(current)
+            if child_count > 0:
+                for index in 0..<child_count |pending, current|:
+                    pending.push(ast_child(current, index))
+        return sview("", 0, 0)
+
+    def append_cpp_unordered_map_iterator_type(out: mutable darray[u8]&, qual_type: sview) -> void:
+        open: mutable i64 = -1
+        close: mutable i64 = -1
+        return if not cpp_unordered_map_bounds(qual_type, open, close)
+        key_type: sview = cpp_unordered_map_argument(qual_type, open, close, 0)
+        value_type: sview = cpp_unordered_map_argument(qual_type, open, close, 1)
+        return if key_type.len == 0 or value_type.len == 0
+        append_view(out, sview("cpp::unordered_map_iterator[", 0, -1))
+        append_c_type(out, key_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(key_type)
+        append_view(out, sview(", ", 0, -1))
+        append_c_type(out, value_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(value_type)
+        append_view(out, sview("]", 0, -1))
+
+    def cpp_unordered_map_bounds(qual_type: sview, open: mutable i64&, close: mutable i64&) -> bool:
+        base: sview = c_trim_spaces(c_type_without_qualifiers(qual_type))
+        is_map: bool = sview_starts_with(base, sview("std::unordered_map<", 0, -1)) or sview_starts_with(base, sview("std::__1::unordered_map<", 0, -1)) or sview_starts_with(base, sview("std::__ndk1::unordered_map<", 0, -1)) or sview_starts_with(base, sview("std::__cxx11::unordered_map<", 0, -1))
+        return false if not is_map
+        open <- sview_find_byte(base, 60)
+        return false if open < 0
+        depth: mutable i64 = 1
+        close <- -1
+        for index in (open + 1)..<base.len |base, open, depth, close|:
+            byte: i64 = string_view_index(base, index)
+            depth <- depth + 1 if byte == 60
+            if byte == 62:
+                depth <- depth - 1
+                if depth == 0:
+                    close <- index
+                    break
+        return close > open
+
+    def cpp_unordered_map_argument_count(qual_type: sview, open: i64, close: i64) -> i64:
+        return 0 if open < 0 or close <= open
+        count: mutable i64 = 1
+        template_depth: mutable i64 = 0
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        brace_depth: mutable i64 = 0
+        for index in (open + 1)..<close |qual_type, close, count, template_depth, paren_depth, bracket_depth, brace_depth|:
+            byte: i64 = string_view_index(qual_type, index)
+            template_depth <- template_depth + 1 if byte == 60
+            template_depth <- template_depth - 1 if byte == 62 and template_depth > 0
+            paren_depth <- paren_depth + 1 if byte == 40
+            paren_depth <- paren_depth - 1 if byte == 41 and paren_depth > 0
+            bracket_depth <- bracket_depth + 1 if byte == 91
+            bracket_depth <- bracket_depth - 1 if byte == 93 and bracket_depth > 0
+            brace_depth <- brace_depth + 1 if byte == 123
+            brace_depth <- brace_depth - 1 if byte == 125 and brace_depth > 0
+            count <- count + 1 if byte == 44 and template_depth == 0 and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0
+        return count
+
+    def cpp_unordered_map_argument(qual_type: sview, open: i64, close: i64, wanted: i64) -> sview:
+        return sview("", 0, 0) if open < 0 or close <= open or wanted < 0
+        start: mutable i64 = open + 1
+        template_depth: mutable i64 = 0
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        brace_depth: mutable i64 = 0
+        argument: mutable i64 = 0
+        for index in (open + 1)..<close |qual_type, close, wanted, start, template_depth, paren_depth, bracket_depth, brace_depth, argument|:
+            byte: i64 = string_view_index(qual_type, index)
+            template_depth <- template_depth + 1 if byte == 60
+            template_depth <- template_depth - 1 if byte == 62 and template_depth > 0
+            paren_depth <- paren_depth + 1 if byte == 40
+            paren_depth <- paren_depth - 1 if byte == 41 and paren_depth > 0
+            bracket_depth <- bracket_depth + 1 if byte == 91
+            bracket_depth <- bracket_depth - 1 if byte == 93 and bracket_depth > 0
+            brace_depth <- brace_depth + 1 if byte == 123
+            brace_depth <- brace_depth - 1 if byte == 125 and brace_depth > 0
+            if byte == 44 and template_depth == 0 and paren_depth == 0 and bracket_depth == 0 and brace_depth == 0:
+                return c_trim_spaces(string_view_prefix(string_view_suffix(qual_type, start), index - start)) if argument == wanted
+                argument <- argument + 1
+                start <- index + 1
+        return c_trim_spaces(string_view_prefix(string_view_suffix(qual_type, start), close - start)) if argument == wanted
+        return sview("", 0, 0)
+
+    def cpp_type_is_unordered_map(qual_type: sview) -> bool:
+        open: mutable i64 = -1
+        close: mutable i64 = -1
+        return cpp_unordered_map_bounds(qual_type, open, close) and cpp_unordered_map_argument(qual_type, open, close, 0).len > 0 and cpp_unordered_map_argument(qual_type, open, close, 1).len > 0
+
+    def cpp_type_has_template_arguments(qual_type: sview) -> bool:
+        open: i64 = sview_find_byte(qual_type, 60)
+        close: i64 = sview_find_byte(qual_type, 62)
+        return open >= 0 and close > open
+
+    def cpp_unordered_map_value_defaultable(qual_type: sview) -> bool:
+        return c_type_is_integer(qual_type) or c_type_is_floating(qual_type) or (c_type_pointer_count(qual_type) > 0 and not c_type_is_function_pointer(qual_type))
+    def cpp_unordered_map_key_hashable[@r](ctx: TypedContext[r]&, qual_type: sview) -> bool:
+        return c_type_is_integer(qual_type) or c_type_is_enum(qual_type) or typed_enum_value_index(ctx, qual_type) >= 0
+
+    def append_cpp_unordered_map_type(out: mutable darray[u8]&, qual_type: sview) -> void:
+        open: mutable i64 = -1
+        close: mutable i64 = -1
+        return if not cpp_unordered_map_bounds(qual_type, open, close)
+        key_type: sview = cpp_unordered_map_argument(qual_type, open, close, 0)
+        value_type: sview = cpp_unordered_map_argument(qual_type, open, close, 1)
+        return if key_type.len == 0 or value_type.len == 0
+        append_view(out, sview("cpp::unordered_map[", 0, -1))
+        append_c_type(out, key_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(key_type)
+        append_view(out, sview(", ", 0, -1))
+        append_c_type(out, value_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(value_type)
+        append_view(out, sview("]", 0, -1))
+
+    # The generated program includes the compatibility source only when the
+    # scanned Clang AST actually contains std::unordered_map. The path is
+    def typed_append_dependency_include(out: mutable darray[u8]&, directory: sview, file_name: sview) -> void:
+        append_view(out, sview("include \"", 0, -1))
+        append_view(out, directory)
+        if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47:
+            append_view(out, sview("/", 0, -1))
+        append_view(out, file_name)
+        append_view(out, sview("\"\n", 0, -1))
+
+    # The default repository layout remains convenient for local development.
+    # When both support directories are explicit, emit independent dependencies
+    # so generated output can move without following translator/worktree paths.
+    def typed_emit_cpp_compatibility(out: mutable darray[u8]&, needs_cpp_unordered_map: bool) -> void:
+        return if not needs_cpp_unordered_map
+        library_directory: sview = sview(cpp_compatibility_library_directory, 0, -1)
+        std_directory: sview = sview(cpp_compatibility_std_directory, 0, -1)
+        if library_directory.len > 0 and std_directory.len > 0:
+            typed_append_dependency_include(out, std_directory, sview("elisacore_runtime.elisa", 0, -1))
+            typed_append_dependency_include(out, std_directory, sview("collections.elisa", 0, -1))
+            typed_append_dependency_include(out, library_directory, sview("unordered_map_core.elisa", 0, -1))
+            append_view(out, sview("\n", 0, -1))
+            return
+        append_view(out, sview("include \"../cpp_lib/unordered_map.elisa\"\n\n", 0, -1))
+    def typed_scan_cpp_features[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], in_class_template_pattern: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # Standard-library template bodies can contain many implementation
+        # types such as unordered_map's five-parameter internal hashtable. They
+        # are not source requests for unsupported policies. A primary class
+        # template's dependent fields/parameters are not value declarations;
+        # concrete source-used specializations are projected as sibling nodes
+        # and scanned independently.
+        kind: sview = ast_kind(node)
+        inside_pattern: bool = in_class_template_pattern or sview_eq(kind, sview("ClassTemplateDecl", 0, -1))
+        if not inside_pattern and ast_is_user_declaration(node, ctx.source):
+            node_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            is_object_declaration: bool = sview_eq(kind, sview("VarDecl", 0, -1)) or sview_eq(kind, sview("FieldDecl", 0, -1)) or sview_eq(kind, sview("ParmVarDecl", 0, -1))
+            iterator_map_type: mutable sview = sview("", 0, 0)
+            if sview_eq(kind, sview("VarDecl", 0, -1)):
+                for index in 0..<ast_child_count(node) |ctx, node, iterator_map_type|:
+                    initializer: JsonValueHandle[r] = ast_child(node, index)
+                    continue if ast_is_comment_node(initializer)
+                    iterator_map_type <- cpp_unordered_map_find_initializer_type(ctx, initializer) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    break
+            is_supported_unordered_map_iterator: bool = iterator_map_type.len > 0
+            if ctx.source_language_is_cxx and is_object_declaration and cpp_type_has_template_arguments(node_type) and not cpp_type_is_unordered_map(node_type) and not is_supported_unordered_map_iterator and typed_record_index(ctx, node_type) < 0:
+                typed_record_unsupported(ctx, node, sview("C++ class-template value type outside supported adapters", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if cpp_type_is_unordered_map(node_type):
+                ctx.needs_cpp_unordered_map <- true
+                open: mutable i64 = -1
+                close: mutable i64 = -1
+                if cpp_unordered_map_bounds(node_type, open, close):
+                    if cpp_unordered_map_argument_count(node_type, open, close) != 2:
+                        typed_record_unsupported(ctx, node, sview("C++ unordered_map custom template policies", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    key_type: sview = cpp_unordered_map_argument(node_type, open, close, 0)
+                    value_type: sview = cpp_unordered_map_argument(node_type, open, close, 1)
+                    if c_type_pointer_count(key_type) > 0 or not cpp_unordered_map_key_hashable(ctx, key_type):
+                        typed_record_unsupported(ctx, node, sview("C++ unordered_map key hashing", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    elif not cpp_unordered_map_value_defaultable(value_type):
+                        typed_record_unsupported(ctx, node, sview("C++ unordered_map mapped-value initialization", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            cpp_record_unordered_map_iterator_decl_type(ctx, node, iterator_map_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if is_supported_unordered_map_iterator
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, inside_pattern|:
+                typed_scan_cpp_features(ctx, ast_child(node, index), inside_pattern) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

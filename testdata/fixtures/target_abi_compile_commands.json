@@ -1,0 +1,3 @@
+[
+  {"directory":".","file":"testdata/fixtures/target_abi.c","command":"clang -target x86_64-w64-windows-gnu -std=c11 -c testdata/fixtures/target_abi.c"}
+]

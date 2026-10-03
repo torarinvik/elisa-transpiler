@@ -1,0 +1,11 @@
+extend CTranslator:
+    def typed_lower_stmt[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        start: i64 = ctx.stmts.count.i64()
+        result: i64 = typed_lower_stmt_impl(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return result if not ctx.source_mapping_enabled
+        end: i64 = ctx.stmts.count.i64()
+        for index in start..<end |ctx, node, start, end|:
+            origin: TypedIRSourceOrigin[r] = ctx.stmt_source_origins[index.usize()]
+            reason: sview = sview("synthesized while lowering parent Clang statement", 0, -1) if index != result else sview("", 0, 0)
+            ctx.stmt_source_origins[index.usize()] <- typed_ir_source_origin(node, reason) if json_handle_is_null(origin.node)
+        return result

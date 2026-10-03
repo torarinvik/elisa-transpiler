@@ -1,0 +1,19 @@
+def export_link_target(value: i32) -> i32:
+    return value + 1
+
+@link_name("exported_add_native")
+export fn exported_add(value: i32) -> i32 = export_link_target
+
+@link_name("_Z3fooi")
+export fn cpp_abi_export(value: i32) -> i32 = export_link_target
+
+def same_target(value: i32) -> i32:
+    return value + 1
+
+@link_name("same_target_native")
+export fn __c_abi_same_target(value: i32) -> i32 = same_target
+
+def main() -> i32:
+    if exported_add(41) == 42:
+        return 0
+    return 1

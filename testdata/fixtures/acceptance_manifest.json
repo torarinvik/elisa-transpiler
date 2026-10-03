@@ -1,0 +1,790 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "simple",
+      "source": "testdata/fixtures/simple.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def add\\(left: i32, right: i32\\) -> i32",
+          "return \\(left \\+ right\\)",
+          "^def main\\(\\) -> i32",
+          "\\\"left  right\\\""
+        ],
+        "not_contains_regex": [
+          "^def elisa_nonnull",
+          "^extern va_list",
+          "def static_value\\(\\) -> i32:\\n    pass",
+          "^def __elisa_transpiler_assign_value_"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 42,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "rewrite_explanations",
+      "source": "testdata/fixtures/rewrite_explanation.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^        identity: i32 = value$",
+          "^        folded: i32 = 7$",
+          "^        effectful_identity: i32 = \\(next_value\\(\\) \\* 1\\)$",
+          "^        volatile_identity: i32 = \\(volatile_value \\+ 0\\)$",
+          "^        pruned_short_circuit: i32 = 0$",
+          "^        selected_arm: i32 = 9$",
+          "^        selected_nested: i32 = \\(value \\+ 2\\)$",
+          "^        effectful_condition: i32 = \\(value if next_value\\(\\) != 0 else 0\\)$"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "recursive_global_effect_propagation",
+      "source": "testdata/fixtures/recursive_global_effects.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def read_shared\\(addend: i32\\) -> i32 can\\[Abort.Panic, Global\\]",
+          "^def recursive_total\\(depth: i32\\) -> i32 can\\[Abort.Panic, Global\\]"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "function_pointer_const_field_call",
+      "source": "testdata/fixtures/function_pointer.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "\\.allocate\\(size\\)"
+        ],
+        "not_contains_regex": [
+          "\\.allocate\\(\\(size\\)\\.cast\\[mutable void&\\?\\]\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_compatible_cpp",
+      "source": "testdata/fixtures/c_compatible.cpp",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def add\\(left: i32, right: i32\\) -> i32",
+          "^def main\\(\\) -> i32"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang++", "-std=gnu++11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 42,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "cpp_overloads",
+      "source": "testdata/fixtures/cpp_overloads.cpp",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def choose\\(value: i32\\) -> i32",
+          "^def choose\\(value: f32\\) -> i32",
+          "^def choose\\(value: f64\\) -> i32",
+          "^def main\\(\\) -> i32",
+          "choose\\(1\\.0\\)",
+          "choose\\(\\(1\\.0\\)\\.f32\\(\\)\\)",
+          "choose\\(\\(small\\)\\.i32\\(\\)\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang++", "-std=c++17", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "readonly_nonnull_helper",
+      "source": "testdata/fixtures/readonly_nonnull.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def elisa_nonnull_readonly\\[T\\]\\(value: T&\\?\\) -> T&:",
+          "^    if value == null:\\n        panic\\(\\\"C null pointer assertion failed\\\"\\)$",
+          "elisa_nonnull_readonly\\(value\\)\\[0\\]"
+        ],
+        "not_contains_regex": [
+          "^def elisa_nonnull\\[T\\]",
+          "^        return zeroed$"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "nullable_index_after_guard",
+      "source": "testdata/fixtures/nullable_index_after_guard.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def elisa_nonnull_readonly\\[T\\]\\(value: T&\\?\\) -> T&:",
+          "elisa_nonnull_readonly\\(value\\)\\[0\\]"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "compound_assignment_once",
+      "source": "testdata/fixtures/compound_assignment_once.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": ["values\\[next_index\\(\\)\\] \\+= \\(1\\)\\.u8\\(\\)"],
+        "not_contains_regex": ["values\\[next_index\\(\\)\\] <- \\(values\\[next_index\\(\\)\\] \\+ 1\\)", "^def __elisa_transpiler_compound_"],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "increment_evaluation",
+      "source": "testdata/fixtures/increment_evaluation.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": ["global mutable flag: bool = zeroed", "__elisa_transpiler_inc_[0-9]+_post_increment_i32", "__elisa_transpiler_inc_[0-9]+_pre_increment_u8", "__elisa_transpiler_inc_[0-9]+_post_decrement_i32", "__elisa_transpiler_inc_[0-9]+_pre_decrement_f32", "__elisa_transpiler_inc_[0-9]+_post_increment_bool", "return __elisa_transpiler_inc_[0-9]+_post_increment_i32\\(&\\(cursor\\)\\)", "identity\\(__elisa_transpiler_inc_[0-9]+_pre_increment_i32\\(&\\(cursor\\)\\)\\)"],
+        "not_contains_regex": ["return cursor\\n", "pre_increment_i32\\(&\\(cursor\\)\\)\\)\\.i32\\(\\)"],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "sequencing_expressions",
+      "source": "testdata/fixtures/sequencing_expressions.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "__elisa_transpiler_assign_value_[0-9]+",
+          "__elisa_transpiler_compound_add_[0-9]+",
+          "gate != 0 and",
+          "gate != 0 or",
+          "touch\\(\\)",
+          "touch\\(\\)\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- touches\\n\\s+call_argument_snapshot: i32 = identity\\(__elisa_transpiler_call_argument_[0-9]+\\)",
+          "touch\\(\\)\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- touches\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- identity\\(__elisa_transpiler_call_argument_[0-9]+\\)\\n\\s+nested_call_argument_snapshot: i32 = identity\\(__elisa_transpiler_call_argument_[0-9]+\\)",
+          "touch\\(\\)\\n\\s+arithmetic_snapshot: i32 = \\(touches \\+ 10\\)",
+          "def comma_arithmetic_return\\(\\) -> i32[^\\n]*\\n\\s+can [^\\n]+:\\n\\s+touch\\(\\)\\n\\s+return \\(touches \\+ 20\\)",
+          "touch\\(\\)\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- \\(touches \\+ 30\\)\\n\\s+arithmetic_call_argument: i32 = identity\\(__elisa_transpiler_call_argument_[0-9]+\\)",
+          "touch\\(\\)\\n\\s+array_index_snapshot: i32 = values\\[0\\]",
+          "touch\\(\\)\\n\\s+short_circuit_and_left: i32 = \\(1 if gate != 0 and touch\\(\\) != 0 else 0\\)",
+          "touch\\(\\)\\n\\s+short_circuit_or_left: i32 = \\(1 if gate != 0 or touch\\(\\) != 0 else 0\\)",
+          "if gate != 0:\\n\\s+touch\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- \\(touches \\+ 30\\)\\n\\s+else:\\n\\s+touch\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- \\(touches \\+ 40\\)\\n\\s+conditional_true: i32 = __elisa_transpiler_conditional_value_[0-9]+",
+          "def comma_conditional_return\\(selector: i32\\) -> i32[^\\n]*\\n\\s+can [^\\n]+:\\n\\s+__elisa_transpiler_conditional_value_[0-9]+: mutable i32 = zeroed\\n\\s+if selector != 0:\\n\\s+touch\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- \\(touches \\+ 70\\)\\n\\s+else:\\n\\s+touch\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- \\(touches \\+ 80\\)\\n\\s+return __elisa_transpiler_conditional_value_[0-9]+"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "nested_conditional_operator",
+      "source": "testdata/fixtures/nested_conditional_operator.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "return \\(10 if outer != 0 else \\(20 if inner != 0 else 30\\)\\)",
+          "return \\(\\(40 if inner != 0 else 50\\) if outer != 0 else 60\\)",
+          "return (fallback|\\(fallback \\+ 1\\))"
+        ],
+        "not_contains_regex": ["size_of\\["],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "short_circuit_constant",
+      "source": "testdata/fixtures/short_circuit_constant.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": ["def main\\(\\) -> i32[^\\n]*\\n\\s+can [^\\n]+:\\n\\s+pass\\n\\s+return calls"],
+        "not_contains_regex": ["if 0 and", "if 1 or"],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "call_argument_conditional_comma",
+      "source": "testdata/fixtures/call_argument_conditional_comma.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "if selector != 0:\\n\\s+mark_selected_true\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 40\\n\\s+else:\\n\\s+mark_selected_false\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 90",
+          "__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- __elisa_transpiler_conditional_value_[0-9]+\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- \\(mark_second_argument\\(\\) \\+ 2\\)\\n\\s+true_result: i32 = combine\\(__elisa_transpiler_call_argument_[0-9]+, __elisa_transpiler_call_argument_[0-9]+\\)",
+          "__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- __elisa_transpiler_conditional_value_[0-9]+\\n\\s+mark_second_argument\\(\\)\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- 3\\n\\s+false_result: i32 = combine\\(__elisa_transpiler_call_argument_[0-9]+, __elisa_transpiler_call_argument_[0-9]+\\)",
+          "if selector != 0:\\n\\s+mark_selected_true\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 30\\n\\s+else:\\n\\s+mark_selected_false\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 80\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- \\(10 \\+ __elisa_transpiler_conditional_value_[0-9]+\\)\\n\\s+nested_true_result: i32 = combine\\(__elisa_transpiler_call_argument_[0-9]+, 1\\)",
+          "if selector != 0:\\n\\s+mark_selected_true\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 30\\n\\s+else:\\n\\s+mark_selected_false\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 80\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- \\(10 \\+ __elisa_transpiler_conditional_value_[0-9]+\\)\\n\\s+nested_false_result: i32 = combine\\(__elisa_transpiler_call_argument_[0-9]+, 1\\)",
+          "mark_selected_false\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- -7\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- __elisa_transpiler_conditional_value_[0-9]+\\n\\s+external_result: i32 = abs\\(__elisa_transpiler_call_argument_[0-9]+\\)",
+          "if selector != 0:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 0\\n\\s+else:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 1\\n\\s+indexed_true_result: i32 = indexed_values\\[__elisa_transpiler_conditional_value_[0-9]+\\]",
+          "if selector != 0:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 0\\n\\s+else:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 1\\n\\s+indexed_false_result: i32 = indexed_values\\[__elisa_transpiler_conditional_value_[0-9]+\\]",
+          "if selector != 0:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 0\\n\\s+else:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 1\\n\\s+member_true_result: i32 = indexed_records\\[__elisa_transpiler_conditional_value_[0-9]+\\]\\.value",
+          "if selector != 0:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 0\\n\\s+else:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 1\\n\\s+member_false_result: i32 = indexed_records\\[__elisa_transpiler_conditional_value_[0-9]+\\]\\.value",
+          "if selector != 0:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 0\\n\\s+else:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 1\\n\\s+trusted Unsafe.StaleRef:\\n\\s+indexed_records\\[__elisa_transpiler_conditional_value_[0-9]+\\]\\.value <- 55",
+          "if selector != 0:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 0\\n\\s+else:\\n\\s+mark_index\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 1\\n\\s+assigned_member_value: i32 = __elisa_transpiler_assign_value_[0-9]+\\(&\\(indexed_records\\[__elisa_transpiler_conditional_value_[0-9]+\\]\\.value\\),\\n\\s+66\\)",
+          "if selector != 0:\\n\\s+mark_assigned_rhs_true\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 71\\n\\s+else:\\n\\s+mark_assigned_rhs_false\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 72\\n\\s+assigned_rhs_value: i32 = __elisa_transpiler_assign_value_[0-9]+\\(&\\(indexed_records\\[0\\]\\.value\\), __elisa_transpiler_conditional_value_[0-9]+\\)",
+          "if selector != 0:\\n\\s+mark_assigned_rhs_true\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 81\\n\\s+else:\\n\\s+mark_assigned_rhs_false\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 82\\n\\s+trusted Unsafe\\.StaleRef:\\n\\s+indexed_records\\[1\\]\\.value <- __elisa_transpiler_conditional_value_[0-9]+",
+          "if selector != 0:\\n\\s+mark_short_circuit_effect\\(\\)\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 1\\n\\s+else:\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 0\\n\\s+and_skipped: i32 = __elisa_transpiler_logical_value_[0-9]+",
+          "if selector != 0:\\n\\s+__elisa_transpiler_conditional_value_[0-9]+: mutable i32 = zeroed\\n\\s+if selector != 0:\\n\\s+mark_short_circuit_effect\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 1\\n\\s+else:\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- 0",
+          "if selector != 0:\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 1\\n\\s+else:\\n\\s+mark_short_circuit_effect\\(\\)\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 0\\n\\s+or_skipped: i32 = __elisa_transpiler_logical_value_[0-9]+",
+          "if selector != 0:\\n\\s+mark_short_circuit_effect\\(\\)\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 1\\n\\s+else:\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 0\\n\\s+if __elisa_transpiler_logical_value_[0-9]+ != 0:\\n\\s+if_result <- 5",
+          "if selector != 0:\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 1\\n\\s+else:\\n\\s+mark_short_circuit_effect\\(\\)\\n\\s+__elisa_transpiler_logical_value_[0-9]+ <- 1\\n\\s+if __elisa_transpiler_logical_value_[0-9]+ != 0:\\n\\s+if_result <- 7",
+          "while true:\\n\\s+__elisa_transpiler_logical_value_[0-9]+: mutable i32 = zeroed\\n\\s+if selector != 0:\\n\\s+mark_short_circuit_effect\\(\\)\\n[\\s\\S]*?if not __elisa_transpiler_logical_value_[0-9]+ != 0:\\n\\s+break\\n\\s+__elisa_transpiler_inc_[0-9]+_pre_increment_i32\\(&\\(loop_iterations\\)\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_enum_integer_semantics",
+      "source": "testdata/fixtures/enum_integer_semantics.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "const enum WideMask of u32:",
+          "global mutable initial_mode: AccessMode = \\(5\\)\\.i32\\(\\)\\.AccessMode\\(\\)",
+          "global mutable initial_bundle: EnumBundle = EnumBundle\\{access: \\(7\\)\\.i32\\(\\)\\.AccessMode\\(\\), wide: \\(4294967295\\)\\.u32\\(\\)\\.WideMask\\(\\)\\}",
+          "def from_integer\\(value: i32\\) -> AccessMode:[^\\n]*\\n\\s+return \\(value\\)\\.i32\\(\\)\\.AccessMode\\(\\)",
+          "def to_integer\\(value: AccessMode\\) -> i32:[^\\n]*\\n\\s+return \\(value\\)\\.i32\\(\\)",
+          "accepts_six\\(\\(6\\)\\.i32\\(\\)\\.AccessMode\\(\\)\\)",
+          "mode <- \\(2\\)\\.i32\\(\\)\\.AccessMode\\(\\)",
+          "mode <- .*ACCESS_WRITE.*\\.i32\\(\\)\\.AccessMode\\(\\)",
+          "def wide_mask_from_unsigned\\(value: u32\\) -> WideMask:[^\\n]*\\n\\s+return \\(value\\)\\.u32\\(\\)\\.WideMask\\(\\)",
+          "def wide_mask_to_unsigned\\(value: WideMask\\) -> u32:[^\\n]*\\n\\s+return \\(value\\)\\.u32\\(\\)",
+          "accepts_wide_mask\\(\\(4294967295\\)\\.u32\\(\\)\\.WideMask\\(\\)\\)",
+          "identity_unsigned\\(\\(wide_mask\\)\\.u32\\(\\)\\)",
+          "wide_mask <- .*WIDE_MASK_HIGH.*\\.u32\\(\\)\\.WideMask\\(\\)",
+          "access_values: mutable array\\[AccessMode, 2\\] = \\[\\(1\\)\\.i32\\(\\)\\.AccessMode\\(\\), \\(2\\)\\.i32\\(\\)\\.AccessMode\\(\\)\\]"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "runtime_unsigned_wrap",
+      "source": "testdata/fixtures/runtime_unsigned_wrap.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def add_wrap\\(left: u32, right: u32\\) -> u32:",
+          "^def multiply_wrap\\(left: u32, right: u32\\) -> u32:",
+          "return \\(left \\+ right\\)",
+          "return \\(left \\* right\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_enum_typedef_aliases",
+      "source": "testdata/fixtures/enum_typedef_aliases.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "const enum CValue of u32:",
+          "def to_unsigned\\(value: CValue\\) -> u32:",
+          "def from_unsigned\\(value: u32\\) -> CValue:",
+          "signed_byte: i8 = \\(value\\)\\.i8\\(\\)",
+          "unsigned_byte: u8 = \\(value\\)\\.u8\\(\\)",
+          "signed_short: i16 = \\(value\\)\\.i16\\(\\)",
+          "unsigned_short: u16 = \\(value\\)\\.u16\\(\\)",
+          "signed_long_long: i64 = \\(value\\)\\.i64\\(\\)",
+          "unsigned_long_long: u64 = \\(value\\)\\.u64\\(\\)",
+          "boundary_signed_byte: i8 = \\(boundary\\)\\.i8\\(\\)",
+          "boundary_unsigned_long_long: u64 = \\(boundary\\)\\.u64\\(\\)",
+          "\\(boundary_signed_byte\\)\\.i32\\(\\) != \\(\\(4294967295\\)\\.i8\\(\\)\\)\\.i32\\(\\)",
+          "\\(boundary_unsigned_short\\)\\.i32\\(\\) != 65535",
+          "value <- \\(\\(\\(value\\)\\.u32\\(\\) \\| 32\\)\\)\\.u32\\(\\)\\.CValue\\(\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_array_to_pointer_decay",
+      "source": "testdata/fixtures/array_to_pointer.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "mutable_cursor: mutable u8&\\? = \\(&\\(values\\)\\[0\\]\\)\\.cast\\[mutable u8&\\?\\]",
+          "mutable_cursor <- \\(&\\(values\\)\\[0\\]\\)",
+          "readonly_cursor: u8&\\? = \\(&\\(values\\)\\[0\\]\\)",
+          "views: ByteViews = ByteViews\\{mutable_bytes: \\(&\\(values\\)\\[0\\]\\), readonly_bytes: \\(&\\(values\\)\\[0\\]\\)\\}",
+          "sum_bytes\\(\\(&\\(values\\)\\[0\\]\\)\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_record_pointer_call_arguments",
+      "source": "testdata/fixtures/record_pointer_call_arguments.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "__elisa_transpiler_call_argument_[0-9]+: mutable Node&\\? = zeroed\\n\\s+trusted Unsafe.StaleRef:\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- choose_node\\(\\(&node\\)\\.cast\\[mutable Node&\\?\\]\\)\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- choose_tag\\(\\)\\n\\s+result: i32 = consume\\(__elisa_transpiler_call_argument_[0-9]+, __elisa_transpiler_call_argument_[0-9]+\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_pointer_difference_element_units",
+      "source": "testdata/fixtures/pointer_difference.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "\\.i64\\(\\) / 4",
+          "\\.i64\\(\\) / 8"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_void_pointer_boundaries",
+      "source": "testdata/fixtures/void_pointer_boundaries.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def identity\\(value: mutable void&\\?\\) -> mutable void&\\?",
+          "^def identity_slot\\(slot: mutable \\(mutable void&\\?\\) &\\?\\) -> mutable \\(mutable void&\\?\\) &\\?"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "cpp_bool_backed_enum_storage",
+      "source": "testdata/fixtures/cpp_enum_bool_storage.cpp",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "const enum Truth of u8:"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang++", "-std=gnu++11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "cpp_scoped_enum_namespace_aliases",
+      "source": "testdata/fixtures/cpp_enum_namespace_alias.cpp",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^const enum Renderer__PixelMode of u32:",
+          "^def to_bits\\(value: Renderer__PixelMode\\) -> u32",
+          "^def from_bits\\(value: u32\\) -> Renderer__PixelMode",
+          "^def to_bits_through_pointer\\(value: Renderer__PixelMode&\\?\\) -> u32",
+          "value: mutable Renderer__PixelMode = from_bits"
+        ],
+        "not_contains_regex": [
+          "^const enum PublicPixelMode",
+          "^const enum PixelModeAlias",
+          "^def to_bits\\(value: i32\\)",
+          "^def from_bits\\(value: u32\\) -> i32"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang++", "-std=gnu++11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "variadic_va_arg",
+      "source": "testdata/fixtures/variadic_va_arg.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^extern va_list$",
+          "^extern va_arg\\[T\\]\\(storage: mutable void&\\) -> T$",
+          "va_arg\\[i32\\]\\(\\(&ap\\)\\.cast\\[mutable void&\\]\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "variadic_promotions",
+      "source": "testdata/fixtures/variadic_promotions.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "promoted_values\\(3, \\(small\\)\\.i32\\(\\), \\(fraction\\)\\.f64\\(\\), \\(1 if flag else 0\\)\\.i32\\(\\)\\)",
+          "small_integer: i32 = va_arg\\[i32\\]",
+          "promoted_float: f64 = va_arg\\[f64\\]",
+          "promoted_bool: i32 = va_arg\\[i32\\]"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "designated_initializers",
+      "source": "testdata/fixtures/designated_init.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "global mutable pair: Pair = Pair\\{first: 3, second: 7, third: zeroed\\}",
+          "global mutable values: array\\[i32, 5\\] = \\[zeroed, zeroed, 7, zeroed, 9\\]"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_record_and_six_element_array",
+      "source": "testdata/fixtures/record_and_six_element_array.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "fields: SixFields = SixFields\\{first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6\\}",
+          "record: SixElementArray = SixElementArray\\{values: \\[7, 11, 13, 17, 19, 23\\]\\}"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "floating_edge_values",
+      "source": "testdata/fixtures/floating_edge_values.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "quiet_nan: f64 = \\(0\\.0 / 0\\.0\\)",
+          "positive_infinity: f64 = \\(1\\.0 / 0\\.0\\)",
+          "quiet_nan == quiet_nan",
+          "quiet_nan != 0\\.0",
+          "positive_infinity != 0\\.0"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}", "-lm"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_record_pointer_difference_layout",
+      "source": "testdata/fixtures/record_pointer_difference.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "\\.i64\\(\\) / 8",
+          "\\.i64\\(\\) / 16"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "c_record_sizeof_alignof_layout",
+      "source": "testdata/fixtures/record_sizeof_alignof.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^\\s*record_size: u64 = \\(8\\)\\.u64\\(\\)$",
+          "^\\s*record_alignment: u64 = \\(4\\)\\.u64\\(\\)$",
+          "^\\s*nested_size: u64 = \\(16\\)\\.u64\\(\\)$",
+          "^\\s*nested_alignment: u64 = \\(4\\)\\.u64\\(\\)$",
+          "^\\s*record_array_size: u64 = \\(16\\)\\.u64\\(\\)$",
+          "^\\s*record_array_alignment: u64 = \\(4\\)\\.u64\\(\\)$",
+          "^\\s*nested_array_size: u64 = \\(32\\)\\.u64\\(\\)$",
+          "^\\s*nested_array_alignment: u64 = \\(4\\)\\.u64\\(\\)$"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "variadic_va_copy",
+      "source": "testdata/fixtures/variadic_va_copy.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^extern va_list$",
+          "^extern va_arg\\[T\\]\\(storage: mutable void&\\) -> T$",
+          "^extern llvm_va_copy\\(destination: mutable void&, source: mutable void&\\) -> void$",
+          "llvm_va_copy\\(\\(&second\\)\\.cast\\[mutable void&\\], \\(&first\\)\\.cast\\[mutable void&\\]\\)"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    }
+]
+}

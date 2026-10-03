@@ -1,0 +1,26 @@
+# Format response-file failures at the CLI boundary so diagnostics stay out of
+# the argument parser's implementation file.
+extend CTranslator:
+    def cli_emit_response_file_failure(source: sview, response_path: darray[u8], failure: ClangResponseFailure) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        if failure == ClangResponseFailure.Unreadable:
+            append_view(&output, sview("elisa-c-transpiler: could not read Clang response file ", 0, -1))
+            append_view(&output, bytes_view(response_path))
+        elif failure == ClangResponseFailure.ByteLimit:
+            append_view(&output, sview("elisa-c-transpiler: response-file expansion exceeded --max-frontend-output-bytes while reading ", 0, -1))
+            append_view(&output, bytes_view(response_path))
+        elif failure == ClangResponseFailure.NestingLimit:
+            append_view(&output, sview("elisa-c-transpiler: Clang response-file nesting exceeded the maximum depth of 16 at ", 0, -1))
+            append_view(&output, bytes_view(response_path))
+        elif failure == ClangResponseFailure.ArgumentLimit:
+            append_view(&output, sview("elisa-c-transpiler: expanded compiler argv exceeded the maximum of 1000000 arguments", 0, -1))
+            if response_path.count > 0.usize():
+                append_view(&output, sview(" while expanding ", 0, -1))
+                append_view(&output, bytes_view(response_path))
+        else:
+            append_view(&output, sview("elisa-c-transpiler: malformed or unsupported quoting in Clang response file ", 0, -1))
+            append_view(&output, bytes_view(response_path))
+        append_view(&output, sview(" while processing ", 0, -1))
+        append_view(&output, source)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast

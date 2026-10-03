@@ -1,0 +1,376 @@
+extend CTranslator:
+    struct CliSourceMapFile:
+        path: sview
+        canonical_path: sview
+        content_hash: u64
+
+    struct CliSourceMapUnit:
+        json: cstr
+        length: usize
+
+    struct CliSourceMapProjectState:
+        output: mutable darray[u8]
+        source_bytes_hashed: mutable usize
+        json_bytes: mutable usize
+        units: mutable darray[CliSourceMapUnit]
+
+extend CTranslator:
+    # Hash source contents incrementally so requesting a map does not require
+    # loading every included header into memory. Canonical aliases are shared
+    # within a unit; project limits count the actual bytes hashed by all units.
+    def cli_source_map_hash_file(path: sview, remaining_bytes: usize, content_hash: mutable u64&, bytes_read: mutable usize&, limit_exceeded: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        path_buffer: mutable darray[u8] = []
+        path_cstr: cstr = cli_copy_path(&path_buffer, path)
+        stream: CFile? = c_fopen(path_cstr, "rb")
+        return false if stream == null
+        handle: CFile = stream
+        chunk: mutable u8[8192] = zeroed
+        hash: mutable u64 = 0xcbf29ce484222325
+        total: mutable usize = 0.usize()
+        while true |handle, chunk, hash, total, remaining_bytes|:
+            count: usize = c_fread((&chunk[0]).cast[mutable void&], 1.usize(), 8192.usize(), handle)
+            if count == 0.usize():
+                read_failed: bool = c_ferror(handle) != 0
+                _ = c_fclose(handle)
+                return false if read_failed
+                content_hash <- hash
+                bytes_read <- total
+                return true
+            if count > remaining_bytes - total:
+                _ = c_fclose(handle)
+                limit_exceeded <- true
+                return false
+            for index in 0..<count |chunk, hash|:
+                hash <- (hash ^ chunk[index].u64()) * 0x100000001b3
+            total <- total + count
+        return false
+
+    def cli_source_map_add_file(path: sview, working_directory: sview, files: mutable darray[CliSourceMapFile]&, hashed_files: mutable darray[CliSourceMapFile]&, hashed_bytes: mutable usize&, max_source_bytes: usize, failed_path: mutable sview&, limit_exceeded: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return true if path.len == 0 or string_view_index(path, 0) == 60
+        for index in 0..<files.count |files, path|:
+            return true if sview_eq(files[index].path, path)
+        canonical_bytes: mutable darray[u8] = []
+        if not ast_json_resolve_path(path, working_directory, &canonical_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast:
+            failed_path <- path
+            return false
+        canonical: sview = sview(ctx_string_from_view(bytes_view(canonical_bytes)), 0, -1)
+        for index in 0..<files.count |files, canonical, path|:
+            if sview_eq(files[index].canonical_path, canonical):
+                existing_hash: u64 = files[index].content_hash
+                files.push(CliSourceMapFile{path: path, canonical_path: canonical, content_hash: existing_hash})
+                return true
+        for index in 0..<hashed_files.count |hashed_files, canonical, files, path|:
+            if sview_eq(hashed_files[index].canonical_path, canonical):
+                existing_hash: u64 = hashed_files[index].content_hash
+                files.push(CliSourceMapFile{path: path, canonical_path: canonical, content_hash: existing_hash})
+                return true
+        content_hash: mutable u64 = 0
+        bytes_read: mutable usize = 0.usize()
+        remaining_bytes: usize = max_source_bytes - hashed_bytes
+        if not cli_source_map_hash_file(canonical, remaining_bytes, &content_hash, &bytes_read, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            failed_path <- path
+            return false
+        hashed_bytes <- hashed_bytes + bytes_read
+        files.push(CliSourceMapFile{path: path, canonical_path: canonical, content_hash: content_hash})
+        hashed_files.push(CliSourceMapFile{path: path, canonical_path: canonical, content_hash: content_hash})
+        return true
+
+    def cli_source_map_collect_range[@r](range: TypedOwnedSourceRange[r], working_directory: sview, files: mutable darray[CliSourceMapFile]&, hashed_files: mutable darray[CliSourceMapFile]&, hashed_bytes: mutable usize&, max_source_bytes: usize, failed_path: mutable sview&, limit_exceeded: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return false if not (cli_source_map_add_file(range.file, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+        return cli_source_map_add_file(range.included_from, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def cli_source_map_sort_files(files: mutable darray[CliSourceMapFile]&) -> void:
+        for index in 1..<files.count.i64() |files|:
+            cursor: mutable i64 = index
+            while cursor > 0 |files, cursor|:
+                left: CliSourceMapFile = files[(cursor - 1).usize()]
+                right: CliSourceMapFile = files[cursor.usize()]
+                swap: mutable bool = false
+                shared: i64 = left.path.len if left.path.len < right.path.len else right.path.len
+                for byte_index in 0..<shared |left, right, swap|:
+                    left_byte: i64 = string_view_index(left.path, byte_index)
+                    right_byte: i64 = string_view_index(right.path, byte_index)
+                    if left_byte != right_byte:
+                        swap <- left_byte > right_byte
+                        break
+                swap <- left.path.len > right.path.len if not swap and left.path.len != right.path.len
+                break if not swap
+                files[(cursor - 1).usize()] <- right
+                files[cursor.usize()] <- left
+                cursor <- cursor - 1
+
+    def cli_source_map_append_hex_u64(out: mutable darray[u8]&, value: u64) -> void:
+        for index in 0..<16 |out, value|:
+            shift: i64 = (15 - index) * 4
+            digit: i64 = ((value >> shift.u64()) & 15.u64()).i64()
+            out.push((48 + digit).u8()) if digit < 10 else out.push((87 + digit).u8())
+
+    def cli_source_map_append_range[@r](out: mutable darray[u8]&, name: sview, range: TypedOwnedSourceRange[r], first: mutable bool&) -> void:
+        out.push(44.u8()) if not first[0]
+        cli_append_json_string(out, name)
+        append_view(out, sview(":{", 0, -1))
+        first <- true
+        cli_append_json_view_field(out, sview("path", 0, -1), range.file, first)
+        cli_append_json_view_field(out, sview("included_from", 0, -1), range.included_from, first)
+        cli_append_json_i64_field(out, sview("start_offset", 0, -1), range.start_offset, first)
+        cli_append_json_i64_field(out, sview("end_offset", 0, -1), range.end_offset, first)
+        out.push(125.u8())
+        first <- false
+
+    def cli_source_map_json[@r](spans: darray[TypedGeneratedSourceSpan[r]] @r, source_identity: sview, working_directory: sview, max_source_bytes: usize, max_json_bytes: usize, out: mutable darray[u8]&, failed_path: mutable sview&, limit_exceeded: mutable bool&, source_bytes_hashed: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        files: mutable darray[CliSourceMapFile] = []
+        hashed_files: mutable darray[CliSourceMapFile] = []
+        hashed_bytes: mutable usize = 0.usize()
+        limit_exceeded <- false
+        failed_path <- sview("", 0, 0)
+        source_bytes_hashed <- 0.usize()
+        if source_identity.len > 0:
+            return false if not (cli_source_map_add_file(source_identity, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+        for index in 0..<spans.count |spans, files, hashed_files, hashed_bytes, working_directory, max_source_bytes, failed_path, limit_exceeded|:
+            span: TypedGeneratedSourceSpan[r] = spans[index]
+            return false if not (cli_source_map_collect_range(span.source, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            return false if not (cli_source_map_collect_range(span.spelling, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            return false if not (cli_source_map_collect_range(span.expansion, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+        cli_source_map_sort_files(&files)
+        source_bytes_hashed <- hashed_bytes
+
+        out.count <- 0.usize()
+        append_view(out, sview("{\"schema_version\":1,\"offset_unit\":\"byte\",\"offset_convention\":\"zero-based-half-open\",\"hash_algorithm\":\"fnv1a64\",\"sources\":[", 0, -1))
+        for index in 0..<files.count |out, files|:
+            file: CliSourceMapFile = files[index]
+            out.push(44.u8()) if index > 0
+            out.push(123.u8())
+            first: mutable bool = true
+            cli_append_json_view_field(out, sview("path", 0, -1), file.path, &first)
+            cli_append_json_view_field(out, sview("canonical_path", 0, -1), file.canonical_path, &first)
+            out.push(44.u8()) if not first
+            cli_append_json_string(out, sview("content_hash", 0, -1))
+            append_view(out, sview(":\"", 0, -1))
+            cli_source_map_append_hex_u64(out, file.content_hash)
+            out.push(34.u8())
+            out.push(125.u8())
+            if out.count > max_json_bytes:
+                limit_exceeded <- true
+                return false
+        append_view(out, sview("],\"mappings\":[", 0, -1))
+        for index in 0..<spans.count |out, spans, max_json_bytes|:
+            span: TypedGeneratedSourceSpan[r] = spans[index]
+            out.push(44.u8()) if index > 0
+            out.push(123.u8())
+            first: mutable bool = true
+            cli_append_json_i64_field(out, sview("generated_start", 0, -1), span.generated_start, &first)
+            cli_append_json_i64_field(out, sview("generated_end", 0, -1), span.generated_end, &first)
+            cli_source_map_append_range(out, sview("source", 0, -1), span.source, &first)
+            cli_source_map_append_range(out, sview("spelling", 0, -1), span.spelling, &first)
+            cli_source_map_append_range(out, sview("expansion", 0, -1), span.expansion, &first)
+            cli_append_json_view_field(out, sview("synthesized_reason", 0, -1), span.synthesized_reason, first)
+            out.push(125.u8())
+            if out.count > max_json_bytes:
+                limit_exceeded <- true
+                return false
+        append_view(out, sview("]}\n", 0, -1))
+        return false if out.count > max_json_bytes
+        return true
+
+    def cli_source_map_project_new(unit_count: usize) -> CliSourceMapProjectState can[Memory.Allocate, Abort.Panic]:
+        state: mutable CliSourceMapProjectState = CliSourceMapProjectState{output: [], source_bytes_hashed: 0.usize(), json_bytes: 0.usize(), units: []}
+        state.units.resize(unit_count)
+        return state
+
+    def cli_source_map_json_escaped_length(value: sview) -> usize:
+        length: mutable usize = 2.usize()
+        for index in 0..<value.len |value, length|:
+            byte: i64 = string_view_index(value, index)
+            if byte == 34 or byte == 92 or byte == 8 or byte == 12 or byte == 10 or byte == 13 or byte == 9:
+                length <- length + 2.usize()
+            elif byte < 32:
+                length <- length + 6.usize()
+            else:
+                length <- length + 1.usize()
+        return length
+
+    def cli_source_map_project_append[@r](state: mutable CliSourceMapProjectState&, unit_index: usize, translation_source: sview, spans: darray[TypedGeneratedSourceSpan[r]] @r, working_directory: sview, max_bytes: usize, failed_path: mutable sview&, limit_exceeded: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if state.source_bytes_hashed > max_bytes or state.json_bytes > max_bytes or unit_index >= state.units.count:
+            limit_exceeded <- true
+            return false
+        remaining_source_bytes: usize = max_bytes - state.source_bytes_hashed
+        unit_json: mutable darray[u8] = []
+        unit_hashed_bytes: mutable usize = 0.usize()
+        if not cli_source_map_json(spans, translation_source, working_directory, remaining_source_bytes, max_bytes, &unit_json, failed_path, limit_exceeded, &unit_hashed_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            return false
+        prefix: sview = sview("{\"translation_source\":", 0, -1)
+        middle: sview = sview(",\"map\":", 0, -1)
+        suffix: sview = sview("}", 0, -1)
+        json_length: usize = unit_json.count - 1.usize()
+        needed: mutable usize = prefix.len.usize() + cli_source_map_json_escaped_length(translation_source) + middle.len.usize() + json_length + suffix.len.usize()
+        needed <- needed + sview("{\"schema_version\":1,\"units\":[", 0, -1).len.usize() if unit_index == 0.usize()
+        needed <- needed + 1.usize() if unit_index > 0.usize()
+        if state.json_bytes > max_bytes:
+            limit_exceeded <- true
+            return false
+        remaining_json_bytes: usize = max_bytes - state.json_bytes
+        if needed > remaining_json_bytes or remaining_json_bytes - needed < 3.usize():
+            limit_exceeded <- true
+            return false
+        document: mutable darray[u8] = []
+        append_view(&document, prefix)
+        cli_append_json_string(&document, translation_source)
+        append_view(&document, middle)
+        for index in 0..<json_length |document, unit_json, json_length|:
+            document.push(unit_json[index])
+        append_view(&document, suffix)
+        permanent_json: cstr = ctx_string_from_view(bytes_view(document)) can Memory.Allocate, Abort.Panic
+        state.units[unit_index] <- CliSourceMapUnit{json: permanent_json, length: document.count}
+        state.json_bytes <- state.json_bytes + needed
+        state.source_bytes_hashed <- state.source_bytes_hashed + unit_hashed_bytes
+        return true
+
+    def cli_source_map_project_finish(state: mutable CliSourceMapProjectState&, max_bytes: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+        return false if state.json_bytes > max_bytes
+        return false if max_bytes - state.json_bytes < 3.usize()
+        state.output.count <- 0.usize()
+        append_view(&state.output, sview("{\"schema_version\":1,\"units\":[", 0, -1))
+        units: darray[CliSourceMapUnit] = state.units
+        for index in 0..<units.count |units|:
+            state.output.push(44.u8()) if index > 0.usize()
+            unit: CliSourceMapUnit = units[index]
+            for byte_index in 0..<unit.length |state, unit|:
+                state.output.push(unit.json[byte_index])
+        append_view(&state.output, sview("]}\n", 0, -1))
+        return false if state.output.count > max_bytes or state.output.count != state.json_bytes + 3.usize()
+        return true
+
+    def cli_source_map_normalized_output_path[@r](path: sview, parent: mutable darray[u8]& @r, normalized: mutable darray[u8]& @r) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return false if path.len == 0
+        slash: mutable i64 = -1
+        for index in 0..<path.len |path, slash|:
+            slash <- index if string_view_index(path, index) == 47
+        basename_start: i64 = slash + 1
+        return false if basename_start >= path.len
+        parent_spelling: sview = sview(".", 0, -1) if slash < 0 else (sview("/", 0, -1) if slash == 0 else string_view_slice(path, 0, slash))
+        parent.count <- 0.usize()
+        return false if not (ast_json_resolve_path(parent_spelling, sview("", 0, 0), parent) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast)
+        normalized.count <- 0.usize()
+        append_view(normalized, bytes_view_range_ref(parent, 0.usize(), parent.count))
+        append_view(normalized, sview("/", 0, -1)) if parent.count == 0.usize() or parent[0] != 47 or parent.count > 1.usize()
+        append_view(normalized, string_view_slice(path, basename_start, path.len))
+        return true
+
+    def cli_source_map_stage_project(path: sview, state: mutable CliSourceMapProjectState&, transaction_id: i64, max_bytes: usize) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return false if not cli_source_map_project_finish(state, max_bytes)
+        staged_path: mutable darray[u8] = []
+        cli_staged_source_map_path(&staged_path, path, transaction_id)
+        if cli_path_exists(staged_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            emit_view_fd(sview("elisa-c-transpiler: source-map transaction path already exists; refusing to replace it\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            return false
+        staged_view: sview = sview((&staged_path[0]).cast[cstr], 0, -1)
+        if not cli_write_bytes(staged_view, state.output) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            emit_view_fd(sview("elisa-c-transpiler: unable to stage project source map\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            _ = clang_unlink((&staged_path[0]).cast[cstr])
+            return false
+        return true
+
+    def cli_source_map_emit_json_failure(failed_path: sview, limit_exceeded: bool) -> void can[Console, Unsafe.PointerCast]:
+        if limit_exceeded:
+            emit_view_fd(sview("elisa-c-transpiler: source map or referenced source files exceeded --max-frontend-output-bytes\n", 0, -1), 2) can Console, Unsafe.PointerCast
+        else:
+            emit_view_fd(sview("elisa-c-transpiler: unable to read source-map origin file ", 0, -1), 2) can Console, Unsafe.PointerCast
+            emit_view_fd(failed_path, 2) can Console, Unsafe.PointerCast
+            emit_view_fd(sview("\n", 0, -1), 2) can Console, Unsafe.PointerCast
+
+    def cli_source_map_process_translation[@r](path: sview, unit_index: usize, source_identity: sview, spans: darray[TypedGeneratedSourceSpan[r]] @r, working_directory: sview, project_directory: sview, project_state: mutable CliSourceMapProjectState&, max_bytes: usize) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return true if path.len == 0
+        if project_directory.len > 0:
+            failed_path: mutable sview = sview("", 0, 0)
+            limit_exceeded: mutable bool = false
+            if not cli_source_map_project_append(project_state, unit_index, source_identity, spans, working_directory, max_bytes, &failed_path, &limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                cli_source_map_emit_json_failure(failed_path, limit_exceeded) can Console, Unsafe.PointerCast
+                return false
+            return true
+        return cli_source_map_write_file(path, source_identity, spans, working_directory, max_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def cli_source_map_validate_request(path: sview, output_directory: sview, sources: darray[CliSource]) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return true if path.len == 0
+        return true if output_directory.len == 0
+        output_parent: mutable darray[u8] = []
+        normalized_output: mutable darray[u8] = []
+        directory_identity: mutable darray[u8] = []
+        if not cli_source_map_normalized_output_path(path, &output_parent, &normalized_output) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast:
+            emit_view_fd(sview("elisa-c-transpiler: --source-map-json requires a file path with an existing parent directory\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            return false
+        if not ast_json_resolve_path(output_directory, sview("", 0, 0), &directory_identity) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast:
+            emit_view_fd(sview("elisa-c-transpiler: unable to resolve --output-dir for source-map publication\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            return false
+        if not sview_eq(bytes_view(output_parent), bytes_view(directory_identity)):
+            emit_view_fd(sview("elisa-c-transpiler: project --source-map-json PATH must be in --output-dir\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            return false
+        existing_output_identity: mutable darray[u8] = []
+        existing_output_resolved: mutable bool = false
+        if ast_json_resolve_path(path, sview("", 0, 0), &existing_output_identity) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast:
+            existing_output_resolved <- true
+            for index in 0..<sources.count.i64() |sources, existing_output_identity|:
+                source: CliSource = sources[index.usize()]
+                if source.canonical_path.len > 0 and sview_eq(bytes_view(existing_output_identity), source.canonical_path):
+                    emit_view_fd(sview("elisa-c-transpiler: project source-map output resolves to an input source\n", 0, -1), 2) can Console, Unsafe.PointerCast
+                    return false
+        for index in 0..<sources.count.i64() |sources, normalized_output, existing_output_identity, existing_output_resolved|:
+            source: CliSource = sources[index.usize()]
+            if source.canonical_path.len > 0 and sview_eq(bytes_view(normalized_output), source.canonical_path):
+                emit_view_fd(sview("elisa-c-transpiler: source-map output path resolves to an input source\n", 0, -1), 2) can Console, Unsafe.PointerCast
+                return false
+            module: mutable darray[u8] = []
+            cli_module_name_for_sources(&module, sources, index)
+            expected_output: mutable darray[u8] = []
+            append_view(&expected_output, bytes_view(directory_identity))
+            append_view(&expected_output, sview("/", 0, -1)) if directory_identity.count == 0.usize() or directory_identity[directory_identity.count - 1.usize()] != 47
+            append_view(&expected_output, bytes_view(module))
+            if sview_eq(bytes_view(normalized_output), bytes_view(expected_output)) or (existing_output_resolved and sview_eq(bytes_view(existing_output_identity), bytes_view(expected_output))):
+                emit_view_fd(sview("elisa-c-transpiler: project source-map path collides with a generated module\n", 0, -1), 2) can Console, Unsafe.PointerCast
+                return false
+        manifest_path: mutable darray[u8] = []
+        append_view(&manifest_path, bytes_view(directory_identity))
+        append_view(&manifest_path, sview("/", 0, -1)) if directory_identity.count == 0.usize() or directory_identity[directory_identity.count - 1.usize()] != 47
+        append_view(&manifest_path, sview("elisa_project.elisa", 0, -1))
+        if sview_eq(bytes_view(normalized_output), bytes_view(manifest_path)) or (existing_output_resolved and sview_eq(bytes_view(existing_output_identity), bytes_view(manifest_path))):
+            emit_view_fd(sview("elisa-c-transpiler: project source-map path collides with the generated manifest\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            return false
+        return true
+
+    def cli_source_map_write_file[@r](path: sview, source_identity: sview, spans: darray[TypedGeneratedSourceSpan[r]] @r, working_directory: sview, max_bytes: usize) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        output_identity: mutable darray[u8] = []
+        if ast_json_resolve_path(path, sview("", 0, 0), &output_identity) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast:
+            if source_identity.len > 0 and sview_eq(bytes_view(output_identity), source_identity):
+                emit_view_fd(sview("elisa-c-transpiler: source-map output path resolves to the input source; refusing to overwrite it\n", 0, -1), 2) can Console, Unsafe.PointerCast
+                return false
+        output: mutable darray[u8] = []
+        failed_path: mutable sview = sview("", 0, 0)
+        limit_exceeded: mutable bool = false
+        source_bytes_hashed: mutable usize = 0.usize()
+        if not cli_source_map_json(spans, source_identity, working_directory, max_bytes, max_bytes, &output, &failed_path, &limit_exceeded, &source_bytes_hashed) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            cli_source_map_emit_json_failure(failed_path, limit_exceeded) can Console, Unsafe.PointerCast
+            return false
+        temporary_path: mutable darray[u8] = []
+        append_view(&temporary_path, path)
+        append_view(&temporary_path, sview(".elisa-source-map-tmp-", 0, -1))
+        append_i64(&temporary_path, clang_getpid().i64())
+        temporary_path.push(0)
+        if cli_path_exists(temporary_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            emit_view_fd(sview("elisa-c-transpiler: source-map staging path already exists; refusing to replace it: ", 0, -1), 2) can Console, Unsafe.PointerCast
+            emit_view_fd(sview((&temporary_path[0]).cast[cstr], 0, -1), 2) can Console, Unsafe.PointerCast
+            emit_view_fd(sview("\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            return false
+        temporary_view: sview = sview((&temporary_path[0]).cast[cstr], 0, -1)
+        if not cli_write_bytes(temporary_view, output) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            emit_view_fd(sview("elisa-c-transpiler: unable to stage source map ", 0, -1), 2) can Console, Unsafe.PointerCast
+            emit_view_fd(path, 2) can Console, Unsafe.PointerCast
+            emit_view_fd(sview("\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            _ = clang_unlink((&temporary_path[0]).cast[cstr])
+            return false
+        destination_path: cstr = ctx_string_from_view(path) can Memory.Allocate, Abort.Panic
+        if clang_rename((&temporary_path[0]).cast[cstr], destination_path) != 0:
+            emit_view_fd(sview("elisa-c-transpiler: unable to publish source map ", 0, -1), 2) can Console, Unsafe.PointerCast
+            emit_view_fd(path, 2) can Console, Unsafe.PointerCast
+            emit_view_fd(sview("\n", 0, -1), 2) can Console, Unsafe.PointerCast
+            _ = clang_unlink((&temporary_path[0]).cast[cstr])
+            return false
+        return true

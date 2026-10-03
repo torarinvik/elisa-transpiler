@@ -1,0 +1,7 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_identity/main.c","command":"clang -std=c11 -c testdata/fixtures/project_identity/main.c"},
+  {"directory":".","file":"testdata/fixtures/project_identity/sanitized_b/symbol_unit.c","command":"clang -std=c11 -c testdata/fixtures/project_identity/sanitized_b/symbol_unit.c"},
+  {"directory":".","file":"testdata/fixtures/project_identity/sanitized_a/symbol-unit.c","command":"clang -std=c11 -c testdata/fixtures/project_identity/sanitized_a/symbol-unit.c"},
+  {"directory":".","file":"testdata/fixtures/project_identity/b/part.c","command":"clang -std=c11 -c testdata/fixtures/project_identity/b/part.c"},
+  {"directory":".","file":"testdata/fixtures/project_identity/a/part.c","command":"clang -std=c11 -c testdata/fixtures/project_identity/a/part.c"}
+]

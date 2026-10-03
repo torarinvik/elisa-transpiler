@@ -1,0 +1,198 @@
+extend CTranslator:
+    def typed_project_external_declaration_status(link_name: sview, signature: sview) -> i64:
+        found_compatible: mutable bool = false
+        for index in 0..<translator_project_state.external_declarations_count |link_name, signature|:
+            declaration: TypedProjectDeclaration = translator_project_state.external_declarations[index.usize()]
+            if sview_eq(declaration.link_name, link_name):
+                if sview_eq(declaration.signature, signature):
+                    return 1
+                if typed_project_external_declaration_types_compatible(declaration.signature, signature):
+                    found_compatible <- true
+                else:
+                    return -1
+        return 2 if found_compatible else 0
+
+    def typed_project_object_types_compatible(left: sview, right: sview) -> bool:
+        return true if sview_eq(left, right)
+        left_open: i64 = sview_find_byte(left, 91)
+        right_open: i64 = sview_find_byte(right, 91)
+        return false if left_open <= 0 or right_open <= 0
+        return false if sview_find_byte(string_view_prefix(left, left_open), 40) >= 0 or sview_find_byte(string_view_prefix(right, right_open), 40) >= 0
+        return false if not sview_eq(string_view_prefix(left, left_open), string_view_prefix(right, right_open))
+        left_close: i64 = c_find_byte_from(left, 93, left_open + 1)
+        right_close: i64 = c_find_byte_from(right, 93, right_open + 1)
+        return false if left_close < 0 or right_close < 0
+        return false if not sview_eq(string_view_suffix(left, left_close + 1), string_view_suffix(right, right_close + 1))
+        left_bound: sview = string_view_prefix(string_view_suffix(left, left_open + 1), left_close - left_open - 1)
+        right_bound: sview = string_view_prefix(string_view_suffix(right, right_open + 1), right_close - right_open - 1)
+        return true if left_bound.len == 0 or right_bound.len == 0
+        return sview_eq(left_bound, right_bound)
+
+    def typed_project_external_declaration_types_compatible(left: sview, right: sview) -> bool:
+        object_prefix: sview = sview("object:", 0, -1)
+        left_is_object: bool = sview_starts_with(left, object_prefix)
+        right_is_object: bool = sview_starts_with(right, object_prefix)
+        return false if left_is_object != right_is_object
+        return typed_project_object_types_compatible(string_view_suffix(left, object_prefix.len), string_view_suffix(right, object_prefix.len)) if left_is_object
+        return false
+
+    def typed_project_mark_external_declaration(link_name: sview, signature: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if link_name.len == 0 or typed_project_external_declaration_status(link_name, signature) == 1
+        return if translator_project_state.external_declarations_count >= 4096
+        link_copy: cstr = string_view_copy(link_name) can Memory.Allocate
+        signature_copy: cstr = string_view_copy(signature) can Memory.Allocate
+        _ = arena_da_append(&translator_project_arena, &translator_project_state.external_declarations, TypedProjectDeclaration{link_name: sview(link_copy, 0, -1), signature: sview(signature_copy, 0, -1)}) can Memory.Allocate, Abort.Panic
+        translator_project_state.external_declarations_count <- translator_project_state.external_declarations_count + 1
+
+    def typed_project_external_object_definition_seen(link_name: sview) -> bool:
+        for index in 0..<translator_project_state.external_object_definitions_count |link_name|:
+            existing: TypedProjectSymbol = translator_project_state.external_object_definitions[index.usize()]
+            return true if sview_eq(existing.name, link_name)
+        return false
+
+    def typed_project_mark_external_object_definition(link_name: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if link_name.len == 0 or typed_project_external_object_definition_seen(link_name)
+        return if translator_project_state.external_object_definitions_count >= 4096
+        copied: cstr = string_view_copy(link_name) can Memory.Allocate
+        _ = arena_da_append(&translator_project_arena, &translator_project_state.external_object_definitions, TypedProjectSymbol{name: sview(copied, 0, -1), arity: 0, variadic: false}) can Memory.Allocate, Abort.Panic
+        translator_project_state.external_object_definitions_count <- translator_project_state.external_object_definitions_count + 1
+
+    def typed_project_type_has_const_token(value: sview, start: i64, end: i64) -> bool:
+        cursor: mutable i64 = start
+        template_depth: mutable i64 = 0
+        while cursor < end |value, end, cursor, template_depth|:
+            byte: i64 = string_view_index(value, cursor)
+            if byte == 60:
+                template_depth <- template_depth + 1
+                cursor <- cursor + 1
+                continue
+            if byte == 62:
+                template_depth <- template_depth - 1 if template_depth > 0
+                cursor <- cursor + 1
+                continue
+            if clang_type_identifier_byte(byte):
+                token_start: i64 = cursor
+                cursor <- cursor + 1
+                while cursor < end and clang_type_identifier_byte(string_view_index(value, cursor)) |value, cursor, end|:
+                    cursor <- cursor + 1
+                return true if template_depth == 0 and sview_eq(string_view_slice(value, token_start, cursor), sview("const", 0, -1))
+                continue
+            cursor <- cursor + 1
+        return false
+
+    def typed_project_type_is_const_object(value: sview) -> bool:
+        return c_type_is_const_object(value)
+    def typed_project_has_previous_external_object_declaration[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r]) -> bool:
+        previous_id: mutable sview = ast_string(ast_field(node, sview("previousDecl", 0, -1)))
+        steps: mutable i64 = 0
+        while previous_id.len > 0 and steps < 64 |ctx, previous_id, steps|:
+            previous: JsonValueHandle[r] = typed_decl_lookup(ctx, previous_id)
+            return false if json_handle_is_null(previous)
+            return true if ast_is_extern_decl(previous)
+            previous_id <- ast_string(ast_field(previous, sview("previousDecl", 0, -1)))
+            steps <- steps + 1
+        return steps >= 64
+    def typed_project_cpp_namespace_const_has_internal_linkage[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], object_type: sview) -> bool:
+        return false if not ctx.source_language_is_cxx or ast_is_extern_decl(node) or ast_bool(ast_field(node, sview("inline", 0, -1)))
+        return false if typed_project_has_previous_external_object_declaration(ctx, node)
+        return typed_project_type_is_const_object(object_type)
+    def typed_project_parameter_compatible_type[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        value: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # A parameter's outermost cv/restrict qualifiers do not participate in
+        # C function type compatibility. Leave nested declarators untouched
+        # until the frontend has structural canonical types.
+        return value if sview_find_byte(value, 40) >= 0 or sview_find_byte(value, 91) >= 0 or sview_find_byte(value, 60) >= 0 or sview_find_byte(value, 62) >= 0 or sview_find_byte(value, 38) >= 0
+        pointer_count: i64 = c_type_pointer_count(value)
+        pointer_depth: mutable i64 = 0
+        cursor: mutable i64 = 0
+        normalized: mutable darray[u8] = []
+        while cursor < value.len |value, pointer_count, pointer_depth, normalized|:
+            byte: i64 = string_view_index(value, cursor)
+            if clang_type_identifier_byte(byte):
+                start: i64 = cursor
+                cursor <- cursor + 1
+                while cursor < value.len and clang_type_identifier_byte(string_view_index(value, cursor)) |value, cursor|:
+                    cursor <- cursor + 1
+                token: sview = string_view_prefix(string_view_suffix(value, start), cursor - start)
+                top_qualifier: bool = sview_eq(token, sview("const", 0, -1)) or sview_eq(token, sview("volatile", 0, -1)) or sview_eq(token, sview("restrict", 0, -1)) or sview_eq(token, sview("__restrict", 0, -1)) or sview_eq(token, sview("__restrict__", 0, -1))
+                continue if top_qualifier and (pointer_count == 0 or pointer_depth == pointer_count)
+                for token_index in 0..<token.len |normalized, token|:
+                    normalized.push(string_view_index(token, token_index).u8())
+                continue
+            if byte == 32 or byte == 9:
+                if normalized.count > 0 and normalized[normalized.count - 1] != 32:
+                    normalized.push(32.u8())
+            else:
+                normalized.push(byte.u8())
+                pointer_depth <- pointer_depth + 1 if byte == 42
+            cursor <- cursor + 1
+        copied: cstr = string_view_copy(bytes_view(normalized)) can Memory.Allocate, Abort.Panic
+        return c_trim_spaces(sview(copied, 0, -1))
+
+    def typed_project_function_has_ellipsis(function_type: sview) -> bool:
+        return false if function_type.len < 3
+        for index in 0..<(function_type.len - 2) |function_type|:
+            return true if string_view_index(function_type, index) == 46 and string_view_index(function_type, index + 1) == 46 and string_view_index(function_type, index + 2) == 46
+        return false
+    def typed_project_external_function_signature[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        function_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        open_paren: i64 = sview_find_byte(function_type, 40)
+        return function_type if open_paren <= 0 or string_view_index(function_type, function_type.len - 1) != 41
+        cursor: mutable i64 = open_paren + 1
+        while cursor < function_type.len and (string_view_index(function_type, cursor) == 32 or string_view_index(function_type, cursor) == 9) |function_type, cursor|:
+            cursor <- cursor + 1
+        return function_type if cursor < function_type.len and string_view_index(function_type, cursor) == 42
+        normalized: mutable darray[u8] = []
+        append_view(&normalized, c_function_return_type(function_type))
+        append_view(&normalized, sview("(", 0, -1))
+        parameter_count: mutable i64 = 0
+        for index in 0..<ast_child_count(node) |ctx, node, normalized, parameter_count|:
+            parameter: JsonValueHandle[r] = ast_child(node, index)
+            continue if not sview_eq(ast_kind(parameter), sview("ParmVarDecl", 0, -1))
+            append_view(&normalized, sview(", ", 0, -1)) if parameter_count > 0
+            append_view(&normalized, typed_project_parameter_compatible_type(ctx, parameter) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            parameter_count <- parameter_count + 1
+        if typed_project_function_has_ellipsis(function_type):
+            append_view(&normalized, sview(", ", 0, -1)) if parameter_count > 0
+            append_view(&normalized, sview("...", 0, -1))
+        append_view(&normalized, sview(")", 0, -1))
+        copied: cstr = string_view_copy(bytes_view(normalized)) can Memory.Allocate, Abort.Panic
+        return sview(copied, 0, -1)
+    def typed_project_register_external_function[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if not ctx.project_mode
+        link_name: sview = ast_function_link_name(node)
+        return if link_name.len == 0
+        signature: sview = typed_project_external_function_signature(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        status: i64 = typed_project_external_declaration_status(link_name, signature)
+        if status < 0:
+            typed_record_diagnostic(ctx, node, sview("project", 0, -1), sview("incompatible-external-function-declaration", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif status == 0 or status == 2:
+            if translator_project_state.external_declarations_count >= 4096:
+                typed_record_diagnostic(ctx, node, sview("project", 0, -1), sview("external-function-declaration-limit", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            else:
+                typed_project_mark_external_declaration(link_name, signature) can Memory.Allocate, Abort.Panic
+    def typed_project_register_external_object[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if not ctx.project_mode or not ast_is_extern_decl(node)
+        link_name: sview = ast_declaration_link_name(node)
+        return if link_name.len == 0
+        object_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        signature: mutable darray[u8] = []
+        append_view(&signature, sview("object:", 0, -1))
+        append_view(&signature, object_type)
+        copied: cstr = string_view_copy(bytes_view(signature)) can Memory.Allocate, Abort.Panic
+        signature_view: sview = sview(copied, 0, -1)
+        status: i64 = typed_project_external_declaration_status(link_name, signature_view)
+        if status < 0:
+            typed_record_diagnostic(ctx, node, sview("project", 0, -1), sview("incompatible-external-object-declaration", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif status == 0 or status == 2:
+            if translator_project_state.external_declarations_count >= 4096:
+                typed_record_diagnostic(ctx, node, sview("project", 0, -1), sview("external-object-declaration-limit", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            else:
+                typed_project_mark_external_declaration(link_name, signature_view) can Memory.Allocate, Abort.Panic
+        if not json_handle_is_null(ast_field(node, sview("init", 0, -1))):
+            if typed_project_external_object_definition_seen(link_name):
+                typed_record_diagnostic(ctx, node, sview("project", 0, -1), sview("duplicate-external-object-definition", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            elif translator_project_state.external_object_definitions_count >= 4096:
+                typed_record_diagnostic(ctx, node, sview("project", 0, -1), sview("external-object-definition-limit", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            else:
+                typed_project_mark_external_object_definition(link_name) can Memory.Allocate, Abort.Panic

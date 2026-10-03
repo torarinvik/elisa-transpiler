@@ -1,0 +1,50 @@
+extend CTranslator:
+    # Keep locations on declarations and expression nodes so diagnostics from
+    # typed lowering can point at source ranges. Other nodes retain locations
+    # only when they carry macro spelling/expansion origins. Keep these Clang
+    # schema rules separate from the recursive projection/writer.
+    def ast_json_project_is_declaration_kind(kind: sview) -> bool:
+        return sview_eq(kind, sview("FunctionDecl", 0, -1)) or sview_eq(kind, sview("VarDecl", 0, -1)) or sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1)) or sview_eq(kind, sview("TypedefDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasDecl", 0, -1)) or sview_eq(kind, sview("ParmVarDecl", 0, -1)) or sview_eq(kind, sview("FieldDecl", 0, -1)) or sview_eq(kind, sview("EnumConstantDecl", 0, -1)) or sview_eq(kind, sview("NamespaceDecl", 0, -1)) or sview_eq(kind, sview("LinkageSpecDecl", 0, -1)) or sview_eq(kind, sview("ExternCContextDecl", 0, -1))
+
+    def ast_json_project_is_type_declaration_kind(kind: sview) -> bool:
+        return sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1)) or sview_eq(kind, sview("TypedefDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasDecl", 0, -1))
+
+    def ast_json_project_is_expression_kind(kind: sview) -> bool:
+        return true if sview_eq(kind, sview("BinaryOperator", 0, -1)) or sview_eq(kind, sview("UnaryOperator", 0, -1)) or sview_eq(kind, sview("CompoundAssignOperator", 0, -1)) or sview_eq(kind, sview("ConditionalOperator", 0, -1)) or sview_eq(kind, sview("BinaryConditionalOperator", 0, -1))
+        return false if kind.len < 4
+        return sview_eq(string_view_suffix(kind, kind.len - 4), sview("Expr", 0, -1))
+
+    def ast_json_value_has_macro_origin(text: sview, start: i64, stop: i64) -> bool:
+        return false if start >= stop or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < stop and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            return true if ast_json_key_is(text, key_start, key_stop, sview("spellingLoc", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("expansionLoc", 0, -1))
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < stop and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: i64 = ast_json_skip_value(text, value_start)
+            return true if ast_json_value_has_macro_origin(text, value_start, value_stop)
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < stop and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_json_project_object_kind(text: sview, start: i64) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                value_stop: i64 = ast_json_skip_string(text, value_start)
+                return string_view_slice(text, value_start + 1, value_stop - 1)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)

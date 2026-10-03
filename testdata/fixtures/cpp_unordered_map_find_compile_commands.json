@@ -1,0 +1,11 @@
+[
+  {
+    "directory": ".",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "testdata/fixtures/cpp_unordered_map_find.cpp"
+    ],
+    "file": "testdata/fixtures/cpp_unordered_map_find.cpp"
+  }
+]

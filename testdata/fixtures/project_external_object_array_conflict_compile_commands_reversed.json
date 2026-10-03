@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_external_objects/conflict_array_4.c","command":"clang -std=c11 -c testdata/fixtures/project_external_objects/conflict_array_4.c"},
+  {"directory":".","file":"testdata/fixtures/project_external_objects/conflict_array_3.c","command":"clang -std=c11 -c testdata/fixtures/project_external_objects/conflict_array_3.c"}
+]

@@ -1,0 +1,46 @@
+extend CTranslator:
+    def typed_register_specialized_alias[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source_type: sview, emitted_name: sview, declaration_id: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        existing_count: usize = ctx.specialized_types.count.usize()
+        index: mutable usize = 0.usize()
+        while index < existing_count |ctx, source_type, emitted_name, declaration_id, existing_count, index|:
+            existing: TypedSpecializedType[r] = ctx.specialized_types[index]
+            if sview_eq(existing.source_type, source_type):
+                return true if sview_eq(existing.declaration_id, declaration_id) and sview_eq(existing.emitted_name, emitted_name)
+                typed_record_unsupported(ctx, node, sview("ambiguous C++ class-template specialization identity", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return false
+            index <- index + 1.usize()
+        ctx.specialized_types.push(TypedSpecializedType[r]{source_type: source_type, emitted_name: emitted_name, declaration_id: declaration_id})
+        return true
+
+    def typed_collect_specialized_record[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        source_type: sview = ast_string(ast_field(node, sview("elisaTemplateType", 0, -1)))
+        emitted_name: sview = ast_string(ast_field(node, sview("elisaTemplateName", 0, -1)))
+        return if source_type.len == 0 or emitted_name.len == 0
+        declaration_id: sview = ast_string(ast_field(node, sview("id", 0, -1)))
+        canonical_known: mutable bool = false
+        existing_count: usize = ctx.specialized_types.count.usize()
+        index: mutable usize = 0.usize()
+        while index < existing_count |ctx, source_type, emitted_name, declaration_id, canonical_known, existing_count, index|:
+            existing: TypedSpecializedType[r] = ctx.specialized_types[index]
+            if sview_eq(existing.source_type, source_type):
+                if not sview_eq(existing.declaration_id, declaration_id) or not sview_eq(existing.emitted_name, emitted_name):
+                    typed_record_unsupported(ctx, node, sview("ambiguous C++ class-template specialization identity", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return
+                canonical_known <- true
+            index <- index + 1.usize()
+        if not canonical_known:
+            # The emitted name is a readable rendering of a deterministic hash,
+            # not a canonical type identity. Fail closed if it collides with a
+            # source record or another specialization instead of merging layouts.
+            if typed_record_index(ctx, emitted_name) >= 0:
+                typed_record_unsupported(ctx, node, sview("generated C++ class-template specialization name collision", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return
+            ctx.specialized_types.push(TypedSpecializedType[r]{source_type: source_type, emitted_name: emitted_name, declaration_id: declaration_id})
+            typed_collect_record(ctx, node, emitted_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        aliases: JsonValueHandle[r] = ast_field(node, sview("elisaTemplateSourceAliases", 0, -1))
+        alias_count: i64 = json_handle_array_len(aliases)
+        for alias_index in 0..<alias_count |ctx, node, source_type, emitted_name, declaration_id, aliases|:
+            alias: sview = ast_string(ast_array_item(aliases, alias_index))
+            if alias.len > 0 and not sview_eq(alias, source_type):
+                registered: bool = typed_register_specialized_alias(ctx, node, alias, emitted_name, declaration_id) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return if not registered

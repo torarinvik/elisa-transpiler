@@ -4,368 +4,396 @@ set -eu
 root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root_dir"
 
+. "$root_dir/scripts/test_support.sh"
+test_install_failure_trace
+
+test_suite=all
+reuse_build=0
+
+usage() {
+    cat <<'EOF'
+Usage: sh scripts/test.sh [--suite all|fixtures|projects|control-flow|upstream] [--reuse-build]
+
+  --suite NAME   Run one focused suite; the default is all.
+  --reuse-build  Reuse the translator only when source/toolchain fingerprints
+                 and the built executable hash still match. Tests still run.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --suite)
+            [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+            test_suite=$2
+            shift 2
+            ;;
+        --reuse-build)
+            reuse_build=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'unknown test option: %s\n' "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$test_suite" in
+    all|fixtures|projects|control-flow|upstream) ;;
+    *)
+        printf 'unknown test suite: %s\n' "$test_suite" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+
+sh scripts/check_source_line_limits.sh
+sh scripts/test_build_cache.sh
+sh scripts/test_test_support.sh
+python3 scripts/test_fixture_manifest.py
+python3 scripts/test_run_bounded_process.py
+sh scripts/test_ensure_local_stdlib_link.sh
+
+compiler_worktree_root=${ELISA_TRANSLATOR_COMPILER_WORKTREES:-$root_dir/../elisa-transpiler-worktrees}
+# The current stage1 source uses syntax that the legacy Elisa-core checkout
+# cannot parse. Default to the isolated stage0 built from structpy-tree; keep
+# the override for deliberately testing an older bootstrap compiler.
+stage0_worktree=${ELISA_STAGE0_WORKTREE:-$compiler_worktree_root/stage0-latest}
+stage1_worktree=${ELISA_STAGE1_WORKTREE:-$compiler_worktree_root/transpiler}
+if [ -d "$stage1_worktree" ]; then
+    stage1_worktree=$(CDPATH= cd -- "$stage1_worktree" && pwd -P)
+fi
+stage1_stdlib=${ELISA_STAGE1_STDLIB:-$stage1_worktree/elisacore_std}
+
+sh scripts/test_stage1_freshness.sh "$stage1_worktree"
+
 if [ -n "${ELISAC_BIN:-}" ]; then
     elisa_bin=$ELISAC_BIN
-elif command -v elisac >/dev/null 2>&1; then
-    elisa_bin=$(command -v elisac)
+    echo "using explicit Elisa compiler: $elisa_bin" >&2
 else
-    elisa_bin="$HOME/.elisac/elisac"
+    elisa_bin="$stage0_worktree/compiler/bin/elisac-local"
 fi
+case "$elisa_bin" in
+    /*) ;;
+    *) elisa_bin="$root_dir/$elisa_bin" ;;
+esac
+
+# A self-hosted stage1 compiler emits translator objects that may need the
+# runtime object from the same compiler worktree at the final link. Keep this
+# opt-in so the normal local stage0 path retains its existing profile-hook
+# behavior, while explicit stage1 verification cannot accidentally link a
+# mismatched or installed runtime.
+elisa_runtime=${ELISAC_RUNTIME:-}
+case "$elisa_runtime" in
+    "") ;;
+    /*) ;;
+    *) elisa_runtime="$root_dir/$elisa_runtime" ;;
+esac
+if [ -n "$elisa_runtime" ] && [ ! -f "$elisa_runtime" ]; then
+    echo "missing explicit Elisa runtime object: $elisa_runtime" >&2
+    exit 2
+fi
+
+stage1_bin=${ELISA_STAGE1_BIN:-$stage1_worktree/bin/elisac-stage1}
+stage1_runtime=${ELISA_STAGE1_RUNTIME:-$stage1_worktree/build/runtime/elisacore_runtime.o}
+
+# When the caller explicitly selects a stage1 compiler/runtime pair, use that
+# same runtime for the legacy direct-link checks below as well. Otherwise a
+# direct check that explicitly names the default stage1 runtime can be mixed
+# with ELISAC_RUNTIME from another worktree, producing duplicate symbols (or,
+# worse, a subtly mismatched ABI).
+if [ -n "$elisa_runtime" ]; then
+    stage1_runtime=$elisa_runtime
+fi
+
+# Some focused checks invoke the Stage1 driver from inside its compiler
+# worktree. Resolve repo-relative overrides here so those later `cd`s do not
+# reinterpret the binary/runtime paths relative to the wrong repository.
+case "$stage1_bin" in
+    /*) ;;
+    *) stage1_bin="$root_dir/$stage1_bin" ;;
+esac
+if [ -x "$stage1_bin" ]; then
+    stage1_bin_dir=$(CDPATH= cd -- "$(dirname -- "$stage1_bin")" && pwd -P)
+    stage1_bin="$stage1_bin_dir/$(basename -- "$stage1_bin")"
+fi
+case "$stage1_runtime" in
+    /*) ;;
+    *) stage1_runtime="$root_dir/$stage1_runtime" ;;
+esac
+
+# Every sourced suite uses the selected compiler/runtime pair, including
+# invocations of the Stage1 wrapper that temporarily changes directory.
+export ELISA_STAGE1_BIN="$stage1_bin"
+export ELISA_RUNTIME_OBJ="$stage1_runtime"
+
+if [ ! -x "$elisa_bin" ]; then
+    echo "missing local Elisa stage0 compiler: $elisa_bin" >&2
+    echo "run scripts/setup_local_compilers.sh or set ELISAC_BIN explicitly" >&2
+    exit 2
+fi
+
+case "$test_suite" in
+    all|projects)
+        if [ ! -x "$stage1_bin" ]; then
+            echo "missing local Elisa stage1 compiler: $stage1_bin" >&2
+            echo "set ELISA_STAGE1_WORKTREE or ELISA_STAGE1_BIN to the intended local worktree" >&2
+            exit 2
+        fi
+        if [ ! -f "$stage1_runtime" ]; then
+            echo "missing local Elisa stage1 runtime object: $stage1_runtime" >&2
+            echo "set ELISA_STAGE1_RUNTIME to the runtime built with the selected stage1 worktree" >&2
+            exit 2
+        fi
+        if [ ! -f "$stage1_worktree/scripts/elisac_stage1.sh" ]; then
+            echo "missing local Elisa stage1 driver: $stage1_worktree/scripts/elisac_stage1.sh" >&2
+            exit 2
+        fi
+        if [ ! -f "$stage1_worktree/scripts/assert_stage1_fresh.sh" ]; then
+            echo "missing Stage1 source-freshness guard: $stage1_worktree/scripts/assert_stage1_fresh.sh" >&2
+            exit 2
+        fi
+        ;;
+esac
+
+# Direct Stage1 fixture/project invocations must not silently test a product
+# older than its selected compiler sources. The compiler-owned guard only
+# checks binaries inside that compiler worktree; explicitly selected external
+# snapshots remain under the caller's control.
+if [ -x "$stage1_bin" ] && [ -f "$stage1_runtime" ] \
+    && [ -f "$stage1_worktree/scripts/assert_stage1_fresh.sh" ]; then
+    bash "$stage1_worktree/scripts/assert_stage1_fresh.sh" "$stage1_bin"
+fi
+
+sh "$root_dir/scripts/ensure_local_stdlib_link.sh" "$root_dir" "$stage1_stdlib"
 
 mkdir -p build
 
-"$elisa_bin" -emit obj -O0 -o build/transpiler.o src/main.elisa
-clang -Wl,-dead_strip -o build/elisa-c-transpiler build/transpiler.o -lm
-
-./build/elisa-c-transpiler testdata/fixtures/simple.c > build/simple.generated.elisa
-rg -q '^def add\(left: i32, right: i32\) -> i32' build/simple.generated.elisa
-rg -q 'return \(left \+ right\)' build/simple.generated.elisa
-rg -q '^def main\(\) -> i32' build/simple.generated.elisa
-rg -Fq '"left  right"' build/simple.generated.elisa
-! rg -Uq 'def static_value\(\) -> i32:\n    pass' build/simple.generated.elisa
-! rg -n '[[:blank:]]+$' build/simple.generated.elisa
-! rg -U -q '\n\n\n' build/simple.generated.elisa
-! rg -q '^def elisa_nonnull' build/simple.generated.elisa
-! rg -q '^extern va_list' build/simple.generated.elisa
-"$elisa_bin" -emit obj -O0 -o build/simple.generated.o build/simple.generated.elisa
-clang -Wl,-dead_strip -o build/simple.generated build/simple.generated.o
-set +e
-./build/simple.generated
-simple_rc=$?
-set -e
-if [ "$simple_rc" -ne 42 ]; then
-    echo "simple fixture returned $simple_rc, expected 42" >&2
-    exit 1
+profile_hooks="$stage0_worktree/compiler/runtime/profile_hooks.c"
+if [ ! -f "$profile_hooks" ]; then
+    profile_hooks=
 fi
 
-./build/elisa-c-transpiler --fidelity testdata/fixtures/simple.c > build/simple.fidelity.elisa
-rg -q '^def add\(left: mutable i32, right: mutable i32\) -> i32' build/simple.fidelity.elisa
+hash_stream() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{ print $1 }'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{ print $1 }'
+    else
+        echo "need shasum or sha256sum to fingerprint the translator build" >&2
+        return 2
+    fi
+}
 
-./build/elisa-c-transpiler testdata/fixtures/generic_nonnull.c > build/generic_nonnull.generated.elisa
-rg -Fq 'def elisa_nonnull[T](value: mutable T&?) -> mutable T&:' build/generic_nonnull.generated.elisa
-[ "$(rg -c '^def elisa_nonnull\[' build/generic_nonnull.generated.elisa)" -eq 1 ]
-rg -Fq 'elisa_nonnull(byte)' build/generic_nonnull.generated.elisa
-rg -Fq 'elisa_nonnull(number)' build/generic_nonnull.generated.elisa
-rg -Fq 'elisa_nonnull(sample)' build/generic_nonnull.generated.elisa
-rg -Fq 'elisa_nonnull(text)' build/generic_nonnull.generated.elisa
-clang -std=c11 testdata/fixtures/generic_nonnull.c -o build/generic_nonnull.native
-"$elisa_bin" -emit obj -O0 -o build/generic_nonnull.generated.o build/generic_nonnull.generated.elisa
-clang -Wl,-dead_strip -o build/generic_nonnull.generated build/generic_nonnull.generated.o
-set +e
-./build/generic_nonnull.native
-generic_nonnull_native_rc=$?
-./build/generic_nonnull.generated
-generic_nonnull_generated_rc=$?
-set -e
-[ "$generic_nonnull_native_rc" -eq 0 ] && [ "$generic_nonnull_generated_rc" -eq 0 ]
+hash_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{ print $1 }'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{ print $1 }'
+    else
+        echo "need shasum or sha256sum to fingerprint the translator build" >&2
+        return 2
+    fi
+}
 
-./build/elisa-c-transpiler testdata/fixtures/integer_conversions.c > build/integer_conversions.generated.elisa
-rg -q 'return \(\(left\)\.i32\(\) \+ \(right\)\.i32\(\)\)' build/integer_conversions.generated.elisa
-clang -std=c11 testdata/fixtures/integer_conversions.c -o build/integer_conversions.native
-"$elisa_bin" -emit obj -O0 -o build/integer_conversions.generated.o build/integer_conversions.generated.elisa
-clang -Wl,-dead_strip -o build/integer_conversions.generated build/integer_conversions.generated.o
-set +e
-./build/integer_conversions.native
-integer_native_rc=$?
-./build/integer_conversions.generated
-integer_generated_rc=$?
-set -e
-[ "$integer_native_rc" -eq 0 ] && [ "$integer_generated_rc" -eq 0 ]
+. "$root_dir/scripts/build_cache.sh"
 
-./build/elisa-c-transpiler testdata/fixtures/constant_fold.c > build/constant_fold.generated.elisa
-rg -q '^def folded_value\(\) -> i32:' build/constant_fold.generated.elisa
-rg -q 'return 20' build/constant_fold.generated.elisa
-rg -q 'return 1' build/constant_fold.generated.elisa
-clang -std=c11 testdata/fixtures/constant_fold.c -o build/constant_fold.native
-"$elisa_bin" -emit obj -O0 -o build/constant_fold.generated.o build/constant_fold.generated.elisa
-clang -Wl,-dead_strip -o build/constant_fold.generated build/constant_fold.generated.o
-./build/constant_fold.native
-./build/constant_fold.generated
+compute_translator_inputs_fingerprint() {
+    clang_path=$(command -v clang || true)
+    [ -n "$clang_path" ] || { echo "clang is required to build the translator" >&2; return 2; }
+    std_root=$stage1_stdlib
+    {
+        printf '%s\n' "platform=$(uname -s)/$(uname -m)" \
+            'elisa_flags=-emit obj -O0' \
+            'link_flags=clang -Wl,-dead_strip -lm' \
+            "elisa_compiler_path=$elisa_bin" \
+            "elisa_compiler_sha256=$(hash_file "$elisa_bin")" \
+            "clang_path=$clang_path" \
+            "clang_version=$(clang --version 2>/dev/null | sed -n '1p')" \
+            "clang_sha256=$(hash_file "$clang_path")"
+        if [ -n "$elisa_runtime" ]; then
+            printf '%s\n' "translator_runtime=$elisa_runtime" \
+                "translator_runtime_sha256=$(hash_file "$elisa_runtime")" \
+                'translator_link_mode=matching-runtime-only'
+        elif [ -n "$profile_hooks" ]; then
+            printf '%s\n' "profile_hooks=$profile_hooks" \
+                "profile_hooks_sha256=$(hash_file "$profile_hooks")" \
+                'translator_link_mode=stage0-profile-hooks'
+        else
+            printf '%s\n' 'translator_link_mode=runtime-defaults'
+        fi
+        {
+            find "$root_dir/src" "$root_dir/cpp_lib" "$std_root" -type f -name '*.elisa' -print
+        } | LC_ALL=C sort | while IFS= read -r source_file; do
+            printf 'source=%s\n' "$source_file"
+            hash_file "$source_file"
+        done
+    } | hash_stream
+}
 
-./build/elisa-c-transpiler testdata/fixtures/idiomatic_patterns.c > build/idiomatic_patterns.generated.elisa
-rg -q 'result: i32 = value' build/idiomatic_patterns.generated.elisa
-! rg -q 'if true:' build/idiomatic_patterns.generated.elisa
-rg -q '^    return result$' build/idiomatic_patterns.generated.elisa
-rg -q '^def elisa_nonnull_readonly\[T\]' build/idiomatic_patterns.generated.elisa
-rg -q 'return value\[0\]' build/idiomatic_patterns.generated.elisa
-! rg -q 'return elisa_nonnull_readonly\(value\)\[0\]' build/idiomatic_patterns.generated.elisa
-rg -A2 'inspect_readonly\(value\)' build/idiomatic_patterns.generated.elisa | rg -q 'return value\[0\]'
-clang -std=c11 testdata/fixtures/idiomatic_patterns.c -o build/idiomatic_patterns.native
-"$elisa_bin" -emit obj -O0 -o build/idiomatic_patterns.generated.o build/idiomatic_patterns.generated.elisa
-clang -Wl,-dead_strip -o build/idiomatic_patterns.generated build/idiomatic_patterns.generated.o
-./build/idiomatic_patterns.native
-./build/idiomatic_patterns.generated
+translator_path=build/elisa-c-transpiler
+fingerprint_path=build/translator-build.fingerprint
+translator_inputs_fingerprint=$(compute_translator_inputs_fingerprint)
+reuse_valid=0
+if [ "$reuse_build" -eq 1 ] && translator_build_cache_is_fresh \
+    "$translator_path" "$fingerprint_path" "$translator_inputs_fingerprint"; then
+    reuse_valid=1
+fi
 
-./build/elisa-c-transpiler testdata/fixtures/const_cast.c > build/const_cast.generated.elisa
-rg -q 'return elisa_nonnull\(\(value\)\.cast\[mutable i32&\?\]\)\[0\]' build/const_cast.generated.elisa
-clang -std=c11 testdata/fixtures/const_cast.c -o build/const_cast.native
-"$elisa_bin" -emit obj -O0 -o build/const_cast.generated.o build/const_cast.generated.elisa
-clang -Wl,-dead_strip -o build/const_cast.generated build/const_cast.generated.o
-./build/const_cast.native
-./build/const_cast.generated
+if [ "$reuse_valid" -eq 1 ]; then
+    echo "reusing fresh translator build ($translator_path)"
+else
+    if [ "$reuse_build" -eq 1 ]; then
+        echo "translator reuse unavailable or stale; rebuilding"
+    fi
+    # A self-hosted frontend build is the largest routine process in this suite.
+    # Keep the bound configurable for larger hosts and collect aggregate RSS for
+    # the owned compiler/linker process groups. On macOS, the wrapper also bounds
+    # physical footprint because compressed/swapped pages can exceed RSS greatly.
+    # It never shells the argv and only signals the process group it created.
+    translator_build_max_rss_kb=${ELISA_TRANSLATOR_BUILD_MAX_RSS_KB:-2097152}
+    translator_build_timeout_seconds=${ELISA_TRANSLATOR_BUILD_TIMEOUT_SECONDS:-600}
+    python3 scripts/run_bounded_process.py \
+        --max-rss-kb "$translator_build_max_rss_kb" \
+        --timeout-seconds "$translator_build_timeout_seconds" -- \
+        "$elisa_bin" -emit obj -O0 -o build/transpiler.o src/main.elisa
+    # A selected self-hosted stage1 runtime is a complete, matching runtime
+    # boundary. Do not mix it with stage0 profiling hooks: those hooks belong
+    # to the stage0 ABI and can make a stage1-built translator hang or fail in
+    # otherwise unrelated probes. The default path remains unchanged.
+    if [ -n "$elisa_runtime" ]; then
+        python3 scripts/run_bounded_process.py \
+            --max-rss-kb "$translator_build_max_rss_kb" \
+            --timeout-seconds "$translator_build_timeout_seconds" -- \
+            clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o "$elisa_runtime" -lm
+    elif [ -n "$profile_hooks" ]; then
+        python3 scripts/run_bounded_process.py \
+            --max-rss-kb "$translator_build_max_rss_kb" \
+            --timeout-seconds "$translator_build_timeout_seconds" -- \
+            clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o "$profile_hooks" -lm
+    else
+        python3 scripts/run_bounded_process.py \
+            --max-rss-kb "$translator_build_max_rss_kb" \
+            --timeout-seconds "$translator_build_timeout_seconds" -- \
+            clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o -lm
+    fi
+    translator_binary_fingerprint=$(hash_file "$translator_path")
+    translator_build_cache_write "$fingerprint_path" \
+        "$translator_inputs_fingerprint" "$translator_binary_fingerprint"
+fi
 
-./scripts/quality_report.sh testdata/upstream/cJSON/cjson_smoke.c build/cjson.quality.elisa > build/cjson.quality.txt
-rg -q '^invalid_ir_markers: 0$' build/cjson.quality.txt
-rg -q '^casts: [0-9]+$' build/cjson.quality.txt
-rg -q '^nonnull_assertions: [0-9]+$' build/cjson.quality.txt
-awk 'length($0) > 320 { found = 1 } END { exit found }' build/cjson.quality.elisa
+sh scripts/test_clang_failure.sh
+python3 scripts/test_clang_timeout.py "$translator_path"
+python3 scripts/test_ast_depth.py "$translator_path"
+python3 scripts/test_metamorphic.py "$translator_path"
+python3 scripts/test_decl_dependency_closure.py "$translator_path"
+python3 scripts/test_inline_dependency_closure.py "$translator_path" "$elisa_bin" "$elisa_runtime"
+python3 scripts/test_template_specialization_closure.py "$translator_path" "$elisa_bin" "$elisa_runtime"
+python3 scripts/test_transitive_decl_closure.py "$translator_path" "$elisa_bin"
+python3 scripts/test_unqualified_cpp_layout.py "$translator_path" "$elisa_bin"
+python3 scripts/test_missing_decl_dependency.py "$translator_path"
 
-./build/elisa-c-transpiler testdata/fixtures/for_loop.c > build/for_loop.generated.elisa
-rg -q 'while index < 5:' build/for_loop.generated.elisa
-rg -q 'index <- \(index \+ 1\)' build/for_loop.generated.elisa
-rg -q 'while true:' build/for_loop.generated.elisa
-clang -std=c11 testdata/fixtures/for_loop.c -o build/for_loop.native
-"$elisa_bin" -emit obj -O0 -o build/for_loop.generated.o build/for_loop.generated.elisa
-clang -Wl,-dead_strip -o build/for_loop.generated build/for_loop.generated.o
-./build/for_loop.native
-./build/for_loop.generated
+case "$test_suite" in
+    all|fixtures)
+        python3 scripts/run_fixture_manifest.py \
+            --manifest testdata/fixtures/acceptance_manifest.json \
+            --translator build/elisa-c-transpiler \
+            --elisa-compiler "$elisa_bin" \
+            --elisa-runtime "$elisa_runtime" \
+            --output-dir build/manifest-tests \
+            --max-rss-kb "${ELISA_FIXTURE_PROCESS_MAX_RSS_KB:-1572864}" \
+            --case simple \
+            --case rewrite_explanations \
+            --case function_pointer_const_field_call \
+            --case c_compatible_cpp \
+            --case cpp_overloads \
+            --case readonly_nonnull_helper \
+            --case nullable_index_after_guard \
+            --case compound_assignment_once \
+            --case increment_evaluation \
+            --case sequencing_expressions \
+            --case nested_conditional_operator \
+            --case short_circuit_constant \
+            --case call_argument_conditional_comma \
+            --case c_enum_integer_semantics \
+            --case runtime_unsigned_wrap \
+            --case c_enum_typedef_aliases \
+            --case c_array_to_pointer_decay \
+            --case c_record_pointer_call_arguments \
+            --case c_pointer_difference_element_units \
+            --case c_record_pointer_difference_layout \
+            --case c_record_sizeof_alignof_layout \
+            --case c_void_pointer_boundaries \
+            --case cpp_scoped_enum_namespace_aliases \
+            --case variadic_va_arg \
+            --case variadic_promotions \
+            --case designated_initializers \
+            --case c_record_and_six_element_array \
+            --case floating_edge_values \
+            --case variadic_va_copy
+        ;;
+esac
 
-./build/elisa-c-transpiler testdata/fixtures/designated_init.c > build/designated_init.generated.elisa
-rg -q 'Pair\{first: 3, second: 7, third: zeroed\}' build/designated_init.generated.elisa
-rg -q 'values <- \[zeroed, zeroed, 7, zeroed, 9\]' build/designated_init.generated.elisa
-clang -std=c11 testdata/fixtures/designated_init.c -o build/designated_init.native
-"$elisa_bin" -emit obj -O0 -o build/designated_init.generated.o build/designated_init.generated.elisa
-clang -Wl,-dead_strip -o build/designated_init.generated build/designated_init.generated.o
-./build/designated_init.native
-./build/designated_init.generated
+# The sourced suites contain many small, direct `clang -Wl,-dead_strip` links.
+# That flag identifies generated Elisa objects in this harness. When an
+# explicit self-hosted stage1 compiler is selected, those objects need the
+# matching runtime object; inject it at the one shared link boundary rather
+# than allowing each suite to grow a separate stage1/stage0 branch. Native
+# C/C++ links do not use this linker flag and remain untouched. The default
+# stage0 path has an empty runtime override and therefore keeps its historical
+# profile-hook behavior.
+elisa_host_clang=$(command -v clang)
+clang() {
+    if [ -z "${elisa_runtime:-}" ]; then
+        "$elisa_host_clang" "$@"
+        return
+    fi
+    elisa_generated_link=0
+    elisa_runtime_present=0
+    for elisa_arg in "$@"; do
+        [ "$elisa_arg" = "-Wl,-dead_strip" ] && elisa_generated_link=1
+        [ "$elisa_arg" = "$elisa_runtime" ] && elisa_runtime_present=1
+    done
+    if [ "$elisa_generated_link" -eq 1 ] && [ "$elisa_runtime_present" -eq 0 ]; then
+        "$elisa_host_clang" "$@" "$elisa_runtime"
+    else
+        "$elisa_host_clang" "$@"
+    fi
+}
 
-./build/elisa-c-transpiler testdata/fixtures/aggregate.c > build/aggregate.generated.elisa
-rg -q '# A small aggregate exercises C' build/aggregate.generated.elisa
-rg -q '# The translator should preserve this declaration' build/aggregate.generated.elisa
-rg -q 'Pair\{first: 7, second: zeroed, third: zeroed\}' build/aggregate.generated.elisa
-clang -std=c11 testdata/fixtures/aggregate.c -o build/aggregate.native
-"$elisa_bin" -emit obj -O0 -o build/aggregate.generated.o build/aggregate.generated.elisa
-clang -Wl,-dead_strip -o build/aggregate.generated build/aggregate.generated.o
-./build/aggregate.native
-./build/aggregate.generated
-
-./build/elisa-c-transpiler testdata/fixtures/enum_flags.c > build/enum_flags.generated.elisa
-rg -q 'Mode\.MODE_BOTH' build/enum_flags.generated.elisa
-clang -std=c11 testdata/fixtures/enum_flags.c -o build/enum_flags.native
-"$elisa_bin" -emit obj -O0 -o build/enum_flags.generated.o build/enum_flags.generated.elisa
-clang -Wl,-dead_strip -o build/enum_flags.generated build/enum_flags.generated.o
-./build/enum_flags.native
-./build/enum_flags.generated
-
-./build/elisa-c-transpiler testdata/fixtures/function_pointer.c > build/function_pointer.generated.elisa
-! rg -q '^extern operation\(' build/function_pointer.generated.elisa
-clang -std=c11 testdata/fixtures/function_pointer.c -o build/function_pointer.native
-"$elisa_bin" -emit obj -O0 -o build/function_pointer.generated.o build/function_pointer.generated.elisa
-clang -Wl,-dead_strip -o build/function_pointer.generated build/function_pointer.generated.o
-set +e
-./build/function_pointer.native
-function_pointer_native_rc=$?
-./build/function_pointer.generated
-function_pointer_generated_rc=$?
-set -e
-[ "$function_pointer_native_rc" -eq 0 ] && [ "$function_pointer_generated_rc" -eq 0 ]
-
-./build/elisa-c-transpiler testdata/fixtures/nullable_function_field.c > build/nullable_function_field.generated.elisa
-rg -Fq 'allocate: mutable (fn(usize) -> mutable void&?)?' build/nullable_function_field.generated.elisa
-rg -Fq 'hooks.allocate(8)' build/nullable_function_field.generated.elisa
-! rg -q '^    allocate: (mutable )?void&\?$' build/nullable_function_field.generated.elisa
-clang -std=c11 testdata/fixtures/nullable_function_field.c -o build/nullable_function_field.native
-# Older installed Elisa seeds predate optional function types. Always verify the
-# translation shape; execute it as well when the selected compiler supports it.
+# These suites are sourced so they share the freshly built translator and the
+# resolved local compiler/toolchain paths above.
 optional_fn_supported=0
-if "$elisa_bin" -emit obj -O0 -o build/nullable_function_field.generated.o build/nullable_function_field.generated.elisa >/dev/null 2>&1; then
-    optional_fn_supported=1
-    clang -Wl,-dead_strip -o build/nullable_function_field.generated build/nullable_function_field.generated.o
-    ./build/nullable_function_field.native
-    ./build/nullable_function_field.generated
-fi
+case "$test_suite" in
+    all|fixtures|upstream)
+        ./build/elisa-c-transpiler testdata/fixtures/nullable_function_field.c \
+            > build/nullable_function_field.generated.elisa
+        if "$elisa_bin" -emit obj -O0 -o build/nullable_function_field.generated.o \
+            build/nullable_function_field.generated.elisa >/dev/null \
+            2>build/nullable_function_field.probe.err; then
+            optional_fn_supported=1
+        else
+            echo "SKIP capability: local Elisa compiler cannot compile nullable function fields; cJSON compile/runtime parity is skipped" >&2
+        fi
+        ;;
+esac
 
-./build/elisa-c-transpiler testdata/fixtures/name_collision.c > build/name_collision.generated.elisa
-rg -q '^def elisa_initialize_globals\(' build/name_collision.generated.elisa
-rg -q 'elisa_initialize_globals\(\)' build/name_collision.generated.elisa
-! rg -q '^def initialize_globals\(' build/name_collision.generated.elisa
-"$elisa_bin" -emit obj -O0 -o build/name_collision.generated.o build/name_collision.generated.elisa
-clang -Wl,-dead_strip -o build/name_collision.generated build/name_collision.generated.o
-clang -std=c11 testdata/fixtures/name_collision.c -o build/name_collision.native
-set +e
-./build/name_collision.native
-name_collision_native_rc=$?
-./build/name_collision.generated
-name_collision_generated_rc=$?
-set -e
-[ "$name_collision_native_rc" -eq 0 ] && [ "$name_collision_generated_rc" -eq 0 ]
+case "$test_suite" in
+    all)
+        . "$root_dir/scripts/test_suites/core_fixtures.sh"
+        . "$root_dir/scripts/test_suites/project_generation.sh"
+        . "$root_dir/scripts/test_suites/control_flow.sh"
+        . "$root_dir/scripts/test_suites/upstream_smoke.sh"
+        ;;
+    fixtures) . "$root_dir/scripts/test_suites/core_fixtures.sh" ;;
+    projects) . "$root_dir/scripts/test_suites/project_generation.sh" ;;
+    control-flow) . "$root_dir/scripts/test_suites/control_flow.sh" ;;
+    upstream) . "$root_dir/scripts/test_suites/upstream_smoke.sh" ;;
+esac
 
-./build/elisa-c-transpiler testdata/fixtures/backward_goto.c > build/backward_goto.generated.elisa
-rg -q 'control_state: mutable i32 = 0' build/backward_goto.generated.elisa
-clang -std=c11 testdata/fixtures/backward_goto.c -o build/backward_goto.native
-"$elisa_bin" -emit obj -O0 -o build/backward_goto.generated.o build/backward_goto.generated.elisa
-clang -Wl,-dead_strip -o build/backward_goto.generated build/backward_goto.generated.o
-set +e
-./build/backward_goto.native
-backward_native_rc=$?
-./build/backward_goto.generated
-backward_generated_rc=$?
-set -e
-[ "$backward_native_rc" -eq 0 ] && [ "$backward_generated_rc" -eq 0 ]
-
-./build/elisa-c-transpiler testdata/fixtures/structured_loop_goto.c > build/structured_loop_goto.generated.elisa
-! rg -q 'control_state|goto_state|flow_state' build/structured_loop_goto.generated.elisa
-rg -q 'break' build/structured_loop_goto.generated.elisa
-clang -std=c11 testdata/fixtures/structured_loop_goto.c -o build/structured_loop_goto.native
-"$elisa_bin" -emit obj -O0 -o build/structured_loop_goto.generated.o build/structured_loop_goto.generated.elisa
-clang -Wl,-dead_strip -o build/structured_loop_goto.generated build/structured_loop_goto.generated.o
-set +e
-./build/structured_loop_goto.native
-structured_native_rc=$?
-./build/structured_loop_goto.generated
-structured_generated_rc=$?
-set -e
-[ "$structured_native_rc" -eq 0 ] && [ "$structured_generated_rc" -eq 0 ]
-
-./build/elisa-c-transpiler testdata/fixtures/switch.c > build/switch.generated.elisa
-rg -q 'match value:' build/switch.generated.elisa
-rg -q '^[[:space:]]+0[[:space:]]+\|[[:space:]]+1:' build/switch.generated.elisa
-rg -q '^[[:space:]]+5:' build/switch.generated.elisa
-rg -q 'switch_done_' build/switch.generated.elisa
-if sed -n '/^def nested_switch/,/^def conditional_break/p' build/switch.generated.elisa | rg -q 'switch_done_'; then
-    echo "direct switch breaks should not require switch_done" >&2
-    exit 1
-fi
-clang -std=c11 testdata/fixtures/switch.c -o build/switch.native
-"$elisa_bin" -emit obj -O0 -o build/switch.generated.o build/switch.generated.elisa
-clang -Wl,-dead_strip -o build/switch.generated build/switch.generated.o
-set +e
-./build/switch.native
-switch_native_rc=$?
-./build/switch.generated
-switch_generated_rc=$?
-set -e
-[ "$switch_native_rc" -eq 0 ] && [ "$switch_generated_rc" -eq 0 ]
-
-./build/elisa-c-transpiler testdata/fixtures/switch_patterns.c > build/switch_patterns.generated.elisa
-rg -q '^[[:space:]]+10\.\.=12:' build/switch_patterns.generated.elisa
-rg -q 'Token\.TOKEN_ZERO[[:space:]]+\|[[:space:]]+Token\.TOKEN_ONE:' build/switch_patterns.generated.elisa
-clang -std=c11 testdata/fixtures/switch_patterns.c -o build/switch_patterns.native
-"$elisa_bin" -emit obj -O0 -o build/switch_patterns.generated.o build/switch_patterns.generated.elisa
-clang -Wl,-dead_strip -o build/switch_patterns.generated build/switch_patterns.generated.o
-./build/switch_patterns.native
-./build/switch_patterns.generated
-
-mkdir -p build/project-db
-./build/elisa-c-transpiler --compile-commands testdata/fixtures/compile_commands.json \
-    --output-dir build/project-db
-rg -q 'include "module_a.elisa"' build/project-db/elisa_project.elisa
-rg -q 'include "other.module_a.elisa"' build/project-db/elisa_project.elisa
-rg -q 'include "module_b.elisa"' build/project-db/elisa_project.elisa
-rg -q 'return \(value \+ 1\)' build/project-db/module_a.elisa
-"$elisa_bin" -emit obj -O0 -o build/project-db/project.o build/project-db/elisa_project.elisa
-clang -Wl,-dead_strip -o build/project-db/project build/project-db/project.o
-set +e
-./build/project-db/project
-project_generated_rc=$?
-set -e
-[ "$project_generated_rc" -eq 0 ]
-
-./build/elisa-c-transpiler testdata/fixtures/nested_loop_goto.c > build/nested_loop_goto.generated.elisa
-rg -q 'control_state: mutable i32 = 0|goto_state: mutable i32 = 0' build/nested_loop_goto.generated.elisa
-clang -std=c11 testdata/fixtures/nested_loop_goto.c -o build/nested_loop_goto.native
-"$elisa_bin" -emit obj -O0 -o build/nested_loop_goto.generated.o build/nested_loop_goto.generated.elisa
-clang -Wl,-dead_strip -o build/nested_loop_goto.generated build/nested_loop_goto.generated.o
-set +e
-./build/nested_loop_goto.native
-nested_native_rc=$?
-./build/nested_loop_goto.generated
-nested_generated_rc=$?
-set -e
-[ "$nested_native_rc" -eq 0 ] && [ "$nested_generated_rc" -eq 0 ]
-
-set +e
-./build/elisa-c-transpiler testdata/fixtures/unsupported_for.c \
-    > build/unsupported_for.out 2> build/unsupported_for.err
-unsupported_for_rc=$?
-set -e
-[ "$unsupported_for_rc" -ne 0 ]
-[ ! -s build/unsupported_for.out ]
-rg -q "elisa-c-transpiler: unsupported statement GotoStmt at" build/unsupported_for.err
-
-ini_root=testdata/upstream/inih
-clang -std=c11 -DINI_USE_STACK=1 -I "$ini_root" -c "$ini_root/ini.c" -o build/ini.o
-clang -std=c11 -DINI_USE_STACK=1 -I "$ini_root" -I "$ini_root/examples" \
-    "$ini_root/examples/ini_dump.c" "$ini_root/ini.c" -o build/ini_dump.native
-
-./build/elisa-c-transpiler "$ini_root/examples/ini_dump.c" > build/ini_dump.generated.elisa
-# C library bindings must come from Clang declarations. Their source spellings
-# are retained; no target function gets a translator-owned ABI entry just
-# because its spelling is printf, strncpy, strcmp, or something similar.
-rg -q '^extern (printf|strncpy|strcmp|ini_parse)\b' build/ini_dump.generated.elisa
-rg -q '^@link_name\("printf"\)$' build/ini_dump.generated.elisa
-! rg -q '^extern __c_ext_[0-9]+\(' build/ini_dump.generated.elisa
-"$elisa_bin" -emit obj -O0 -o build/ini_dump.generated.o build/ini_dump.generated.elisa
-clang -Wl,-dead_strip -o build/ini_dump.generated build/ini_dump.generated.o build/ini.o -lm
-
-./build/ini_dump.native "$ini_root/examples/test.ini" > build/ini_dump.native.output.txt
-./build/ini_dump.generated "$ini_root/examples/test.ini" > build/ini_dump.output.txt
-cmp build/ini_dump.native.output.txt build/ini_dump.output.txt
-
-set +e
-./build/ini_dump.native > build/ini_dump.noarg.native.out 2> build/ini_dump.noarg.native.err
-native_noarg_rc=$?
-./build/ini_dump.generated > build/ini_dump.noarg.generated.out 2> build/ini_dump.noarg.generated.err
-generated_noarg_rc=$?
-./build/ini_dump.native /definitely/missing.ini > build/ini_dump.missing.native.out 2> build/ini_dump.missing.native.err
-native_missing_rc=$?
-./build/ini_dump.generated /definitely/missing.ini > build/ini_dump.missing.generated.out 2> build/ini_dump.missing.generated.err
-generated_missing_rc=$?
-set -e
-
-[ "$native_noarg_rc" -eq 1 ] && [ "$generated_noarg_rc" -eq 1 ]
-cmp build/ini_dump.noarg.native.out build/ini_dump.noarg.generated.out
-cmp build/ini_dump.noarg.native.err build/ini_dump.noarg.generated.err
-[ "$native_missing_rc" -eq 2 ] && [ "$generated_missing_rc" -eq 2 ]
-cmp build/ini_dump.missing.native.out build/ini_dump.missing.generated.out
-cmp build/ini_dump.missing.native.err build/ini_dump.missing.generated.err
-
-cjson_root=testdata/upstream/cJSON
-clang -std=c11 -I "$cjson_root" \
-    "$cjson_root/cjson_smoke.c" -lm -o build/cjson.native
-
-./build/elisa-c-transpiler "$cjson_root/cjson_smoke.c" > build/cjson.generated.elisa
-rg -q '^def cJSON_Parse\(' build/cjson.generated.elisa
-rg -q '^def cJSON_PrintUnformatted\(' build/cjson.generated.elisa
-rg -q '^def cJSON_Delete\(' build/cjson.generated.elisa
-rg -q '^def cJSON_Delete\(item: mutable CJSON&\?\)' build/cjson.generated.elisa
-rg -q 'item_cursor: mutable CJSON&\? = item' build/cjson.generated.elisa
-! rg -q '_param|__c_ext_|__c_global_' build/cjson.generated.elisa
-rg -q 'size_of\[CJSON\]' build/cjson.generated.elisa
-! rg -q 'size_of\[Printbuffer\] \* 1' build/cjson.generated.elisa
-! rg -q '\(null\)\.i32|\.i32\(\) == \(null\)' build/cjson.generated.elisa
-! rg -q '^extern (printf|cJSON_Parse|cJSON_Delete)\b' build/cjson.generated.elisa
-rg -q '^@link_name\("printf"\)$' build/cjson.generated.elisa
-if [ "$optional_fn_supported" -eq 1 ]; then
-    "$elisa_bin" -emit obj -O0 -o build/cjson.generated.o build/cjson.generated.elisa
-    clang -Wl,-dead_strip -o build/cjson.generated build/cjson.generated.o -lm
-
-    ./build/cjson.native > build/cjson.native.output.txt
-    ./build/cjson.generated > build/cjson.output.txt
-    cmp build/cjson.native.output.txt build/cjson.output.txt
-fi
-
-kilo_root=testdata/upstream/kilo
-clang -std=c11 "$kilo_root/kilo.c" -o build/kilo.native
-./build/elisa-c-transpiler "$kilo_root/kilo.c" > build/kilo.generated.elisa
-rg -q '^def editorSetStatusMessage\(fmt: u8&\?, \.\.\.\) -> void' build/kilo.generated.elisa
-rg -q '^extern c_memset\(' build/kilo.generated.elisa
-rg -q '^@link_name\("memset"\)$' build/kilo.generated.elisa
-! rg -q '^extern memset\(' build/kilo.generated.elisa
-rg -q 'llvm_va_start\(\(&ap\)\.cast\[mutable void&\]\)' build/kilo.generated.elisa
-rg -q 'llvm_va_end\(\(&ap\)\.cast\[mutable void&\]\)' build/kilo.generated.elisa
-! rg -q 'bridge required|kilo_varargs' build/kilo.generated.elisa
-"$elisa_bin" -emit obj -O0 -o build/kilo.generated.o build/kilo.generated.elisa
-clang -Wl,-dead_strip -o build/kilo.generated build/kilo.generated.o -lm
-
-set +e
-./build/kilo.native > build/kilo.noarg.native.out 2> build/kilo.noarg.native.err
-kilo_native_rc=$?
-./build/kilo.generated > build/kilo.noarg.generated.out 2> build/kilo.noarg.generated.err
-kilo_generated_rc=$?
-set -e
-[ "$kilo_native_rc" -eq 1 ] && [ "$kilo_generated_rc" -eq 1 ]
-cmp build/kilo.noarg.native.out build/kilo.noarg.generated.out
-cmp build/kilo.noarg.native.err build/kilo.noarg.generated.err
-
-echo "translator acceptance tests passed"
+echo "translator tests passed (suite: $test_suite)"

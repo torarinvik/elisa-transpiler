@@ -1,0 +1,6 @@
+include "../build/dynamic_global_init.generated.elisa"
+
+def main() -> i32:
+    initialize_globals()
+    initialize_globals()
+    return 0 if dynamic_global_value == 12 else 1

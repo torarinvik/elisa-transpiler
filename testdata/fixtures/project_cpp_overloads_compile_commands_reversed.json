@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_cpp_overloads/main.cpp","command":"clang++ -std=c++17 -c testdata/fixtures/project_cpp_overloads/main.cpp"},
+  {"directory":".","file":"testdata/fixtures/project_cpp_overloads/alpha.cpp","command":"clang++ -std=c++17 -c testdata/fixtures/project_cpp_overloads/alpha.cpp"}
+]

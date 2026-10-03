@@ -1,0 +1,299 @@
+# Source paths in Clang's raw JSON AST are JSON string values, not filesystem
+# byte strings. Decode them before physical identity checks so quotes,
+# backslashes, control escapes and Unicode escapes refer to the actual path.
+extend CTranslator:
+    struct AstResolvedPathCacheValue:
+        resolved: cstr
+
+    struct AstResolvedPathCache:
+        entries: mutable dict[cstr, AstResolvedPathCacheValue]
+        count: mutable i64
+
+    # Location matching is called for many thousands of Clang nodes, and the
+    # same header spelling is repeated throughout the raw AST. Keep a small
+    # process-local cache of owned path copies so realpath is paid once per
+    # spelling/cwd pair. The bounded table is deliberately generic and falls
+    # back to the uncached path resolver after it fills.
+    global mutable ast_resolved_path_cache: AstResolvedPathCache = zeroed
+    global mutable ast_path_match_cache_hashes: usize[1024] = zeroed
+    global mutable ast_path_match_cache_lengths: i64[1024] = zeroed
+    global mutable ast_path_match_cache_offsets: usize[1024] = zeroed
+    global mutable ast_path_match_cache_flags: u8[1024] = zeroed
+    global mutable ast_path_match_cache_path_bytes: u8[262144] = zeroed
+    global mutable ast_path_match_cache_count: usize = 0.usize()
+    global mutable ast_path_match_cache_bytes_used: usize = 0.usize()
+
+    def ast_path_match_cache_reset() -> void can[Memory.Allocate, Abort.Panic]:
+        for index in 0..<1024:
+            ast_path_match_cache_hashes[index.usize()] <- 0.usize()
+        ast_path_match_cache_count <- 0.usize()
+        ast_path_match_cache_bytes_used <- 0.usize()
+
+    def ast_path_match_cache_hash(raw_path: sview, source: sview, canonical_source: sview, working_directory: sview, main_source_query: bool) -> usize:
+        value: mutable usize = hash_sview(raw_path)
+        value <- value ^ 1.usize() if main_source_query
+        return 1.usize() if value == 0.usize() else value
+
+    def ast_path_match_cache_get(raw_path: sview, source: sview, canonical_source: sview, working_directory: sview, main_source_query: bool) -> i64:
+        return -1 if raw_path.len == 0
+        capacity: usize = 1024.usize()
+        mask: usize = capacity - 1.usize()
+        hash: usize = ast_path_match_cache_hash(raw_path, source, canonical_source, working_directory, main_source_query)
+        slot: mutable usize = hash & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            return -1 if ast_path_match_cache_hashes[slot] == 0.usize()
+            if ast_path_match_cache_hashes[slot] == hash and ast_path_match_cache_lengths[slot] == raw_path.len:
+                flags: u8 = ast_path_match_cache_flags[slot]
+                mode_matches: bool = (flags & 1.u8()) != 0.u8()
+                if mode_matches == main_source_query:
+                    offset: usize = ast_path_match_cache_offsets[slot]
+                    matches_path: mutable bool = true
+                    for index in 0..<raw_path.len |index, matches_path, offset, raw_path|:
+                        matches_path <- false if ast_path_match_cache_path_bytes[offset + index.usize()] != string_view_index(raw_path, index).u8()
+                    if matches_path:
+                        return 1 if (flags & 2.u8()) != 0.u8() else 0
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+        return -1
+
+    def ast_path_match_cache_put(raw_path: sview, source: sview, canonical_source: sview, working_directory: sview, main_source_query: bool, matches: bool) -> void:
+        return if raw_path.len == 0 or ast_path_match_cache_count >= 512.usize()
+        path_length: usize = raw_path.len.usize()
+        return if path_length > 262144.usize() - ast_path_match_cache_bytes_used
+        capacity: usize = 1024.usize()
+        mask: usize = capacity - 1.usize()
+        hash: usize = ast_path_match_cache_hash(raw_path, source, canonical_source, working_directory, main_source_query)
+        slot: mutable usize = hash & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            if ast_path_match_cache_hashes[slot] == 0.usize():
+                offset: usize = ast_path_match_cache_bytes_used
+                for index in 0..<raw_path.len |index, offset, raw_path|:
+                    ast_path_match_cache_path_bytes[offset + index.usize()] <- string_view_index(raw_path, index).u8()
+                ast_path_match_cache_hashes[slot] <- hash
+                ast_path_match_cache_lengths[slot] <- raw_path.len
+                ast_path_match_cache_offsets[slot] <- offset
+                ast_path_match_cache_flags[slot] <- (1.u8() if main_source_query else 0.u8()) | (2.u8() if matches else 0.u8())
+                ast_path_match_cache_bytes_used <- ast_path_match_cache_bytes_used + path_length
+                ast_path_match_cache_count <- ast_path_match_cache_count + 1.usize()
+                return
+            if ast_path_match_cache_hashes[slot] == hash and ast_path_match_cache_lengths[slot] == raw_path.len:
+                flags: u8 = ast_path_match_cache_flags[slot]
+                mode_matches: bool = (flags & 1.u8()) != 0.u8()
+                if mode_matches == main_source_query:
+                    offset: usize = ast_path_match_cache_offsets[slot]
+                    matches_path: mutable bool = true
+                    for index in 0..<raw_path.len |index, matches_path, offset, raw_path|:
+                        matches_path <- false if ast_path_match_cache_path_bytes[offset + index.usize()] != string_view_index(raw_path, index).u8()
+                    if matches_path:
+                        ast_path_match_cache_flags[slot] <- (1.u8() if main_source_query else 0.u8()) | (2.u8() if matches else 0.u8())
+                        return
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+
+    def ast_path_cache_nonnull[T](value: T&?) -> T&:
+        assert value != null
+        return value
+
+    def ast_json_hex_nibble(byte: i64) -> i64:
+        return byte - 48 if byte >= 48 and byte <= 57
+        return byte - 55 if byte >= 65 and byte <= 70
+        return byte - 87 if byte >= 97 and byte <= 102
+        return -1
+
+    def ast_json_append_path_codepoint(path: mutable darray[u8]&, codepoint: i64) -> bool can[Memory.Allocate, Abort.Panic]:
+        return false if codepoint <= 0 or codepoint > 1114111 or (codepoint >= 55296 and codepoint <= 57343)
+        if codepoint <= 127:
+            path.push(codepoint.u8())
+        elif codepoint <= 2047:
+            path.push((192 + codepoint / 64).u8())
+            path.push((128 + codepoint % 64).u8())
+        elif codepoint <= 65535:
+            path.push((224 + codepoint / 4096).u8())
+            path.push((128 + (codepoint / 64) % 64).u8())
+            path.push((128 + codepoint % 64).u8())
+        else:
+            path.push((240 + codepoint / 262144).u8())
+            path.push((128 + (codepoint / 4096) % 64).u8())
+            path.push((128 + (codepoint / 64) % 64).u8())
+            path.push((128 + codepoint % 64).u8())
+        return true
+
+    # Decode one already-bounds-checked JSON string slice to filesystem bytes.
+    # Unicode surrogate pairs are combined into a scalar and encoded as UTF-8;
+    # NUL is rejected because the OS path APIs consume NUL-terminated strings.
+    def ast_json_decode_path(text: sview, start: i64, stop: i64, path: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        path.count <- 0.usize()
+        return false if start < 0 or stop > text.len or stop <= start + 1
+        return false if string_view_index(text, start) != 34 or string_view_index(text, stop - 1) != 34
+        cursor: mutable i64 = start + 1
+        end: i64 = stop - 1
+        while cursor < end |text, path, cursor, end|:
+            byte: i64 = string_view_index(text, cursor)
+            if byte != 92:
+                return false if byte < 32
+                path.push(byte.u8())
+                cursor <- cursor + 1
+            else:
+                cursor <- cursor + 1
+                return false if cursor >= end
+                escaped: i64 = string_view_index(text, cursor)
+                if escaped == 34 or escaped == 92 or escaped == 47:
+                    path.push(escaped.u8())
+                    cursor <- cursor + 1
+                elif escaped == 98:
+                    path.push(8.u8())
+                    cursor <- cursor + 1
+                elif escaped == 102:
+                    path.push(12.u8())
+                    cursor <- cursor + 1
+                elif escaped == 110:
+                    path.push(10.u8())
+                    cursor <- cursor + 1
+                elif escaped == 114:
+                    path.push(13.u8())
+                    cursor <- cursor + 1
+                elif escaped == 116:
+                    path.push(9.u8())
+                    cursor <- cursor + 1
+                elif escaped == 117:
+                    return false if cursor + 4 >= end
+                    codepoint: mutable i64 = 0
+                    for offset in 1..<5 |text, cursor, codepoint|:
+                        nibble: i64 = ast_json_hex_nibble(string_view_index(text, cursor + offset))
+                        return false if nibble < 0
+                        codepoint <- codepoint * 16 + nibble
+                    cursor <- cursor + 5
+                    if codepoint >= 55296 and codepoint <= 56319:
+                        return false if cursor + 5 >= end
+                        return false if string_view_index(text, cursor) != 92 or string_view_index(text, cursor + 1) != 117
+                        low_surrogate: mutable i64 = 0
+                        for offset in 2..<6 |text, cursor, low_surrogate|:
+                            nibble: i64 = ast_json_hex_nibble(string_view_index(text, cursor + offset))
+                            return false if nibble < 0
+                            low_surrogate <- low_surrogate * 16 + nibble
+                        return false if low_surrogate < 56320 or low_surrogate > 57343
+                        codepoint <- 65536 + (codepoint - 55296) * 1024 + low_surrogate - 56320
+                        cursor <- cursor + 6
+                    elif codepoint >= 56320 and codepoint <= 57343:
+                        return false
+                    return false if not (ast_json_append_path_codepoint(path, codepoint) can Memory.Allocate, Abort.Panic)
+                else:
+                    return false
+        return true
+
+    def ast_json_same_source_directory(file: sview, source: sview) -> bool:
+        file_slash: mutable i64 = -1
+        source_slash: mutable i64 = -1
+        for index in 0..<file.len |file, file_slash|:
+            file_slash <- index if string_view_index(file, index) == 47
+        for index in 0..<source.len |source, source_slash|:
+            source_slash <- index if string_view_index(source, index) == 47
+        return file_slash >= 0 and file_slash == source_slash and sview_eq(string_view_prefix(file, file_slash), string_view_prefix(source, source_slash))
+
+    def ast_path_cache_append_i64(out: mutable darray[u8]&, value: i64) -> void:
+        magnitude: mutable i64 = value
+        if magnitude < 0:
+            out.push(45)
+            magnitude <- 0 - magnitude
+        if magnitude == 0:
+            out.push(48)
+            return
+        digits: mutable i64[24] = zeroed
+        count: mutable i64 = 0
+        while magnitude > 0 |magnitude, digits, count|:
+            digits[count] <- magnitude % 10
+            magnitude <- magnitude / 10
+            count <- count + 1
+        for index in 0..<count |out, digits, count|:
+            out.push((digits[count - index - 1] + 48).u8())
+
+    def ast_json_path_cache_key(path: sview, working_directory: sview, out: mutable darray[u8]&) -> void:
+        out.count <- 0.usize()
+        ast_path_cache_append_i64(out, path.len)
+        out.push(58)
+        append_view(out, path)
+        append_view(out, working_directory)
+
+    def ast_json_resolve_path_uncached(path: sview, working_directory: sview, resolved: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        resolved.count <- 0.usize()
+        return false if path.len == 0 or string_view_index(path, 0) == 60
+        input_path: mutable darray[u8] = []
+        if string_view_index(path, 0) != 47 and working_directory.len > 0:
+            append_view(&input_path, working_directory)
+            append_view(&input_path, sview("/", 0, -1)) if string_view_index(working_directory, working_directory.len - 1) != 47
+        append_view(&input_path, path)
+        input_path.push(0)
+        resolved_buffer: mutable u8[4096] = zeroed
+        resolved_pointer: u8&? = clang_realpath((&input_path[0]).cast[cstr], (&resolved_buffer[0]).cast[void&?])
+        return false if resolved_pointer == null
+        resolved_length: mutable usize = 0.usize()
+        while resolved_length < 4096.usize() |resolved_buffer, resolved_length, resolved|:
+            byte: u8 = resolved_buffer[resolved_length]
+            break if byte == 0
+            resolved.push(byte)
+            resolved_length <- resolved_length + 1.usize()
+        return resolved_length < 4096.usize()
+
+    def ast_json_resolve_path(path: sview, working_directory: sview, resolved: mutable darray[u8]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        cache_key: mutable darray[u8] = []
+        ast_json_path_cache_key(path, working_directory, &cache_key)
+        cache_key_view: sview = bytes_view(cache_key)
+        cached: AstResolvedPathCacheValue&? = arena_dict_get_cstr_view(ast_resolved_path_cache.entries, cache_key_view)
+        if cached != null:
+            resolved.count <- 0.usize()
+            cached_value: AstResolvedPathCacheValue& = ast_path_cache_nonnull(cached)
+            append_view(resolved, sview(cached_value.resolved, 0, -1))
+            return true
+        computed: mutable darray[u8] = []
+        valid: bool = ast_json_resolve_path_uncached(path, working_directory, &computed) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        if valid and ast_resolved_path_cache.count < 256:
+            key_copy: cstr = string_view_copy(cache_key_view) can Memory.Allocate, Abort.Panic
+            resolved_copy: cstr = string_view_copy(bytes_view(computed)) can Memory.Allocate, Abort.Panic
+            cache_value: AstResolvedPathCacheValue = AstResolvedPathCacheValue{resolved: resolved_copy}
+            _ = arena_dict_put_or_panic(&perm_arena, ast_resolved_path_cache.entries, key_copy, cache_value)
+            ast_resolved_path_cache.count <- ast_resolved_path_cache.count + 1
+        resolved.count <- 0.usize()
+        append_view(resolved, bytes_view(computed)) if valid
+        return valid
+
+    def ast_json_resolved_paths_match(file: sview, source: sview, canonical_source: sview, working_directory: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        resolved_file: mutable darray[u8] = []
+        file_valid: bool = ast_json_resolve_path(file, working_directory, &resolved_file) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return false if not file_valid
+        return sview_eq(bytes_view(resolved_file), canonical_source) if canonical_source.len > 0
+        resolved_source: mutable darray[u8] = []
+        source_valid: bool = ast_json_resolve_path(source, working_directory, &resolved_source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return false if not source_valid
+        return sview_eq(bytes_view(resolved_file), bytes_view(resolved_source))
+
+    def ast_json_path_matches(text: sview, start: i64, stop: i64, source: sview, canonical_source: sview, working_directory: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        raw_path: sview = string_view_slice(text, start + 1, stop - 1)
+        cached: i64 = ast_path_match_cache_get(raw_path, source, canonical_source, working_directory, false)
+        return cached == 1 if cached >= 0
+        decoded: mutable darray[u8] = []
+        if not ast_json_decode_path(text, start, stop, &decoded):
+            ast_path_match_cache_put(raw_path, source, canonical_source, working_directory, false, false)
+            return false
+        value: sview = bytes_view(decoded)
+        main_source_match: bool = sview_eq(value, source) or ast_json_resolved_paths_match(value, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        matches: bool = main_source_match or ast_json_same_source_directory(value, source)
+        ast_path_match_cache_put(raw_path, source, canonical_source, working_directory, false, matches)
+        return matches
+
+    # Keep the source spelling for diagnostics/output, but compare physical
+    # identity through the pre-resolved canonical path. This exact predicate
+    # never conflates a sibling header with the main translation unit.
+    def ast_json_path_is_main_source(text: sview, start: i64, stop: i64, source: sview, canonical_source: sview, working_directory: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        raw_path: sview = string_view_slice(text, start + 1, stop - 1)
+        cached: i64 = ast_path_match_cache_get(raw_path, source, canonical_source, working_directory, true)
+        return cached == 1 if cached >= 0
+        decoded: mutable darray[u8] = []
+        if not ast_json_decode_path(text, start, stop, &decoded):
+            ast_path_match_cache_put(raw_path, source, canonical_source, working_directory, true, false)
+            return false
+        value: sview = bytes_view(decoded)
+        matches: bool = sview_eq(value, source) or ast_json_resolved_paths_match(value, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        ast_path_match_cache_put(raw_path, source, canonical_source, working_directory, true, matches)
+        return matches

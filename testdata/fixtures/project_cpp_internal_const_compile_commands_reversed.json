@@ -1,0 +1,5 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_cpp_internal_const/main.c","arguments":["clang","-x","c++","-std=c++17","-c","testdata/fixtures/project_cpp_internal_const/main.c"]},
+  {"directory":".","file":"testdata/fixtures/project_cpp_internal_const/beta.c","arguments":["clang","-x","c++","-std=c++17","-c","testdata/fixtures/project_cpp_internal_const/beta.c"]},
+  {"directory":".","file":"testdata/fixtures/project_cpp_internal_const/alpha.c","arguments":["clang","-x","c++","-std=c++17","-c","testdata/fixtures/project_cpp_internal_const/alpha.c"]}
+]

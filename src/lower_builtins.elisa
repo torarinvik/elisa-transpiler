@@ -1,0 +1,73 @@
+extend CTranslator:
+    # Resolve only object-size operands whose complete storage object is
+    # explicit in the AST. Pointer arithmetic, member projections, and
+    # pointer-valued variables need provenance analysis; returning a guessed
+    # extent for those would change C semantics.
+    def typed_builtin_object_size_type[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
+            return typed_builtin_object_size_type(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ast_child_count(node) > 0
+        if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)):
+            cast_kind: sview = ast_cast_kind(node)
+            if sview_eq(cast_kind, sview("BitCast", 0, -1)) or sview_eq(cast_kind, sview("NoOp", 0, -1)):
+                return typed_builtin_object_size_type(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ast_child_count(node) > 0
+            if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) and sview_eq(cast_kind, sview("ArrayToPointerDecay", 0, -1)) and ast_child_count(node) > 0:
+                object: JsonValueHandle[r] = ast_child(node, 0)
+                object_kind: sview = ast_kind(object)
+                if sview_eq(object_kind, sview("DeclRefExpr", 0, -1)) or sview_eq(object_kind, sview("StringLiteral", 0, -1)) or sview_eq(object_kind, sview("MemberExpr", 0, -1)):
+                    object_type: sview = typed_c_type(ctx, object) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return object_type if c_type_is_array(object_type) and c_array_dimension_count(object_type) == 1
+            return sview("", 0, 0)
+        if sview_eq(kind, sview("UnaryOperator", 0, -1)) and sview_eq(ast_string(ast_field(node, sview("opcode", 0, -1))), sview("&", 0, -1)) and ast_child_count(node) > 0:
+            object: JsonValueHandle[r] = ast_child(node, 0)
+            object_kind: sview = ast_kind(object)
+            if sview_eq(object_kind, sview("DeclRefExpr", 0, -1)) or sview_eq(object_kind, sview("StringLiteral", 0, -1)):
+                object_type: sview = typed_c_type(ctx, object) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return object_type if not c_type_is_function(object_type) and c_array_dimension_count(object_type) <= 1
+        return sview("", 0, 0)
+    def typed_builtin_object_size_member[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r]:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
+            return typed_builtin_object_size_member(ast_child(node, 0)) if ast_child_count(node) > 0 else json_handle_null(node)
+        if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)):
+            cast_kind: sview = ast_cast_kind(node)
+            return typed_builtin_object_size_member(ast_child(node, 0)) if ast_child_count(node) > 0 and (sview_eq(cast_kind, sview("BitCast", 0, -1)) or sview_eq(cast_kind, sview("NoOp", 0, -1)) or sview_eq(cast_kind, sview("ArrayToPointerDecay", 0, -1))) else json_handle_null(node)
+        if sview_eq(kind, sview("UnaryOperator", 0, -1)) and sview_eq(ast_string(ast_field(node, sview("opcode", 0, -1))), sview("&", 0, -1)) and ast_child_count(node) > 0:
+            child: JsonValueHandle[r] = ast_child(node, 0)
+            return child if sview_eq(ast_kind(child), sview("MemberExpr", 0, -1)) and c_type_is_array(ast_qual_type(child)) else json_handle_null(node)
+        return node if sview_eq(kind, sview("MemberExpr", 0, -1)) and c_type_is_array(ast_qual_type(node)) else json_handle_null(node)
+    def typed_builtin_object_size_enclosing_record[@r](ctx: mutable TypedContext[r]&, member: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return sview("", 0, 0) if json_handle_is_null(member) or ast_bool(ast_field(member, sview("isArrow", 0, -1))) or ast_child_count(member) == 0
+        base: JsonValueHandle[r] = ast_child(member, 0)
+        return sview("", 0, 0) if not sview_eq(ast_kind(base), sview("DeclRefExpr", 0, -1))
+        parent_type: sview = typed_c_type(ctx, base) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return parent_type if typed_record_index(ctx, parent_type) >= 0
+        return sview("", 0, 0)
+    def typed_builtin_object_size_is_unknown_pointer[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
+            return typed_builtin_object_size_is_unknown_pointer(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ast_child_count(node) > 0
+        if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)):
+            cast_kind: sview = ast_cast_kind(node)
+            if sview_eq(cast_kind, sview("BitCast", 0, -1)) or sview_eq(cast_kind, sview("NoOp", 0, -1)) or sview_eq(cast_kind, sview("LValueToRValue", 0, -1)):
+                return typed_builtin_object_size_is_unknown_pointer(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if ast_child_count(node) > 0
+            return false
+        if sview_eq(kind, sview("DeclRefExpr", 0, -1)):
+            declaration: JsonValueHandle[r] = ast_field(node, sview("referencedDecl", 0, -1))
+            declaration_kind: sview = ast_kind(declaration)
+            pointer_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return c_type_pointer_count(pointer_type) > 0 and (sview_eq(declaration_kind, sview("ParmVarDecl", 0, -1)) or sview_eq(declaration_kind, sview("VarDecl", 0, -1)))
+        if sview_eq(kind, sview("MemberExpr", 0, -1)):
+            pointer_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return c_type_pointer_count(pointer_type) > 0
+        if sview_eq(kind, sview("BinaryOperator", 0, -1)) and ast_child_count(node) > 1:
+            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            if sview_eq(opcode, sview("+", 0, -1)) or sview_eq(opcode, sview("-", 0, -1)):
+                left: JsonValueHandle[r] = ast_child(node, 0)
+                left_type: sview = typed_c_type(ctx, left) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return typed_builtin_object_size_is_unknown_pointer(ctx, left) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if c_type_pointer_count(left_type) > 0
+                if sview_eq(opcode, sview("+", 0, -1)):
+                    right: JsonValueHandle[r] = ast_child(node, 1)
+                    right_type: sview = typed_c_type(ctx, right) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return typed_builtin_object_size_is_unknown_pointer(ctx, right) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if c_type_pointer_count(right_type) > 0
+        return false

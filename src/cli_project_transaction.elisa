@@ -1,0 +1,342 @@
+extend CTranslator:
+    def cli_module_name(out: mutable darray[u8]&, source: sview) -> void:
+        append_view(out, cli_module_stem(source))
+        append_view(out, sview(".elisa", 0, -1))
+
+    def cli_module_name_for_sources(out: mutable darray[u8]&, sources: darray[CliSource], source_index: i64) -> void:
+        source: sview = sources[source_index.usize()].path
+        append_view(out, cli_module_stem(source))
+        cli_module_disambiguator(out, sources, source_index)
+        append_view(out, sview(".elisa", 0, -1))
+
+    def cli_output_path_for_sources(out: mutable darray[u8]&, directory: sview, sources: darray[CliSource], source_index: i64) -> void:
+        append_view(out, directory)
+        append_view(out, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        cli_module_name_for_sources(out, sources, source_index)
+        out.push(0)
+
+    def cli_output_path(out: mutable darray[u8]&, directory: sview, source: sview) -> void:
+        append_view(out, directory)
+        append_view(out, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        cli_module_name(out, source)
+        out.push(0)
+
+    # Stage project files next to their final names. A process id plus the
+    # source index makes a transaction's temporary paths distinct without
+    # relying on a shell, timestamps, or a shared process-global counter.
+    def cli_staged_output_path_for_sources(out: mutable darray[u8]&, directory: sview, sources: darray[CliSource], source_index: i64, transaction_id: i64) -> void:
+        cli_output_path_for_sources(out, directory, sources, source_index)
+        out.count <- out.count - 1.usize()
+        append_view(out, sview(".elisa-transpiler-tmp-", 0, -1))
+        append_i64(out, transaction_id)
+        append_view(out, sview("-", 0, -1))
+        append_i64(out, source_index)
+        out.push(0)
+
+    def cli_staged_manifest_path(out: mutable darray[u8]&, directory: sview, transaction_id: i64) -> void:
+        append_view(out, directory)
+        append_view(out, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(out, sview("elisa_project.elisa.elisa-transpiler-tmp-", 0, -1))
+        append_i64(out, transaction_id)
+        out.push(0)
+
+    def cli_staged_source_map_path(out: mutable darray[u8]&, path: sview, transaction_id: i64) -> void:
+        append_view(out, path)
+        append_view(out, sview(".elisa-transpiler-tmp-", 0, -1))
+        append_i64(out, transaction_id)
+        out.push(0)
+
+    def cli_source_map_backup_path(out: mutable darray[u8]&, path: sview, transaction_id: i64) -> void:
+        cli_staged_source_map_path(out, path, transaction_id)
+        out.count <- out.count - 1.usize()
+        append_view(out, sview(".backup", 0, -1))
+        out.push(0)
+
+    def cli_path_exists(path: darray[u8]) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return false if path.count == 0.usize()
+        stream: CFile? = c_fopen((&path[0]).cast[cstr], "rb")
+        return false if stream == null
+        _ = c_fclose(stream)
+        return true
+
+    def cli_read_file(path: darray[u8]) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        contents: mutable darray[u8] = []
+        return contents if path.count == 0.usize()
+        stream: CFile? = c_fopen((&path[0]).cast[cstr], "rb")
+        return contents if stream == null
+        chunk: mutable darray[u8] = []
+        chunk.resize(8192.usize())
+        while true |contents, chunk, stream|:
+            amount: usize = c_fread((&chunk[0]).cast[mutable void&], 1.usize(), chunk.count, stream)
+            break if amount == 0.usize()
+            for index in 0..<amount |contents, chunk|:
+                contents.push(chunk[index.usize()])
+        _ = c_fclose(stream)
+        return contents
+
+    def cli_unlink_path(path: darray[u8]) -> void can[Unsafe.PointerCast, Console]:
+        return if path.count == 0.usize()
+        _ = clang_unlink((&path[0]).cast[cstr])
+
+    def cli_remove_project_staging_files(sources: darray[CliSource], source_count: i64, directory: sview, transaction_id: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        index: mutable i64 = 0
+        while index < source_count |sources, directory, transaction_id, index|:
+            staged_path: mutable darray[u8] = []
+            cli_staged_output_path_for_sources(&staged_path, directory, sources, index, transaction_id)
+            cli_unlink_path(staged_path) can Unsafe.PointerCast, Console
+            index <- index + 1
+        manifest_path: mutable darray[u8] = []
+        cli_staged_manifest_path(&manifest_path, directory, transaction_id)
+        cli_unlink_path(manifest_path) can Unsafe.PointerCast, Console
+
+    def cli_abort_project_output(sources: darray[CliSource], source_count: i64, directory: sview, transaction_id: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if directory.len > 0:
+            cli_remove_project_staging_files(sources, source_count, directory, transaction_id)
+        return 1
+
+    # Move old project files out of the way before publishing a completed
+    # generation. If publication fails, the backup paths let the caller
+    # restore the previous generation rather than leaving a mixed project.
+    def cli_backup_project_outputs(sources: darray[CliSource], directory: sview, transaction_id: i64, source_map_path: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        index: mutable i64 = 0
+        while index < sources.count.i64() |sources, directory, transaction_id, index|:
+            final_path: mutable darray[u8] = []
+            cli_output_path_for_sources(&final_path, directory, sources, index)
+            if cli_path_exists(final_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                backup_path: mutable darray[u8] = []
+                cli_staged_output_path_for_sources(&backup_path, directory, sources, index, transaction_id)
+                backup_path.count <- backup_path.count - 1.usize()
+                append_view(&backup_path, sview(".backup", 0, -1))
+                backup_path.push(0)
+                return false if clang_rename((&final_path[0]).cast[cstr], (&backup_path[0]).cast[cstr]) != 0
+            index <- index + 1
+        manifest_final: mutable darray[u8] = []
+        append_view(&manifest_final, directory)
+        append_view(&manifest_final, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(&manifest_final, sview("elisa_project.elisa", 0, -1))
+        manifest_final.push(0)
+        if cli_path_exists(manifest_final) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            manifest_backup: mutable darray[u8] = []
+            cli_staged_manifest_path(&manifest_backup, directory, transaction_id)
+            manifest_backup.count <- manifest_backup.count - 1.usize()
+            append_view(&manifest_backup, sview(".backup", 0, -1))
+            manifest_backup.push(0)
+            return false if clang_rename((&manifest_final[0]).cast[cstr], (&manifest_backup[0]).cast[cstr]) != 0
+        if source_map_path.len > 0:
+            source_map_final: mutable darray[u8] = []
+            append_view(&source_map_final, source_map_path)
+            source_map_final.push(0)
+            if cli_path_exists(source_map_final) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                source_map_backup: mutable darray[u8] = []
+                cli_source_map_backup_path(&source_map_backup, source_map_path, transaction_id)
+                return false if clang_rename((&source_map_final[0]).cast[cstr], (&source_map_backup[0]).cast[cstr]) != 0
+        return true
+
+    # Restore only backups created before publication began. This path is
+    # intentionally separate from rollback: if backup creation itself fails,
+    # untouched final files must never be unlinked.
+    def cli_restore_project_backups(sources: darray[CliSource], directory: sview, transaction_id: i64, source_map_path: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        index: mutable i64 = 0
+        while index < sources.count.i64() |sources, directory, transaction_id, index|:
+            final_path: mutable darray[u8] = []
+            cli_output_path_for_sources(&final_path, directory, sources, index)
+            backup_path: mutable darray[u8] = []
+            cli_staged_output_path_for_sources(&backup_path, directory, sources, index, transaction_id)
+            backup_path.count <- backup_path.count - 1.usize()
+            append_view(&backup_path, sview(".backup", 0, -1))
+            backup_path.push(0)
+            if cli_path_exists(backup_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                _ = clang_rename((&backup_path[0]).cast[cstr], (&final_path[0]).cast[cstr])
+            index <- index + 1
+        manifest_final: mutable darray[u8] = []
+        append_view(&manifest_final, directory)
+        append_view(&manifest_final, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(&manifest_final, sview("elisa_project.elisa", 0, -1))
+        manifest_final.push(0)
+        manifest_backup: mutable darray[u8] = []
+        cli_staged_manifest_path(&manifest_backup, directory, transaction_id)
+        manifest_backup.count <- manifest_backup.count - 1.usize()
+        append_view(&manifest_backup, sview(".backup", 0, -1))
+        manifest_backup.push(0)
+        if cli_path_exists(manifest_backup) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            _ = clang_rename((&manifest_backup[0]).cast[cstr], (&manifest_final[0]).cast[cstr])
+        if source_map_path.len > 0:
+            source_map_final: mutable darray[u8] = []
+            append_view(&source_map_final, source_map_path)
+            source_map_final.push(0)
+            source_map_backup: mutable darray[u8] = []
+            cli_source_map_backup_path(&source_map_backup, source_map_path, transaction_id)
+            if cli_path_exists(source_map_backup) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                _ = clang_rename((&source_map_backup[0]).cast[cstr], (&source_map_final[0]).cast[cstr])
+
+    def cli_rollback_project_outputs(sources: darray[CliSource], directory: sview, transaction_id: i64, source_map_path: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        index: mutable i64 = 0
+        while index < sources.count.i64() |sources, directory, transaction_id, index|:
+            final_path: mutable darray[u8] = []
+            cli_output_path_for_sources(&final_path, directory, sources, index)
+            backup_path: mutable darray[u8] = []
+            cli_staged_output_path_for_sources(&backup_path, directory, sources, index, transaction_id)
+            backup_path.count <- backup_path.count - 1.usize()
+            append_view(&backup_path, sview(".backup", 0, -1))
+            backup_path.push(0)
+            cli_unlink_path(final_path) can Unsafe.PointerCast, Console
+            if cli_path_exists(backup_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                _ = clang_rename((&backup_path[0]).cast[cstr], (&final_path[0]).cast[cstr])
+            staged_path: mutable darray[u8] = []
+            cli_staged_output_path_for_sources(&staged_path, directory, sources, index, transaction_id)
+            cli_unlink_path(staged_path) can Unsafe.PointerCast, Console
+            index <- index + 1
+        manifest_final: mutable darray[u8] = []
+        append_view(&manifest_final, directory)
+        append_view(&manifest_final, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(&manifest_final, sview("elisa_project.elisa", 0, -1))
+        manifest_final.push(0)
+        manifest_backup: mutable darray[u8] = []
+        cli_staged_manifest_path(&manifest_backup, directory, transaction_id)
+        manifest_backup.count <- manifest_backup.count - 1.usize()
+        append_view(&manifest_backup, sview(".backup", 0, -1))
+        manifest_backup.push(0)
+        cli_unlink_path(manifest_final) can Unsafe.PointerCast, Console
+        if cli_path_exists(manifest_backup) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+            _ = clang_rename((&manifest_backup[0]).cast[cstr], (&manifest_final[0]).cast[cstr])
+        staged_manifest: mutable darray[u8] = []
+        cli_staged_manifest_path(&staged_manifest, directory, transaction_id)
+        cli_unlink_path(staged_manifest) can Unsafe.PointerCast, Console
+        if source_map_path.len > 0:
+            source_map_final: mutable darray[u8] = []
+            append_view(&source_map_final, source_map_path)
+            source_map_final.push(0)
+            cli_unlink_path(source_map_final) can Unsafe.PointerCast, Console
+            source_map_backup: mutable darray[u8] = []
+            cli_source_map_backup_path(&source_map_backup, source_map_path, transaction_id)
+            if cli_path_exists(source_map_backup) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                _ = clang_rename((&source_map_backup[0]).cast[cstr], (&source_map_final[0]).cast[cstr])
+            source_map_staged: mutable darray[u8] = []
+            cli_staged_source_map_path(&source_map_staged, source_map_path, transaction_id)
+            cli_unlink_path(source_map_staged) can Unsafe.PointerCast, Console
+
+    # Remove only direct module includes from the previous generated manifest.
+    # Runtime/compatibility includes contain slashes and are ignored. A valid
+    # module name is a single relative filename, so a malformed or user-authored
+    # manifest can never turn this into a directory-wide cleanup.
+    def cli_project_manifest_is_generated(contents: darray[u8]) -> bool:
+        header: sview = sview("# Generated by the Elisa C translator.\n", 0, -1)
+        return false if contents.count < header.len.usize()
+        for index in 0..<header.len |contents, header|:
+            return false if contents[index.usize()] != sview_at(header, index)
+        return true
+
+    def cli_project_current_module(sources: darray[CliSource], module_name: darray[u8]) -> bool:
+        wanted: sview = bytes_view(module_name)
+        for index in 0..<sources.count.i64() |sources, module_name, wanted|:
+            current: mutable darray[u8] = []
+            cli_module_name_for_sources(&current, sources, index)
+            return true if sview_eq(bytes_view(current), wanted)
+        return false
+
+    def cli_project_unlink_previous_module(directory: sview, module_name: darray[u8]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        for index in 0..<module_name.count |module_name|:
+            byte: u8 = module_name[index]
+            return if byte == 0 or byte == 47 or byte == 92 or byte == 58
+        return if module_name.count < 6.usize()
+        return if module_name[module_name.count - 6.usize()] != 46 or module_name[module_name.count - 5.usize()] != 101 or module_name[module_name.count - 4.usize()] != 108 or module_name[module_name.count - 3.usize()] != 105 or module_name[module_name.count - 2.usize()] != 115 or module_name[module_name.count - 1.usize()] != 97
+        return if sview_eq(bytes_view(module_name), sview("elisa_project.elisa", 0, -1))
+        path: mutable darray[u8] = []
+        append_view(&path, directory)
+        append_view(&path, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(&path, bytes_view(module_name))
+        path.push(0)
+        has_path: bool = cli_path_exists(path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        cli_unlink_path(path) can Unsafe.PointerCast, Console if has_path
+
+    def cli_remove_obsolete_project_modules(sources: darray[CliSource], directory: sview, contents: darray[u8]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if not cli_project_manifest_is_generated(contents)
+        line_start: mutable usize = 0.usize()
+        while line_start < contents.count |contents, sources, directory, line_start|:
+            line_end: mutable usize = line_start
+            while line_end < contents.count and contents[line_end] != 10:
+                line_end <- line_end + 1.usize()
+            prefix: sview = sview("include \"", 0, -1)
+            if line_end - line_start > prefix.len.usize():
+                matches_prefix: mutable bool = true
+                for offset in 0..<prefix.len |contents, line_start, prefix, matches_prefix|:
+                    matches_prefix <- false if contents[line_start + offset.usize()] != sview_at(prefix, offset)
+                if matches_prefix:
+                    name_start: usize = line_start + prefix.len.usize()
+                    name_end: mutable usize = name_start
+                    while name_end < line_end and contents[name_end] != 34:
+                        name_end <- name_end + 1.usize()
+                    if name_end > name_start and name_end < line_end:
+                        module_name: mutable darray[u8] = []
+                        for offset in name_start..<name_end |contents, module_name|:
+                            module_name.push(contents[offset])
+                        cli_project_unlink_previous_module(directory, module_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if not cli_project_current_module(sources, module_name)
+            line_start <- line_end + 1.usize()
+
+    def cli_publish_project_outputs(sources: darray[CliSource], directory: sview, transaction_id: i64, source_map_path: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        previous_manifest: mutable darray[u8] = []
+        previous_manifest_path: mutable darray[u8] = []
+        append_view(&previous_manifest_path, directory)
+        append_view(&previous_manifest_path, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(&previous_manifest_path, sview("elisa_project.elisa", 0, -1))
+        previous_manifest_path.push(0)
+        previous_manifest_exists: bool = cli_path_exists(previous_manifest_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        previous_manifest <- cli_read_file(previous_manifest_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if previous_manifest_exists
+        if not cli_backup_project_outputs(sources, directory, transaction_id, source_map_path):
+            cli_restore_project_backups(sources, directory, transaction_id, source_map_path)
+            cli_remove_project_staging_files(sources, sources.count.i64(), directory, transaction_id)
+            if source_map_path.len > 0:
+                source_map_staged: mutable darray[u8] = []
+                cli_staged_source_map_path(&source_map_staged, source_map_path, transaction_id)
+                cli_unlink_path(source_map_staged) can Unsafe.PointerCast, Console
+            return false
+        index: mutable i64 = 0
+        while index < sources.count.i64() |sources, directory, transaction_id, index|:
+            staged_path: mutable darray[u8] = []
+            cli_staged_output_path_for_sources(&staged_path, directory, sources, index, transaction_id)
+            final_path: mutable darray[u8] = []
+            cli_output_path_for_sources(&final_path, directory, sources, index)
+            if clang_rename((&staged_path[0]).cast[cstr], (&final_path[0]).cast[cstr]) != 0:
+                cli_rollback_project_outputs(sources, directory, transaction_id, source_map_path)
+                return false
+            index <- index + 1
+        if source_map_path.len > 0:
+            source_map_staged: mutable darray[u8] = []
+            cli_staged_source_map_path(&source_map_staged, source_map_path, transaction_id)
+            source_map_final: mutable darray[u8] = []
+            append_view(&source_map_final, source_map_path)
+            source_map_final.push(0)
+            if clang_rename((&source_map_staged[0]).cast[cstr], (&source_map_final[0]).cast[cstr]) != 0:
+                cli_rollback_project_outputs(sources, directory, transaction_id, source_map_path)
+                return false
+        staged_manifest: mutable darray[u8] = []
+        cli_staged_manifest_path(&staged_manifest, directory, transaction_id)
+        manifest_final: mutable darray[u8] = []
+        append_view(&manifest_final, directory)
+        append_view(&manifest_final, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+        append_view(&manifest_final, sview("elisa_project.elisa", 0, -1))
+        manifest_final.push(0)
+        if clang_rename((&staged_manifest[0]).cast[cstr], (&manifest_final[0]).cast[cstr]) != 0:
+            cli_rollback_project_outputs(sources, directory, transaction_id, source_map_path)
+            return false
+        cli_remove_obsolete_project_modules(sources, directory, previous_manifest) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        index <- 0
+        while index < sources.count.i64() |sources, directory, transaction_id, index|:
+            backup_path: mutable darray[u8] = []
+            cli_staged_output_path_for_sources(&backup_path, directory, sources, index, transaction_id)
+            backup_path.count <- backup_path.count - 1.usize()
+            append_view(&backup_path, sview(".backup", 0, -1))
+            backup_path.push(0)
+            cli_unlink_path(backup_path) can Unsafe.PointerCast, Console
+            index <- index + 1
+        manifest_backup: mutable darray[u8] = []
+        cli_staged_manifest_path(&manifest_backup, directory, transaction_id)
+        manifest_backup.count <- manifest_backup.count - 1.usize()
+        append_view(&manifest_backup, sview(".backup", 0, -1))
+        manifest_backup.push(0)
+        cli_unlink_path(manifest_backup) can Unsafe.PointerCast, Console
+        if source_map_path.len > 0:
+            source_map_backup: mutable darray[u8] = []
+            cli_source_map_backup_path(&source_map_backup, source_map_path, transaction_id)
+            cli_unlink_path(source_map_backup) can Unsafe.PointerCast, Console
+        return true

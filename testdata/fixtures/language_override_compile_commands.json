@@ -1,0 +1,17 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/language_override.c",
+    "arguments": [
+      "clang",
+      "-x",
+      "c++",
+      "-std=gnu++11",
+      "-DTRANSLATOR_LANGUAGE_MARKER=1",
+      "-c",
+      "testdata/fixtures/language_override.c",
+      "-o",
+      "/dev/null"
+    ]
+  }
+]

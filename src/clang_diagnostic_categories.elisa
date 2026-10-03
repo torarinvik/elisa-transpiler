@@ -1,0 +1,6 @@
+extend CTranslator:
+    def typed_diagnostic_semantic_category(kind: sview) -> sview:
+        return sview("expression", 0, -1) if sview_ends_with(kind, sview("Expr", 0, -1)) or sview_ends_with(kind, sview("Operator", 0, -1)) or sview_ends_with(kind, sview("Literal", 0, -1))
+        return sview("statement", 0, -1) if sview_ends_with(kind, sview("Stmt", 0, -1))
+        return sview("declaration", 0, -1) if sview_ends_with(kind, sview("Decl", 0, -1)) or sview_eq(kind, sview("CXXCtorInitializer", 0, -1)) or sview_eq(kind, sview("CXXBaseSpecifier", 0, -1))
+        return sview("frontend", 0, -1)

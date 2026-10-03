@@ -1,0 +1,60 @@
+# Opt-in diagnostic output for semantic readability rewrites.
+extend CTranslator:
+    def cli_emit_rewrite_event_range(source: sview, range_start: i64, range_end: i64, expression_index: i64, rule: sview, decision: sview, detail_name: sview, detail: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("rewrite-event source=", 0, -1))
+        append_view(&output, source)
+        append_view(&output, sview(" range-start=", 0, -1))
+        append_i64(&output, range_start)
+        append_view(&output, sview(" range-end=", 0, -1))
+        append_i64(&output, range_end)
+        append_view(&output, sview(" expression=", 0, -1))
+        append_i64(&output, expression_index)
+        append_view(&output, sview(" rule=", 0, -1))
+        append_view(&output, rule)
+        append_view(&output, sview(" decision=", 0, -1))
+        append_view(&output, decision)
+        append_view(&output, sview(" ", 0, -1))
+        append_view(&output, detail_name)
+        append_view(&output, sview("=", 0, -1))
+        append_view(&output, detail)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
+
+    def cli_emit_rewrite_event_expr[@r](ctx: TypedContext[r]&, expression_index: i64, rule: sview, decision: sview, detail_name: sview, detail: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        source: mutable sview = sview(ctx.source, 0, -1)
+        range_start: mutable i64 = -1
+        range_end: mutable i64 = -1
+        if ctx.source_mapping_enabled and expression_index >= 0 and expression_index < ctx.expr_source_origins.count.i64():
+            origin: TypedIRSourceOrigin[r] = ctx.expr_source_origins[expression_index.usize()]
+            source <- origin.source.file if origin.source.file.len > 0
+            range_start <- origin.source.start_offset
+            range_end <- origin.source.end_offset
+        cli_emit_rewrite_event_range(source, range_start, range_end, expression_index, rule, decision, detail_name, detail) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    # Lowering can eliminate a conditional before it receives a typed-IR
+    # expression index. Use its Clang node directly so that the explanation
+    # still reports the full source range for that applied rewrite.
+    def cli_emit_rewrite_event_node[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], rule: sview, decision: sview, detail_name: sview, detail: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        origin: TypedSourceRange[r] = typed_source_range(node, sview("", 0, 0))
+        source: sview = origin.file if origin.file.len > 0 else sview(ctx.source, 0, -1)
+        cli_emit_rewrite_event_range(source, origin.start_offset, origin.end_offset, -1, rule, decision, detail_name, detail) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def cli_emit_rewrite_stats(source: sview) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("rewrite-stats source=", 0, -1))
+        append_view(&output, source)
+        append_view(&output, sview(" redundant_casts=", 0, -1))
+        append_i64(&output, typed_rewrite_redundant_casts)
+        append_view(&output, sview(" identity_binaries=", 0, -1))
+        append_i64(&output, typed_rewrite_identity_binaries)
+        append_view(&output, sview(" integer_folds=", 0, -1))
+        append_i64(&output, typed_rewrite_integer_folds)
+        append_view(&output, sview(" constant_conditions=", 0, -1))
+        append_i64(&output, typed_rewrite_constant_conditions)
+        append_view(&output, sview(" boolean_predicates=", 0, -1))
+        append_i64(&output, typed_rewrite_boolean_predicates)
+        append_view(&output, sview(" conditional_prunes=", 0, -1))
+        append_i64(&output, typed_rewrite_conditional_prunes)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast

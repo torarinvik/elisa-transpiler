@@ -1,0 +1,30 @@
+include "../src/.compiler_std/elisacore_runtime.elisa"
+include "../src/.compiler_std/elisacore_json.elisa"
+
+module CTranslator:
+    struct ClangTypeViewTestModule:
+        _unused: u8
+
+include "../src/clang_ast_type_info.elisa"
+
+extend CTranslator:
+    def clang_type_view_expect(text: sview, expected_spelling: sview, expected_desugared: sview, expected_alias_id: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        region clang_type_view_test_arena(65536):
+            parsed: JsonParseResult = json_parse_checked(&clang_type_view_test_arena, text)
+            return false if parsed.code != JsonErrorCode.OK
+            root: JsonValueHandle = json_handle_from_result(parsed)
+            actual: ClangTypeView = clang_type_view_of_decl(root)
+            return sview_eq(actual.spelling, expected_spelling) and sview_eq(actual.desugared_spelling, expected_desugared) and sview_eq(actual.type_alias_decl_id, expected_alias_id)
+
+    def run_clang_type_view_checks() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        typedef_use: sview = sview("{\"type\":{\"qualType\":\"Widget *\",\"desugaredQualType\":\"struct Widget *\",\"typeAliasDeclId\":\"0xCAFE\"}}", 0, -1)
+        return 1 if not clang_type_view_expect(typedef_use, sview("Widget *", 0, -1), sview("struct Widget *", 0, -1), sview("0xCAFE", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        plain_type: sview = sview("{\"type\":{\"qualType\":\"unsigned long\"}}", 0, -1)
+        return 2 if not clang_type_view_expect(plain_type, sview("unsigned long", 0, -1), sview("", 0, 0), sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        print("Clang source/desugared type-view checks passed\n")
+        return 0
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    return CTranslator::run_clang_type_view_checks() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

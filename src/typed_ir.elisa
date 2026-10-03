@@ -1,0 +1,585 @@
+extend CTranslator:
+    # -----------------------------------------------------------------------------
+    # Typed lowering IR
+    # -----------------------------------------------------------------------------
+    #
+    # The Clang JSON tree is intentionally not emitted directly. Lowering first
+    # produces these flat, index-based nodes. Indexes keep the IR non-recursive,
+    # which fits Elisa's value model while still allowing arbitrarily nested C
+    # expressions and statements.
+
+    const enum TypedExprKind of i8:
+        Invalid
+        Integer
+        Floating
+        String
+        Character
+        Name
+        Binary
+        Unary
+        ArrayIndex
+        Conditional
+        Member
+        Call
+        Sizeof
+        ObjectSizeRemaining
+        Cast
+        Aggregate
+        Sequence
+        Null
+        Zeroed
+
+    const enum TypedStmtKind of i8:
+        Invalid
+        Block
+        Return
+        Declaration
+        If
+        Expression
+        For
+        While
+        DoWhile
+        Break
+        Continue
+        Goto
+        Label
+        Switch
+        SwitchBreak
+        Null
+
+    const enum TypedBindingKind of i8:
+        External
+        ExternalGlobal
+
+    const enum TypedTranslationMode of i8:
+        Fidelity
+        Idiomatic
+
+    # Readability transforms are deliberately counted at the point where the
+    # typed emitter proves and applies them.  The translator is currently a
+    # single-threaded process and translates one unit at a time, so a small
+    # process-local counter keeps this instrumentation out of every IR row and
+    # avoids making the region-owned TypedContext[r] larger.  The CLI resets the
+    # counters before each unit and may print them with --explain-rewrites.
+    global mutable typed_rewrite_redundant_casts: i64 = 0
+    global mutable typed_rewrite_identity_binaries: i64 = 0
+    global mutable typed_rewrite_integer_folds: i64 = 0
+    global mutable typed_rewrite_constant_conditions: i64 = 0
+    global mutable typed_rewrite_boolean_predicates: i64 = 0
+    global mutable typed_rewrite_conditional_prunes: i64 = 0
+    global mutable typed_rewrite_explanations_enabled: bool = false
+
+    def typed_reset_rewrite_stats(explain: bool) -> void:
+        typed_rewrite_redundant_casts <- 0
+        typed_rewrite_identity_binaries <- 0
+        typed_rewrite_integer_folds <- 0
+        typed_rewrite_constant_conditions <- 0
+        typed_rewrite_boolean_predicates <- 0
+        typed_rewrite_conditional_prunes <- 0
+        typed_rewrite_explanations_enabled <- explain
+
+    # Direct C++ overload calls carry the exact declaration signature selected
+    # by Clang. The low call-mode values remain compatible with existing IR:
+    # 0 is direct, 1 is indirect, and 2 is a project header-inline call. Values
+    # from this base encode a signature index and preserve the inline bit.
+    const TYPED_CALL_SIGNATURE_BASE: i64 = 16
+    const TYPED_CALL_EXTERNAL_BASE: i64 = 1000000
+    const TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR: i64 = 101
+    const TYPED_STMT_AUX_C_DECLARATION_GROUP: i64 = 102
+
+    def typed_call_signature_value(signature_index: i64, header_inline: bool) -> i64:
+        return TYPED_CALL_SIGNATURE_BASE + signature_index * 4 + (2 if header_inline else 0)
+
+    def typed_call_signature_index(call_value: i64) -> i64:
+        return (call_value - TYPED_CALL_SIGNATURE_BASE) / 4 if call_value >= TYPED_CALL_SIGNATURE_BASE and call_value < TYPED_CALL_EXTERNAL_BASE else -1
+
+    def typed_call_external_value(external_index: i64, header_inline: bool) -> i64:
+        return TYPED_CALL_EXTERNAL_BASE + external_index * 4 + (2 if header_inline else 0)
+
+    def typed_call_external_index(call_value: i64) -> i64:
+        return (call_value - TYPED_CALL_EXTERNAL_BASE) / 4 if call_value >= TYPED_CALL_EXTERNAL_BASE else -1
+
+    def typed_call_is_header_inline(call_value: i64) -> bool:
+        return call_value == 2 or (call_value >= TYPED_CALL_SIGNATURE_BASE and (call_value - TYPED_CALL_SIGNATURE_BASE) % 4 == 2)
+
+    # Compound-assignment operator IDs are stored in sequence expressions.
+    # Keep their canonical spellings alongside the shared IR so verifiers and
+    # emitters do not depend on expression-lowering module include order.
+    def typed_compound_assignment_value_id(opcode: sview) -> i64:
+        return 0 if sview_eq(opcode, sview("+=", 0, -1))
+        return 1 if sview_eq(opcode, sview("-=", 0, -1))
+        return 2 if sview_eq(opcode, sview("*=", 0, -1))
+        return 3 if sview_eq(opcode, sview("/=", 0, -1))
+        return 4 if sview_eq(opcode, sview("%=", 0, -1))
+        return 5 if sview_eq(opcode, sview("&=", 0, -1))
+        return 6 if sview_eq(opcode, sview("|=", 0, -1))
+        return 7 if sview_eq(opcode, sview("^=", 0, -1))
+        return 8 if sview_eq(opcode, sview("<<=", 0, -1))
+        return 9 if sview_eq(opcode, sview(">>=", 0, -1))
+        return -1
+
+    def typed_compound_assignment_value_name(operator_id: i64) -> sview:
+        return sview("add", 0, -1) if operator_id == 0
+        return sview("subtract", 0, -1) if operator_id == 1
+        return sview("multiply", 0, -1) if operator_id == 2
+        return sview("divide", 0, -1) if operator_id == 3
+        return sview("remainder", 0, -1) if operator_id == 4
+        return sview("bit_and", 0, -1) if operator_id == 5
+        return sview("bit_or", 0, -1) if operator_id == 6
+        return sview("bit_xor", 0, -1) if operator_id == 7
+        return sview("shift_left", 0, -1) if operator_id == 8
+        return sview("shift_right", 0, -1) if operator_id == 9
+        return sview("invalid", 0, -1)
+
+    def typed_compound_assignment_value_operator(operator_id: i64) -> sview:
+        return sview("+=", 0, -1) if operator_id == 0
+        return sview("-=", 0, -1) if operator_id == 1
+        return sview("*=", 0, -1) if operator_id == 2
+        return sview("/=", 0, -1) if operator_id == 3
+        return sview("%=", 0, -1) if operator_id == 4
+        return sview("&=", 0, -1) if operator_id == 5
+        return sview("|=", 0, -1) if operator_id == 6
+        return sview("^=", 0, -1) if operator_id == 7
+        return sview("<<=", 0, -1) if operator_id == 8
+        return sview(">>=", 0, -1) if operator_id == 9
+        return sview("", 0, 0)
+
+    def typed_binary_assignment_opcode(opcode: sview) -> sview:
+        return sview("+", 0, -1) if sview_eq(opcode, sview("+=", 0, -1))
+        return sview("-", 0, -1) if sview_eq(opcode, sview("-=", 0, -1))
+        return sview("*", 0, -1) if sview_eq(opcode, sview("*=", 0, -1))
+        return sview("/", 0, -1) if sview_eq(opcode, sview("/=", 0, -1))
+        return sview("%", 0, -1) if sview_eq(opcode, sview("%=", 0, -1))
+        return sview("&", 0, -1) if sview_eq(opcode, sview("&=", 0, -1))
+        return sview("|", 0, -1) if sview_eq(opcode, sview("|=", 0, -1))
+        return sview("^", 0, -1) if sview_eq(opcode, sview("^=", 0, -1))
+        return sview("<<", 0, -1) if sview_eq(opcode, sview("<<=", 0, -1))
+        return sview(">>", 0, -1) if sview_eq(opcode, sview(">>=", 0, -1))
+        return sview("", 0, 0)
+
+    struct TypedExpr[@r]:
+        kind: TypedExprKind
+        text: sview @r
+        type_name: sview @r
+        lhs: i64
+        rhs: i64
+        third: i64
+        args_start: i64
+        args_count: i64
+        value: i64
+
+    struct TypedExprWorkItem:
+        index: i64
+        depth: i64
+
+    struct TypedStmt[@r]:
+        kind: TypedStmtKind
+        expr: i64
+        aux: i64
+        aux2: i64
+        children_start: i64
+        children_count: i64
+        name: sview @r
+        type_name: sview @r
+
+    struct TypedParam[@r]:
+        name: sview @r
+        type_name: sview @r
+        is_mutable: bool
+
+    struct TypedNameAlias[@r]:
+        source: sview @r
+        suffix: sview @r
+
+    # A project typedef is kept as a source-level alias until type lowering.
+    # Clang does not attach `desugaredQualType` to every use (notably `memptr *`),
+    # so the translator needs the alias target to recover the ABI shape there.
+    struct TypedTypeAlias[@r]:
+        name: sview @r
+        qualified_name: sview @r
+        target: mutable sview @r
+        canonical_decl_id: sview @r
+        ambiguous: mutable bool
+
+    # A short typedef spelling is not a semantic identity: C++ permits distinct
+    # aliases with the same name in different scopes. Expand only when Clang's
+    # canonical declaration is known and the spelling resolves unambiguously.
+    def typed_type_alias_expandable[@r](alias: TypedTypeAlias[r]) -> bool:
+        return alias.canonical_decl_id.len > 0 and not alias.ambiguous
+
+    def typed_type_alias_identity_conflicts[@r](alias: TypedTypeAlias[r], declaration_id: sview, target: sview) -> bool:
+        return true if alias.canonical_decl_id.len == 0 or declaration_id.len == 0
+        return true if not sview_eq(alias.canonical_decl_id, declaration_id)
+        return alias.target.len > 0 and target.len > 0 and not sview_eq(alias.target, target)
+
+    struct TypedField[@r]:
+        name: sview @r
+        type_name: sview @r
+        is_mutable: bool
+
+    struct TypedRecord[@r]:
+        name: sview @r
+        decl_id: sview @r
+        is_union: bool
+        fields_start: i64
+        fields_count: i64
+        comment: sview @r
+        source_line: i64
+        source_column: i64
+
+    struct TypedRecordLayout:
+        record_index: i64
+        size_bytes: i64
+        alignment_bytes: i64
+        field_offsets_start: i64
+        field_offsets_count: i64
+
+    struct TypedSpecializedType[@r]:
+        source_type: sview @r
+        emitted_name: sview @r
+        declaration_id: sview @r
+
+    struct TypedEnumConst[@r]:
+        name: sview @r
+        enum_name: sview @r
+        value: i64
+
+    struct TypedEnum[@r]:
+        name: sview @r
+        underlying_type: sview @r
+        storage_type: sview @r
+
+    struct TypedExtern[@r]:
+        name: sview @r
+        link_name: sview @r
+        declaration_id: sview @r
+        return_type: sview @r
+        result_type: sview @r
+        params_start: i64
+        params_count: i64
+        variadic: bool
+
+    # Keep the declaration signature alongside the name. A C++ header can
+    # provide an inline overload while the source also calls a different
+    # external overload (for example floor(float) and floor(double)). A name
+    # only set is not enough to decide whether an ABI binding is redundant.
+    struct TypedUserFunctionSignature[@r]:
+        name: sview @r
+        type_name: sview @r
+        result_type: sview @r
+        declaration_id: sview @r
+        function_index: i64
+        params_count: i64
+        variadic: bool
+
+    struct TypedExternGlobal[@r]:
+        name: sview @r
+        link_name: sview @r
+        type_name: sview @r
+        is_mutable: bool
+
+    struct TypedLabel[@r]:
+        id: sview @r
+        node: JsonValueHandle[r]
+
+    struct TypedGlobal[@r]:
+        name: sview @r
+        type_name: sview @r
+        comment: sview @r
+        declaration_id: sview @r
+        initializer: i64
+        # Source-level object mutability is distinct from pointee capability.
+        # C `const T *p` remains mutable here; C `T * const p` does not.
+        is_mutable: bool
+        # A direct initializer is emitted in the global declaration. False
+        # means the value must be assigned by the runtime initializer.
+        initializer_is_direct: bool
+        identity_hash: i64
+        project_private: bool
+
+    struct TypedSwitchCase:
+        value: i64
+        body: i64
+        is_default: bool
+        is_constant: bool
+        constant_value: i64
+
+    struct TypedFunction[@r]:
+        name: sview @r
+        declaration_id: sview @r
+        # The native ABI spelling used when project mode exposes this function to
+        # another object. Empty means the definition has translation-unit-local
+        # linkage (static/header-inline) or is otherwise not exportable.
+        link_name: sview @r
+        return_type: sview @r
+        comment: sview @r
+        params_start: i64
+        params_count: i64
+        body: i64
+        label_count: i64
+        # C `static` functions have translation-unit-local identity even
+        # though project output places all translated units in one Elisa scope.
+        internal_linkage: bool
+        variadic: bool
+        has_global_effect: bool
+        has_unsafe_effect: bool
+        has_goto: bool
+
+    # Project-mode emission is textual: the manifest includes each translated
+    # source in one Elisa scope. Keep a small persistent ownership table so
+    # declarations discovered through shared headers are emitted once across
+    # the whole project, while overloads remain distinct by arity.
+    struct TypedProjectSymbol:
+        name: sview
+        arity: i64
+        variadic: bool
+
+    struct TypedProjectDeclaration:
+        link_name: sview
+        signature: sview
+
+    struct TypedProjectField:
+        record_name: sview
+        field_name: sview
+        type_name: sview
+
+    struct TypedProjectState:
+        # The headers stay at this stable process-global address, while the
+        # backing buffers are allocated from translator_project_arena so they
+        # survive destruction of each translation-unit region. Dynamic tables
+        # keep zero-initialized state valid despite their non-nullable views.
+        types: mutable darray[TypedProjectSymbol]
+        types_count: mutable i64
+        functions: mutable darray[TypedProjectSymbol]
+        functions_count: mutable i64
+        externs: mutable darray[TypedProjectSymbol]
+        externs_count: mutable i64
+        external_declarations: mutable darray[TypedProjectDeclaration]
+        external_declarations_count: mutable i64
+        external_object_definitions: mutable darray[TypedProjectSymbol]
+        external_object_definitions_count: mutable i64
+        external_globals: mutable darray[TypedProjectSymbol]
+        external_globals_count: mutable i64
+        globals: mutable darray[TypedProjectSymbol]
+        globals_count: mutable i64
+        fields: mutable darray[TypedProjectField]
+        fields_count: mutable i64
+
+    # The command-line project path processes translation units sequentially.
+    # Keep the state at a stable address so loop captures cannot copy darray
+    # headers while their backing buffers are growing.
+    global mutable translator_project_state: TypedProjectState = zeroed
+    # Keep project-table backing storage in an explicit arena: the translator
+    # destroys a shorter-lived region after each input translation unit.
+    global mutable translator_project_arena: Arena = zeroed
+
+    const enum TypedFlowTermKind of i8:
+        Open
+        Jump
+        Branch
+        Switch
+        Return
+        Stop
+
+    struct TypedFlowBlock[@r]:
+        term_type: mutable sview @r
+        statements_count: mutable i64
+        term_expr: mutable i64
+        target: mutable i64
+        true_target: mutable i64
+        false_target: mutable i64
+        switch_start: mutable i64
+        switch_count: mutable i64
+        term_kind: mutable TypedFlowTermKind
+        target_is_label: mutable bool
+
+    struct TypedFlowSwitchTarget:
+        case_index: i64
+        target: mutable i64
+
+    struct TypedFlowStatement:
+        block: i64
+        statement: i64
+
+    struct TypedFlowBuilder[@r]:
+        blocks: mutable darray[TypedFlowBlock[r]] @r
+        statements: mutable darray[TypedFlowStatement] @r
+        label_blocks: mutable darray[i64] @r
+        declarations: mutable darray[i64] @r
+        switch_targets: mutable darray[TypedFlowSwitchTarget] @r
+        break_targets: mutable darray[i64] @r
+        continue_targets: mutable darray[i64] @r
+        state_name: sview @r
+        current: mutable i64
+
+    struct TypedDiagnostic:
+        category: sview
+        kind: sview
+        subject_type: sview
+        required_capability: sview
+        source: sview
+        canonical_source: sview
+        spelling_source: sview
+        spelling_canonical_source: sview
+        spelling_included_from: sview
+        spelling_included_from_canonical: sview
+        expansion_source: sview
+        expansion_canonical_source: sview
+        expansion_included_from: sview
+        expansion_included_from_canonical: sview
+        range_start_offset: i64
+        range_end_offset: i64
+        line: i64
+        column: i64
+        spelling_line: i64
+        spelling_column: i64
+        expansion_line: i64
+        expansion_column: i64
+
+    struct TypedDeclInfo[@r]:
+        id: sview @r
+        is_canonical: bool
+        has_previous: bool
+        is_user: bool
+        is_extern: bool
+        cpp_iterator_map_type: mutable sview @r
+        cpp_iterator_decl_name: mutable sview @r
+        cpp_iterator_decl_line: mutable i64
+
+    # Translation-unit-local Clang declaration lookup. The JSON AST arena owns
+    # all views and JsonValueHandle[r] payloads here, so this index must not escape the
+    # current translation call.
+    struct TypedDeclIndexSlot[@r]:
+        id: sview @r
+        previous_id: sview @r
+        canonical_id: mutable sview @r
+        declaration: JsonValueHandle[r]
+        complete_record: mutable JsonValueHandle[r]
+
+    struct ClangTargetABI:
+        char_bits: i64
+        short_bits: i64
+        int_bits: i64
+        long_bits: i64
+        long_long_bits: i64
+        float_bytes: i64
+        double_bytes: i64
+        long_double_bytes: i64
+        pointer_bits: i64
+        size_type_bits: i64
+        char_unsigned: bool
+        # `-fshort-enums` is a semantic ABI option that Clang does not expose
+        # in the JSON EnumDecl node. Keep it beside target widths so enum
+        # collection can select compatible integer storage.
+        short_enums: bool
+        valid: bool
+
+    struct TypedContext[@r]:
+        exprs: mutable darray[TypedExpr[r]] @r
+        expr_source_origins: mutable darray[TypedIRSourceOrigin[r]] @r
+        expr_children: mutable darray[i64] @r
+        # Reused generation stamps for expression-level emission facts. Many
+        # statement emitters query one expression at a time; a context-owned
+        # scratch array avoids allocating a whole-translation-unit visited set
+        # for every statement.
+        effect_expr_seen: mutable darray[i64] @r
+        effect_expr_pending: mutable darray[i64] @r
+        effect_expr_generation: mutable i64
+        stmts: mutable darray[TypedStmt[r]] @r
+        stmt_source_origins: mutable darray[TypedIRSourceOrigin[r]] @r
+        generated_source_spans: mutable darray[TypedGeneratedSourceSpan[r]] @r
+        stmt_children: mutable darray[i64] @r
+        params: mutable darray[TypedParam[r]] @r
+        current_name_aliases: mutable darray[TypedNameAlias[r]] @r
+        type_aliases: mutable darray[TypedTypeAlias[r]] @r
+        current_declared_names: mutable darray[sview @r] @r
+        # Stack of declaration counts at lexical output-scope entry. This
+        # distinguishes a same-scope replayed declaration from a legal nested
+        # C shadow that needs a distinct Elisa spelling.
+        current_declared_scope_starts: mutable darray[usize] @r
+        current_nonnull_names: mutable darray[sview @r] @r
+        current_nonnull_exprs: mutable darray[i64] @r
+        extern_params: mutable darray[TypedParam[r]] @r
+        globals: mutable darray[TypedGlobal[r]] @r
+        functions: mutable darray[TypedFunction[r]] @r
+        user_function_names: mutable darray[sview @r] @r
+        user_function_signatures: mutable darray[TypedUserFunctionSignature[r]] @r
+        externs: mutable darray[TypedExtern[r]] @r
+        extern_globals: mutable darray[TypedExternGlobal[r]] @r
+        fields: mutable darray[TypedField[r]] @r
+        records: mutable darray[TypedRecord[r]] @r
+        record_layouts: mutable darray[TypedRecordLayout] @r
+        record_layout_field_offsets: mutable darray[i64] @r
+        specialized_types: mutable darray[TypedSpecializedType[r]] @r
+        # Names of records whose Clang declaration carries packed ABI metadata.
+        # This is intentionally a side table: it avoids changing the compact
+        # TypedRecord[r] row used by the many declaration and project passes.
+        packed_record_names: mutable darray[sview @r] @r
+        layout_unsupported_record_names: mutable darray[sview @r] @r
+        enums: mutable darray[TypedEnum[r]] @r
+        enum_consts: mutable darray[TypedEnumConst[r]] @r
+        labels: mutable darray[TypedLabel[r]] @r
+        switch_cases: mutable darray[TypedSwitchCase] @r
+        decl_infos: mutable darray[TypedDeclInfo[r]] @r
+        declaration_index: mutable darray[TypedDeclIndexSlot[r]] @r
+        declaration_index_count: mutable i64
+        break_scopes: mutable darray[i8] @r
+        switch_depth: mutable i64
+        current_for_increment: mutable i64
+        current_return_type: mutable sview @r
+        current_function_name: mutable sview @r
+        current_has_goto: mutable bool
+        current_emit_has_goto: mutable bool
+        current_structured_break_label: mutable i64
+        current_emit_goto_name: mutable sview @r
+        current_switch_done_name: mutable sview @r
+        current_switch_done_index: mutable i64
+        current_function_body: mutable i64
+        current_trusted_depth: mutable i64
+        needs_cpp_unordered_map: mutable bool
+        source_mapping_enabled: bool
+        project_mode: bool
+        initializer_name: sview @r
+        mode: TypedTranslationMode
+        target_abi: ClangTargetABI
+        source_language_is_cxx: bool
+        source: cstr
+        source_working_directory: sview @r
+        canonical_source: sview @r
+        # Lazy monotonic byte-offset cursor used only when Clang elides a
+        # diagnostic line number, avoiding repeated scans of source prefixes.
+        diagnostic_line_scan_path: mutable sview @r
+        diagnostic_line_scan_offset: mutable i64
+        diagnostic_line_scan_number: mutable i64
+        diagnostic_line_scan_previous_cr: mutable bool
+        root: mutable JsonValueHandle[r]
+        diagnostics: mutable darray[TypedDiagnostic] @r
+
+    def typed_call_selected_function_index[@r](ctx: TypedContext[r]&, call_value: i64) -> i64:
+        signature_index: i64 = typed_call_signature_index(call_value)
+        return -1 if signature_index < 0 or signature_index >= ctx.user_function_signatures.count.i64()
+        signature: TypedUserFunctionSignature[r] = ctx.user_function_signatures[signature_index.usize()]
+        function_index: i64 = signature.function_index
+        return -1 if function_index < 0 or function_index >= ctx.functions.count.i64() or signature.declaration_id.len == 0
+        function: TypedFunction[r] = ctx.functions[function_index.usize()]
+        return function_index if sview_eq(function.declaration_id, signature.declaration_id)
+        return -1
+
+    struct TypedTranslation[@r]:
+        output: mutable darray[u8] @r
+        source_map: mutable darray[TypedGeneratedSourceSpan[r]] @r
+        typed_ir_dump: mutable darray[u8] @r
+        diagnostics: mutable darray[TypedDiagnostic] @r
+        ast_json_values: mutable i64
+        ast_arena_used_bytes: mutable usize
+        needs_cpp_unordered_map: mutable bool
+        needs_runtime_nonnull: mutable bool
+        needs_runtime_readonly_nonnull: mutable bool
+        needs_runtime_varargs: mutable bool
+        failed: mutable bool
+        frontend_json_value_limit_exceeded: mutable bool
+    def typed_number[@r](value: JsonValueHandle[r]) -> i64:
+        number: f64 = try json_handle_as_number(value) else 0.0
+        return number.i64()
+    def ast_bool[@r](value: JsonValueHandle[r]) -> bool:
+        return try json_handle_as_bool(value) else false

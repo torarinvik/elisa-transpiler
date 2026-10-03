@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/clang_failure.c",
+    "command": "clang -std=c11 -c testdata/fixtures/clang_failure.c -o /dev/null"
+  }
+]

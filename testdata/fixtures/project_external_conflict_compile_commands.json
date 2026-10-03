@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_external_declarations/conflict_int.c","command":"clang -std=c11 -c testdata/fixtures/project_external_declarations/conflict_int.c"},
+  {"directory":".","file":"testdata/fixtures/project_external_declarations/conflict_long.c","command":"clang -std=c11 -c testdata/fixtures/project_external_declarations/conflict_long.c"}
+]

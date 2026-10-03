@@ -1,0 +1,22 @@
+include "../src/.compiler_std/elisacore_runtime.elisa"
+
+module CTranslator:
+    struct ClangDiagnosticCategoriesTestModule:
+        _unused: u8
+
+include "../src/clang_diagnostic_categories.elisa"
+
+extend CTranslator:
+    def run_clang_diagnostic_category_checks() -> i32 can[Console]:
+        return 1 if not sview_eq(typed_diagnostic_semantic_category(sview("BinaryOperator", 0, -1)), sview("expression", 0, -1))
+        return 2 if not sview_eq(typed_diagnostic_semantic_category(sview("ConditionalOperator", 0, -1)), sview("expression", 0, -1))
+        return 3 if not sview_eq(typed_diagnostic_semantic_category(sview("GotoStmt", 0, -1)), sview("statement", 0, -1))
+        return 4 if not sview_eq(typed_diagnostic_semantic_category(sview("VarDecl", 0, -1)), sview("declaration", 0, -1))
+        return 5 if not sview_eq(typed_diagnostic_semantic_category(sview("CXXCtorInitializer", 0, -1)), sview("declaration", 0, -1))
+        return 6 if not sview_eq(typed_diagnostic_semantic_category(sview("CXXBaseSpecifier", 0, -1)), sview("declaration", 0, -1))
+        return 7 if not sview_eq(typed_diagnostic_semantic_category(sview("OpaqueFrontendNode", 0, -1)), sview("frontend", 0, -1))
+        print("Clang diagnostic semantic-category checks passed\n")
+        return 0
+
+def main() -> i32 can[Console]:
+    return CTranslator::run_clang_diagnostic_category_checks() can Console

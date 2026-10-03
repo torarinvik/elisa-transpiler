@@ -1,0 +1,220 @@
+extend CTranslator:
+    struct ClangTypePointerGroup:
+        open: i64
+        close: i64
+        is_function_pointer: bool
+        is_pointer_to_array: bool
+
+    # A compact structural view of Clang's printed type grammar. This is not a
+    # replacement for Clang's canonical type graph: it records only the
+    # declarator facts the current lowering needs, while keeping nested
+    # template arguments and function parameters out of the outer type.
+    struct ClangTypeSpellingShape:
+        pointer_count: i64
+        first_pointer_operator: i64
+        pointer_group_open: i64
+        pointer_group_close: i64
+        has_template_arguments: bool
+        is_function_pointer: bool
+        is_pointer_to_array: bool
+        delimiters_balanced: bool
+
+    def clang_type_identifier_byte(byte: i64) -> bool:
+        return (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 95
+
+    def clang_type_pointer_group_qualifier(token: sview) -> bool:
+        return sview_eq(token, sview("const", 0, -1)) or sview_eq(token, sview("volatile", 0, -1)) or sview_eq(token, sview("restrict", 0, -1)) or sview_eq(token, sview("__restrict", 0, -1)) or sview_eq(token, sview("__restrict__", 0, -1)) or sview_eq(token, sview("_Atomic", 0, -1))
+
+    def clang_type_pointer_group(qual_type: sview) -> ClangTypePointerGroup:
+        template_depth: mutable i64 = 0
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        cursor: mutable i64 = 0
+        while cursor < qual_type.len |qual_type, template_depth, paren_depth, bracket_depth, cursor|:
+            byte: i64 = string_view_index(qual_type, cursor)
+            if byte == 60 and (template_depth > 0 or (paren_depth == 0 and bracket_depth == 0)):
+                template_depth <- template_depth + 1
+                cursor <- cursor + 1
+                continue
+            if byte == 62 and template_depth > 0 and paren_depth == 0 and bracket_depth == 0:
+                template_depth <- template_depth - 1
+                cursor <- cursor + 1
+                continue
+            if byte == 40 and template_depth == 0 and paren_depth == 0 and bracket_depth == 0:
+                open: i64 = cursor
+                probe: mutable i64 = cursor + 1
+                while probe < qual_type.len and (string_view_index(qual_type, probe) == 32 or string_view_index(qual_type, probe) == 9) |qual_type, probe|:
+                    probe <- probe + 1
+                pointer_count: mutable i64 = 0
+                valid_group: mutable bool = true
+                while probe < qual_type.len |qual_type, probe, pointer_count, valid_group|:
+                    while probe < qual_type.len and (string_view_index(qual_type, probe) == 32 or string_view_index(qual_type, probe) == 9) |qual_type, probe|:
+                        probe <- probe + 1
+                    break if probe >= qual_type.len
+                    token_byte: i64 = string_view_index(qual_type, probe)
+                    if token_byte == 42:
+                        pointer_count <- pointer_count + 1
+                        probe <- probe + 1
+                        continue
+                    if clang_type_identifier_byte(token_byte):
+                        token_start: i64 = probe
+                        probe <- probe + 1
+                        while probe < qual_type.len and clang_type_identifier_byte(string_view_index(qual_type, probe)) |qual_type, probe|:
+                            probe <- probe + 1
+                        valid_group <- false if not clang_type_pointer_group_qualifier(string_view_prefix(string_view_suffix(qual_type, token_start), probe - token_start))
+                        break if not valid_group
+                        continue
+                    break
+                if valid_group and pointer_count > 0 and probe < qual_type.len and string_view_index(qual_type, probe) == 41:
+                    close: i64 = probe
+                    follower: mutable i64 = close + 1
+                    while follower < qual_type.len and (string_view_index(qual_type, follower) == 32 or string_view_index(qual_type, follower) == 9) |qual_type, follower|:
+                        follower <- follower + 1
+                    if follower < qual_type.len:
+                        next: i64 = string_view_index(qual_type, follower)
+                        if next == 40 or next == 91:
+                            return ClangTypePointerGroup{open: open, close: close, is_function_pointer: next == 40, is_pointer_to_array: next == 91}
+                paren_depth <- paren_depth + 1
+                cursor <- cursor + 1
+                continue
+            if byte == 40:
+                paren_depth <- paren_depth + 1
+            elif byte == 41 and paren_depth > 0:
+                paren_depth <- paren_depth - 1
+            elif byte == 91:
+                bracket_depth <- bracket_depth + 1
+            elif byte == 93 and bracket_depth > 0:
+                bracket_depth <- bracket_depth - 1
+            cursor <- cursor + 1
+        return ClangTypePointerGroup{open: -1, close: -1, is_function_pointer: false, is_pointer_to_array: false}
+
+    def clang_type_spelling_shape(qual_type: sview) -> ClangTypeSpellingShape:
+        pointer_group: ClangTypePointerGroup = clang_type_pointer_group(qual_type)
+        pointer_group_open: i64 = pointer_group.open
+        pointer_group_close: i64 = pointer_group.close
+        pointer_count: mutable i64 = 0
+        first_pointer_operator: mutable i64 = -1
+        template_depth: mutable i64 = 0
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        has_template_arguments: mutable bool = false
+        delimiters_balanced: mutable bool = true
+
+        for cursor in 0..<qual_type.len |qual_type, pointer_group_open, pointer_group_close, pointer_count, template_depth, paren_depth, bracket_depth, has_template_arguments, delimiters_balanced|:
+            byte: i64 = string_view_index(qual_type, cursor)
+            if byte == 60 and (template_depth > 0 or (paren_depth == 0 and bracket_depth == 0)):
+                template_depth <- template_depth + 1
+                has_template_arguments <- true
+                continue
+            if byte == 62 and template_depth > 0 and paren_depth == 0 and bracket_depth == 0:
+                template_depth <- template_depth - 1
+                continue
+            if byte == 40:
+                paren_depth <- paren_depth + 1
+                continue
+            if byte == 41:
+                delimiters_balanced <- false if paren_depth == 0
+                paren_depth <- paren_depth - 1 if paren_depth > 0
+                continue
+            if byte == 91:
+                bracket_depth <- bracket_depth + 1
+                continue
+            if byte == 93:
+                delimiters_balanced <- false if bracket_depth == 0
+                bracket_depth <- bracket_depth - 1 if bracket_depth > 0
+                continue
+            continue if byte != 42 or template_depth > 0 or bracket_depth > 0
+            # Top-level stars are the outer type's pointer layers. The one
+            # parenthesized declarator group is also part of the outer type;
+            # stars in callback parameters and nested template arguments are
+            # not.
+            is_outer_declarator: bool = paren_depth == 0 or (pointer_group_open >= 0 and cursor > pointer_group_open and cursor < pointer_group_close)
+            if is_outer_declarator:
+                first_pointer_operator <- cursor if first_pointer_operator < 0
+                pointer_count <- pointer_count + 1
+
+        delimiters_balanced <- false if template_depth != 0 or paren_depth != 0 or bracket_depth != 0
+        return ClangTypeSpellingShape{
+            pointer_count: pointer_count,
+            first_pointer_operator: first_pointer_operator,
+            pointer_group_open: pointer_group_open,
+            pointer_group_close: pointer_group_close,
+            has_template_arguments: has_template_arguments,
+            is_function_pointer: pointer_group.is_function_pointer,
+            is_pointer_to_array: pointer_group.is_pointer_to_array,
+            delimiters_balanced: delimiters_balanced
+        }
+
+    def clang_type_pointer_base(qual_type: sview) -> sview:
+        shape: ClangTypeSpellingShape = clang_type_spelling_shape(qual_type)
+        return string_view_prefix(qual_type, shape.first_pointer_operator) if shape.first_pointer_operator >= 0 else qual_type
+
+    # Return the qualifier bitset attached to one pointer layer. Clang places
+    # base/pointee qualifiers before the first star and pointer-slot
+    # qualifiers after their star; nested template and function-parameter
+    # tokens must not leak into either layer.
+    def clang_type_pointer_qualifiers_at_depth(qual_type: sview, shape: ClangTypeSpellingShape, wanted_depth: i64) -> i64:
+        depth: mutable i64 = 0
+        mask: mutable i64 = 0
+        saw_const: mutable bool = false
+        saw_volatile: mutable bool = false
+        saw_restrict: mutable bool = false
+        saw_atomic: mutable bool = false
+        template_depth: mutable i64 = 0
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        cursor: mutable i64 = 0
+
+        while cursor < qual_type.len |qual_type, shape, wanted_depth, depth, mask, saw_const, saw_volatile, saw_restrict, saw_atomic, template_depth, paren_depth, bracket_depth, cursor|:
+            byte: i64 = string_view_index(qual_type, cursor)
+            if byte == 60 and (template_depth > 0 or (paren_depth == 0 and bracket_depth == 0)):
+                template_depth <- template_depth + 1
+                cursor <- cursor + 1
+                continue
+            if byte == 62 and template_depth > 0 and paren_depth == 0 and bracket_depth == 0:
+                template_depth <- template_depth - 1
+                cursor <- cursor + 1
+                continue
+            if byte == 40:
+                paren_depth <- paren_depth + 1
+                cursor <- cursor + 1
+                continue
+            if byte == 41:
+                paren_depth <- paren_depth - 1 if paren_depth > 0
+                cursor <- cursor + 1
+                continue
+            if byte == 91:
+                bracket_depth <- bracket_depth + 1
+                cursor <- cursor + 1
+                continue
+            if byte == 93:
+                bracket_depth <- bracket_depth - 1 if bracket_depth > 0
+                cursor <- cursor + 1
+                continue
+
+            in_pointer_group: bool = shape.pointer_group_open >= 0 and cursor > shape.pointer_group_open and cursor < shape.pointer_group_close
+            active_declarator: bool = template_depth == 0 and ((paren_depth == 0 and bracket_depth == 0) or in_pointer_group)
+            if byte == 42:
+                depth <- depth + 1 if active_declarator
+                cursor <- cursor + 1
+                continue
+            if not active_declarator or not clang_type_identifier_byte(byte):
+                cursor <- cursor + 1
+                continue
+
+            start: i64 = cursor
+            cursor <- cursor + 1
+            while cursor < qual_type.len and clang_type_identifier_byte(string_view_index(qual_type, cursor)) |qual_type, cursor|:
+                cursor <- cursor + 1
+            continue if depth != wanted_depth
+            token: sview = string_view_prefix(string_view_suffix(qual_type, start), cursor - start)
+            saw_const <- true if sview_eq(token, sview("const", 0, -1))
+            saw_volatile <- true if sview_eq(token, sview("volatile", 0, -1))
+            saw_restrict <- true if sview_eq(token, sview("restrict", 0, -1)) or sview_eq(token, sview("__restrict", 0, -1)) or sview_eq(token, sview("__restrict__", 0, -1))
+            saw_atomic <- true if sview_eq(token, sview("_Atomic", 0, -1))
+
+        mask <- mask + 1 if saw_const
+        mask <- mask + 2 if saw_volatile
+        mask <- mask + 4 if saw_restrict
+        mask <- mask + 8 if saw_atomic
+        return mask

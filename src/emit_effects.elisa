@@ -1,190 +1,305 @@
 extend CTranslator:
-    def typed_expr_reads_global(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_reads_global_with_seen[@r](ctx: TypedContext[r]&, index: i64, seen: mutable darray[i64]&, generation: i64, pending: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        if expression.kind == TypedExprKind.Name:
-            return typed_global_index(ctx, expression.text) >= 0 or typed_external_global_index(ctx, expression.text) >= 0
-        return true if typed_expr_reads_global(ctx, expression.lhs)
-        return true if typed_expr_reads_global(ctx, expression.rhs)
-        return true if typed_expr_reads_global(ctx, expression.third)
-        if expression.args_count > 0:
-            for offset in 0..<expression.args_count |ctx, expression|:
-                return true if typed_expr_reads_global(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        pending.push(index)
+        while pending.count > 0.usize() |ctx, pending, seen|:
+            current: i64 = pending[pending.count - 1.usize()]
+            _ = pending.pop()
+            continue if current < 0 or current >= ctx.exprs.count.i64() or seen[current.usize()] == generation
+            seen[current.usize()] <- generation
+            expression: TypedExpr[r] = typed_expr_at(ctx, current)
+            if expression.kind == TypedExprKind.Name:
+                return true if typed_global_index(ctx, expression.text) >= 0 or typed_external_global_index(ctx, expression.text) >= 0
+            pending.push(expression.lhs) if expression.lhs >= 0
+            pending.push(expression.rhs) if expression.rhs >= 0
+            pending.push(expression.third) if expression.third >= 0
+            if expression.args_count > 0 and expression.args_start >= 0:
+                for offset in 0..<expression.args_count |ctx, expression, pending|:
+                    child_index: i64 = expression.args_start + offset
+                    if child_index >= 0 and child_index < ctx.expr_children.count.i64():
+                        pending.push(ctx.expr_children[child_index.usize()])
         return false
-
-    def typed_stmt_reads_global(ctx: TypedContext&, index: i64) -> bool:
+    def typed_stmt_reads_global_with_seen[@r](ctx: TypedContext[r]&, index: i64, seen: mutable darray[i64]&, generation: mutable i64&, pending: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if typed_expr_reads_global(ctx, statement.expr)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+        if statement.expr >= 0 and statement.expr < ctx.exprs.count.i64():
+            generation <- generation + 1
+            return true if typed_expr_reads_global_with_seen(ctx, statement.expr, seen, generation, pending)
         if statement.kind == TypedStmtKind.Block:
-            for offset in 0..<statement.children_count |ctx, statement|:
-                return true if typed_stmt_reads_global(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+            for offset in 0..<statement.children_count |ctx, statement, seen, generation, pending|:
+                return true if typed_stmt_reads_global_with_seen(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], seen, generation, pending)
         elif statement.kind == TypedStmtKind.If:
-            return true if typed_stmt_reads_global(ctx, statement.aux)
-            return typed_stmt_reads_global(ctx, statement.aux2)
+            return true if typed_stmt_reads_global_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_reads_global_with_seen(ctx, statement.aux2, seen, generation, pending)
         elif statement.kind == TypedStmtKind.For:
-            return true if typed_stmt_reads_global(ctx, statement.children_start)
-            return true if typed_stmt_reads_global(ctx, statement.aux)
-            return typed_stmt_reads_global(ctx, statement.aux2)
+            return true if typed_stmt_reads_global_with_seen(ctx, statement.children_start, seen, generation, pending)
+            return true if typed_stmt_reads_global_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_reads_global_with_seen(ctx, statement.aux2, seen, generation, pending)
         elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
-            return typed_stmt_reads_global(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
+            return typed_stmt_reads_global_with_seen(ctx, statement.expr, seen, generation, pending) if statement.kind == TypedStmtKind.Label
+            return true if typed_stmt_reads_global_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_reads_global_with_seen(ctx, statement.aux2, seen, generation, pending) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
         elif statement.kind == TypedStmtKind.Switch:
-            for offset in 0..<statement.children_count |ctx, statement|:
+            for offset in 0..<statement.children_count |ctx, statement, seen, generation, pending|:
                 switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-                return true if typed_stmt_reads_global(ctx, switch_case.body)
+                return true if typed_stmt_reads_global_with_seen(ctx, switch_case.body, seen, generation, pending)
         return false
-
-    def typed_function_needs_global(ctx: TypedContext&, function: TypedFunction) -> bool:
-        return typed_function_needs_global_depth(ctx, function, 8)
-
-    def typed_function_needs_global_depth(ctx: TypedContext&, function: TypedFunction, depth: i64) -> bool:
+    def typed_stmt_reads_global[@r](ctx: TypedContext[r]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        seen: mutable darray[i64] = []
+        for expression_index in 0..<ctx.exprs.count |seen|:
+            seen.push(0)
+        generation: mutable i64 = 0
+        pending: mutable darray[i64] = []
+        return typed_stmt_reads_global_with_seen(ctx, index, seen, generation, pending) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_function_needs_global[@r](ctx: TypedContext[r]&, function: TypedFunction[r]) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return typed_function_needs_global_depth(ctx, function, 8) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_function_needs_global_depth[@r](ctx: TypedContext[r]&, function: TypedFunction[r], depth: i64) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
         return true if function.has_global_effect or typed_stmt_reads_global(ctx, function.body)
         return false if depth <= 0
-        return typed_stmt_calls_global_depth(ctx, function.body, depth - 1)
+        seen_depth: mutable darray[i64] = []
+        seen_function_depth: mutable darray[i64] = []
+        for expression_index in 0..<ctx.exprs.count |seen_depth|:
+            seen_depth.push(-1)
+        for function_index in 0..<ctx.functions.count |function, seen_function_depth|:
+            candidate: TypedFunction[r] = ctx.functions[function_index.usize()]
+            initial_depth: i64 = depth if candidate.body == function.body and sview_eq(candidate.name, function.name) else -1
+            seen_function_depth.push(initial_depth)
+        return typed_stmt_calls_global_depth_with_seen(ctx, function.body, depth - 1, seen_depth, seen_function_depth) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
 
     def typed_type_uses_pointer(type_name: sview) -> bool:
         return sview_find_byte(type_name, 42) >= 0 or c_type_is_function_pointer(type_name)
-
-    def typed_expr_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_needs_unsafe_with_seen[@r](ctx: TypedContext[r]&, index: i64, seen: mutable darray[i64]&, generation: i64, pending: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        # Merely carrying a nullable pointer value is not an unsafe operation:
-        # C code routinely compares or forwards it without dereferencing it.
-        # Mark the actual reference/ABI boundaries instead. This keeps null
-        # guards and pointer arguments outside trusted regions while retaining
-        # the unsafe effect for pointer-returning calls.
-        return true if typed_type_uses_pointer(expression.type_name) and (expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Call)
-        return true if expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Member
-        return true if expression.kind == TypedExprKind.Unary and (sview_eq(expression.text, sview("&", 0, -1)) or sview_eq(expression.text, sview("*", 0, -1)))
-        return true if typed_expr_needs_unsafe(ctx, expression.lhs)
-        return true if typed_expr_needs_unsafe(ctx, expression.rhs)
-        return true if typed_expr_needs_unsafe(ctx, expression.third)
-        if expression.args_count > 0:
-            for offset in 0..<expression.args_count |ctx, expression|:
-                return true if typed_expr_needs_unsafe(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        pending.push(index)
+        while pending.count > 0.usize() |ctx, pending, seen|:
+            current: i64 = pending[pending.count - 1.usize()]
+            _ = pending.pop()
+            continue if current < 0 or current >= ctx.exprs.count.i64() or seen[current.usize()] == generation
+            seen[current.usize()] <- generation
+            expression: TypedExpr[r] = typed_expr_at(ctx, current)
+            return true if typed_type_uses_pointer(expression.type_name) and (expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Call)
+            return true if expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Member
+            return true if expression.kind == TypedExprKind.Unary and (sview_eq(expression.text, sview("&", 0, -1)) or sview_eq(expression.text, sview("*", 0, -1)))
+            pending.push(expression.lhs) if expression.lhs >= 0
+            pending.push(expression.rhs) if expression.rhs >= 0
+            pending.push(expression.third) if expression.third >= 0
+            if expression.args_count > 0 and expression.args_start >= 0:
+                for offset in 0..<expression.args_count |ctx, expression|:
+                    child_index: i64 = expression.args_start + offset
+                    if child_index >= 0 and child_index < ctx.expr_children.count.i64():
+                        pending.push(ctx.expr_children[child_index.usize()])
         return false
-
-    def typed_stmt_needs_unsafe(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_needs_unsafe[@r](ctx: mutable TypedContext[r]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # C++ macro expansion can produce expression graphs thousands of nodes
+        # deep. Keep this predicate iterative; the result is a simple reachability
+        # query over the flat IR and does not require host-language recursion.
+        # Statement emission asks this repeatedly, so retain a reusable visit
+        # stamp array in the translation context.
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        while ctx.effect_expr_seen.count.i64() < ctx.exprs.count.i64() |ctx|:
+            ctx.effect_expr_seen.push(0)
+        ctx.effect_expr_generation <- ctx.effect_expr_generation + 1
+        generation: i64 = ctx.effect_expr_generation
+        found: mutable bool = false
+        ctx.effect_expr_pending.push(index)
+        while ctx.effect_expr_pending.count > 0.usize() |ctx|:
+            current: i64 = ctx.effect_expr_pending[ctx.effect_expr_pending.count - 1.usize()]
+            _ = ctx.effect_expr_pending.pop()
+            continue if found
+            continue if current < 0 or current >= ctx.exprs.count.i64() or ctx.effect_expr_seen[current.usize()] == generation
+            ctx.effect_expr_seen[current.usize()] <- generation
+            expression: TypedExpr[r] = typed_expr_at(ctx, current)
+            # Merely carrying a nullable pointer value is not an unsafe operation:
+            # C code routinely compares or forwards it without dereferencing it.
+            # Mark the actual reference/ABI boundaries instead. This keeps null
+            # guards and pointer arguments outside trusted regions while retaining
+            # the unsafe effect for pointer-returning calls.
+            found <- true if (typed_type_uses_pointer(expression.type_name) and (expression.kind == TypedExprKind.Member or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Call)) or expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.ArrayIndex or expression.kind == TypedExprKind.Member or (expression.kind == TypedExprKind.Unary and (sview_eq(expression.text, sview("&", 0, -1)) or sview_eq(expression.text, sview("*", 0, -1))))
+            if not found:
+                ctx.effect_expr_pending.push(expression.lhs) if expression.lhs >= 0
+                ctx.effect_expr_pending.push(expression.rhs) if expression.rhs >= 0
+                ctx.effect_expr_pending.push(expression.third) if expression.third >= 0
+            if not found and expression.args_count > 0 and expression.args_start >= 0:
+                for offset in 0..<expression.args_count |ctx, expression|:
+                    child_index: i64 = expression.args_start + offset
+                    if child_index >= 0 and child_index < ctx.expr_children.count.i64():
+                        ctx.effect_expr_pending.push(ctx.expr_children[child_index.usize()])
+        return found
+    def typed_stmt_needs_unsafe_with_seen[@r](ctx: TypedContext[r]&, index: i64, seen: mutable darray[i64]&, generation: mutable i64&, pending: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if typed_expr_needs_unsafe(ctx, statement.expr)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+        if statement.expr >= 0 and statement.expr < ctx.exprs.count.i64():
+            generation <- generation + 1
+            return true if typed_expr_needs_unsafe_with_seen(ctx, statement.expr, seen, generation, pending)
         if statement.kind == TypedStmtKind.Block:
-            for offset in 0..<statement.children_count |ctx, statement|:
-                return true if typed_stmt_needs_unsafe(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+            for offset in 0..<statement.children_count |ctx, statement, seen, generation, pending|:
+                return true if typed_stmt_needs_unsafe_with_seen(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], seen, generation, pending)
         elif statement.kind == TypedStmtKind.If:
-            return true if typed_stmt_needs_unsafe(ctx, statement.aux)
-            return typed_stmt_needs_unsafe(ctx, statement.aux2)
+            return true if typed_stmt_needs_unsafe_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_needs_unsafe_with_seen(ctx, statement.aux2, seen, generation, pending)
         elif statement.kind == TypedStmtKind.For:
-            return true if typed_stmt_needs_unsafe(ctx, statement.children_start)
-            return true if typed_stmt_needs_unsafe(ctx, statement.aux)
-            return typed_stmt_needs_unsafe(ctx, statement.aux2)
+            return true if typed_stmt_needs_unsafe_with_seen(ctx, statement.children_start, seen, generation, pending)
+            return true if typed_stmt_needs_unsafe_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_needs_unsafe_with_seen(ctx, statement.aux2, seen, generation, pending)
         elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
-            return typed_stmt_needs_unsafe(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
+            return typed_stmt_needs_unsafe_with_seen(ctx, statement.expr, seen, generation, pending) if statement.kind == TypedStmtKind.Label
+            return true if typed_stmt_needs_unsafe_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_needs_unsafe_with_seen(ctx, statement.aux2, seen, generation, pending) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
         elif statement.kind == TypedStmtKind.Switch:
-            for offset in 0..<statement.children_count |ctx, statement|:
+            for offset in 0..<statement.children_count |ctx, statement, seen, generation, pending|:
                 switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-                return true if typed_stmt_needs_unsafe(ctx, switch_case.body)
+                return true if typed_stmt_needs_unsafe_with_seen(ctx, switch_case.body, seen, generation, pending)
         return false
-
-    def typed_function_direct_unsafe(ctx: TypedContext&, function: TypedFunction) -> bool:
+    def typed_stmt_needs_unsafe[@r](ctx: TypedContext[r]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        seen: mutable darray[i64] = []
+        for expression_index in 0..<ctx.exprs.count |seen|:
+            seen.push(0)
+        generation: mutable i64 = 0
+        pending: mutable darray[i64] = []
+        return typed_stmt_needs_unsafe_with_seen(ctx, index, seen, generation, pending) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_function_direct_unsafe[@r](ctx: TypedContext[r]&, function: TypedFunction[r]) -> bool:
         return true if function.has_unsafe_effect or typed_type_uses_pointer(function.return_type)
         for offset in 0..<function.params_count |ctx, function|:
             return true if typed_type_uses_pointer(ctx.params[(function.params_start + offset).usize()].type_name)
         return typed_stmt_needs_unsafe(ctx, function.body)
-
-    def typed_stmt_calls_global(ctx: TypedContext&, index: i64) -> bool:
-        return typed_stmt_calls_global_depth(ctx, index, 8)
-
-    def typed_stmt_calls_global_depth(ctx: TypedContext&, index: i64, depth: i64) -> bool:
+    def typed_stmt_calls_global[@r](ctx: TypedContext[r]&, index: i64) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return typed_stmt_calls_global_depth(ctx, index, 8) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_stmt_calls_global_depth_with_seen[@r](ctx: TypedContext[r]&, index: i64, depth: i64, seen_depth: mutable darray[i64]&, seen_function_depth: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        if typed_expr_calls_global_depth(ctx, statement.expr, depth):
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+        if typed_expr_calls_global_depth_with_seen(ctx, statement.expr, depth, seen_depth, seen_function_depth):
             return true
         if statement.kind == TypedStmtKind.Block:
             for offset in 0..<statement.children_count |ctx, statement|:
-                return true if typed_stmt_calls_global_depth(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], depth)
+                return true if typed_stmt_calls_global_depth_with_seen(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], depth, seen_depth, seen_function_depth)
         elif statement.kind == TypedStmtKind.If:
-            return true if typed_stmt_calls_global_depth(ctx, statement.aux, depth)
-            return typed_stmt_calls_global_depth(ctx, statement.aux2, depth)
+            return true if typed_stmt_calls_global_depth_with_seen(ctx, statement.aux, depth, seen_depth, seen_function_depth)
+            return typed_stmt_calls_global_depth_with_seen(ctx, statement.aux2, depth, seen_depth, seen_function_depth)
         elif statement.kind == TypedStmtKind.For:
-            return true if typed_stmt_calls_global_depth(ctx, statement.children_start, depth)
-            return true if typed_stmt_calls_global_depth(ctx, statement.aux, depth)
-            return typed_stmt_calls_global_depth(ctx, statement.aux2, depth)
+            return true if typed_stmt_calls_global_depth_with_seen(ctx, statement.children_start, depth, seen_depth, seen_function_depth)
+            return true if typed_stmt_calls_global_depth_with_seen(ctx, statement.aux, depth, seen_depth, seen_function_depth)
+            return typed_stmt_calls_global_depth_with_seen(ctx, statement.aux2, depth, seen_depth, seen_function_depth)
         elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
-            return typed_stmt_calls_global_depth(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr, depth)
+            return typed_stmt_calls_global_depth_with_seen(ctx, statement.expr, depth, seen_depth, seen_function_depth) if statement.kind == TypedStmtKind.Label
+            return true if typed_stmt_calls_global_depth_with_seen(ctx, statement.aux, depth, seen_depth, seen_function_depth)
+            return typed_stmt_calls_global_depth_with_seen(ctx, statement.aux2, depth, seen_depth, seen_function_depth) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
         elif statement.kind == TypedStmtKind.Switch:
             for offset in 0..<statement.children_count |ctx, statement|:
                 switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-                return true if typed_stmt_calls_global_depth(ctx, switch_case.body, depth)
+                return true if typed_stmt_calls_global_depth_with_seen(ctx, switch_case.body, depth, seen_depth, seen_function_depth)
         return false
-
-    def typed_expr_calls_global(ctx: TypedContext&, index: i64) -> bool:
-        return typed_expr_calls_global_depth(ctx, index, 8)
-
-    def typed_expr_calls_global_depth(ctx: TypedContext&, index: i64, depth: i64) -> bool:
+    def typed_stmt_calls_global_depth[@r](ctx: TypedContext[r]&, index: i64, depth: i64) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        seen_depth: mutable darray[i64] = []
+        seen_function_depth: mutable darray[i64] = []
+        for expression_index in 0..<ctx.exprs.count |seen_depth|:
+            seen_depth.push(-1)
+        for function_index in 0..<ctx.functions.count |seen_function_depth|:
+            seen_function_depth.push(-1)
+        return typed_stmt_calls_global_depth_with_seen(ctx, index, depth, seen_depth, seen_function_depth) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_expr_calls_global[@r](ctx: TypedContext[r]&, index: i64) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        return typed_expr_calls_global_depth(ctx, index, 8) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_expr_calls_global_depth_with_seen[@r](ctx: TypedContext[r]&, index: i64, depth: i64, seen_depth: mutable darray[i64]&, seen_function_depth: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # Lowered expressions are stored as a flat graph, but macro-heavy C++
+        # can make the graph far deeper than the host stack. Keep call-graph
+        # depth in the work item while traversing expression children iteratively.
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        if expression.kind == TypedExprKind.Call:
-            for function_index in 0..<ctx.functions.count |ctx, expression|:
-                function: TypedFunction = ctx.functions[function_index.usize()]
-                if sview_eq(function.name, expression.text):
-                    return true if function.has_global_effect or typed_stmt_reads_global(ctx, function.body)
-                    return true if depth > 0 and typed_stmt_calls_global_depth(ctx, function.body, depth - 1)
-        return true if typed_expr_calls_global_depth(ctx, expression.lhs, depth)
-        return true if typed_expr_calls_global_depth(ctx, expression.rhs, depth)
-        return true if typed_expr_calls_global_depth(ctx, expression.third, depth)
-        if expression.args_count > 0:
-            for offset in 0..<expression.args_count |ctx, expression|:
-                return true if typed_expr_calls_global_depth(ctx, ctx.expr_children[(expression.args_start + offset).usize()], depth)
+        pending: mutable darray[TypedExprWorkItem] = []
+        pending.push(TypedExprWorkItem{index: index, depth: depth})
+        while pending.count > 0.usize() |ctx, pending|:
+            item: TypedExprWorkItem = pending[pending.count - 1.usize()]
+            _ = pending.pop()
+            continue if item.index < 0 or item.index >= ctx.exprs.count.i64()
+            continue if item.depth <= seen_depth[item.index.usize()]
+            seen_depth[item.index.usize()] <- item.depth
+            expression: TypedExpr[r] = typed_expr_at(ctx, item.index)
+            if expression.kind == TypedExprKind.Call:
+                for function_index in 0..<ctx.functions.count |ctx, expression, item|:
+                    function: TypedFunction[r] = ctx.functions[function_index.usize()]
+                    if sview_eq(function.name, expression.text):
+                        return true if function.has_global_effect or typed_stmt_reads_global(ctx, function.body)
+                        if item.depth > 0 and function_index < seen_function_depth.count.i64() and seen_function_depth[function_index.usize()] < item.depth:
+                            seen_function_depth[function_index.usize()] <- item.depth
+                            return true if typed_stmt_calls_global_depth_with_seen(ctx, function.body, item.depth - 1, seen_depth, seen_function_depth)
+            pending.push(TypedExprWorkItem{index: expression.lhs, depth: item.depth}) if expression.lhs >= 0
+            pending.push(TypedExprWorkItem{index: expression.rhs, depth: item.depth}) if expression.rhs >= 0
+            pending.push(TypedExprWorkItem{index: expression.third, depth: item.depth}) if expression.third >= 0
+            if expression.args_count > 0 and expression.args_start >= 0:
+                for offset in 0..<expression.args_count |ctx, expression, item, pending|:
+                    child_index: i64 = expression.args_start + offset
+                    if child_index >= 0 and child_index < ctx.expr_children.count.i64():
+                        pending.push(TypedExprWorkItem{index: ctx.expr_children[child_index.usize()], depth: item.depth})
         return false
-
-    def typed_expr_calls_unsafe(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_calls_global_depth[@r](ctx: TypedContext[r]&, index: i64, depth: i64) -> bool can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        seen_depth: mutable darray[i64] = []
+        seen_function_depth: mutable darray[i64] = []
+        for expression_index in 0..<ctx.exprs.count |seen_depth|:
+            seen_depth.push(-1)
+        for function_index in 0..<ctx.functions.count |seen_function_depth|:
+            seen_function_depth.push(-1)
+        return typed_expr_calls_global_depth_with_seen(ctx, index, depth, seen_depth, seen_function_depth) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_expr_calls_unsafe_with_seen[@r](ctx: TypedContext[r]&, index: i64, seen: mutable darray[i64]&, generation: i64, pending: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
-        if expression.kind == TypedExprKind.Call:
-            for function_index in 0..<ctx.functions.count |ctx, expression|:
-                function: TypedFunction = ctx.functions[function_index.usize()]
-                return true if sview_eq(function.name, expression.text) and typed_function_direct_unsafe(ctx, function)
-        return true if typed_expr_calls_unsafe(ctx, expression.lhs)
-        return true if typed_expr_calls_unsafe(ctx, expression.rhs)
-        return true if typed_expr_calls_unsafe(ctx, expression.third)
-        if expression.args_count > 0:
-            for offset in 0..<expression.args_count |ctx, expression|:
-                return true if typed_expr_calls_unsafe(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        pending.push(index)
+        while pending.count > 0.usize() |ctx, pending, seen|:
+            current: i64 = pending[pending.count - 1.usize()]
+            _ = pending.pop()
+            continue if current < 0 or current >= ctx.exprs.count.i64() or seen[current.usize()] == generation
+            seen[current.usize()] <- generation
+            expression: TypedExpr[r] = typed_expr_at(ctx, current)
+            if expression.kind == TypedExprKind.Call:
+                for function_index in 0..<ctx.functions.count |ctx, expression|:
+                    function: TypedFunction[r] = ctx.functions[function_index.usize()]
+                    return true if sview_eq(function.name, expression.text) and typed_function_direct_unsafe(ctx, function)
+            pending.push(expression.lhs) if expression.lhs >= 0
+            pending.push(expression.rhs) if expression.rhs >= 0
+            pending.push(expression.third) if expression.third >= 0
+            if expression.args_count > 0 and expression.args_start >= 0:
+                for offset in 0..<expression.args_count |ctx, expression, pending|:
+                    child_index: i64 = expression.args_start + offset
+                    if child_index >= 0 and child_index < ctx.expr_children.count.i64():
+                        pending.push(ctx.expr_children[child_index.usize()])
         return false
-
-    def typed_function_needs_unsafe(ctx: TypedContext&, function: TypedFunction) -> bool:
+    def typed_function_needs_unsafe[@r](ctx: TypedContext[r]&, function: TypedFunction[r]) -> bool:
         return typed_function_direct_unsafe(ctx, function) or typed_stmt_calls_unsafe(ctx, function.body)
-
-    def typed_stmt_calls_unsafe(ctx: TypedContext&, index: i64) -> bool:
+    def typed_stmt_calls_unsafe_with_seen[@r](ctx: TypedContext[r]&, index: i64, seen: mutable darray[i64]&, generation: mutable i64&, pending: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return false if index < 0 or index >= ctx.stmts.count.i64()
-        statement: TypedStmt = typed_stmt_at(ctx, index)
-        return true if typed_expr_calls_unsafe(ctx, statement.expr)
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+        if statement.expr >= 0 and statement.expr < ctx.exprs.count.i64():
+            generation <- generation + 1
+            return true if typed_expr_calls_unsafe_with_seen(ctx, statement.expr, seen, generation, pending)
         if statement.kind == TypedStmtKind.Block:
-            for offset in 0..<statement.children_count |ctx, statement|:
-                return true if typed_stmt_calls_unsafe(ctx, ctx.stmt_children[(statement.children_start + offset).usize()])
+            for offset in 0..<statement.children_count |ctx, statement, seen, generation, pending|:
+                return true if typed_stmt_calls_unsafe_with_seen(ctx, ctx.stmt_children[(statement.children_start + offset).usize()], seen, generation, pending)
         elif statement.kind == TypedStmtKind.If:
-            return true if typed_stmt_calls_unsafe(ctx, statement.aux)
-            return typed_stmt_calls_unsafe(ctx, statement.aux2)
+            return true if typed_stmt_calls_unsafe_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_calls_unsafe_with_seen(ctx, statement.aux2, seen, generation, pending)
         elif statement.kind == TypedStmtKind.For:
-            return true if typed_stmt_calls_unsafe(ctx, statement.children_start)
-            return true if typed_stmt_calls_unsafe(ctx, statement.aux)
-            return typed_stmt_calls_unsafe(ctx, statement.aux2)
+            return true if typed_stmt_calls_unsafe_with_seen(ctx, statement.children_start, seen, generation, pending)
+            return true if typed_stmt_calls_unsafe_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_calls_unsafe_with_seen(ctx, statement.aux2, seen, generation, pending)
         elif statement.kind == TypedStmtKind.While or statement.kind == TypedStmtKind.DoWhile or statement.kind == TypedStmtKind.Label:
-            return typed_stmt_calls_unsafe(ctx, statement.aux if statement.kind != TypedStmtKind.Label else statement.expr)
+            return typed_stmt_calls_unsafe_with_seen(ctx, statement.expr, seen, generation, pending) if statement.kind == TypedStmtKind.Label
+            return true if typed_stmt_calls_unsafe_with_seen(ctx, statement.aux, seen, generation, pending)
+            return typed_stmt_calls_unsafe_with_seen(ctx, statement.aux2, seen, generation, pending) if statement.kind == TypedStmtKind.DoWhile and statement.aux2 >= 0
         elif statement.kind == TypedStmtKind.Switch:
-            for offset in 0..<statement.children_count |ctx, statement|:
+            for offset in 0..<statement.children_count |ctx, statement, seen, generation, pending|:
                 switch_case: TypedSwitchCase = ctx.switch_cases[(statement.children_start + offset).usize()]
-                return true if typed_stmt_calls_unsafe(ctx, switch_case.body)
+                return true if typed_stmt_calls_unsafe_with_seen(ctx, switch_case.body, seen, generation, pending)
         return false
+    def typed_stmt_calls_unsafe[@r](ctx: TypedContext[r]&, index: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        seen: mutable darray[i64] = []
+        for expression_index in 0..<ctx.exprs.count |seen|:
+            seen.push(0)
+        generation: mutable i64 = 0
+        pending: mutable darray[i64] = []
+        return typed_stmt_calls_unsafe_with_seen(ctx, index, seen, generation, pending) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
 
     def typed_emit_effect_list(out: mutable darray[u8]&, needs_global: bool, needs_unsafe: bool) -> void:
         append_view(out, sview("Abort.Panic", 0, -1))
         append_view(out, sview(", Global", 0, -1)) if needs_global
         append_view(out, sview(", Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef", 0, -1)) if needs_unsafe
-
-    def typed_emit_function_effects(out: mutable darray[u8]&, ctx: TypedContext&, function: TypedFunction) -> i64:
-        needs_global: bool = typed_function_needs_global(ctx, function)
+    def typed_emit_function_effects[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, function: TypedFunction[r]) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+        needs_global: bool = typed_function_needs_global(ctx, function) or (sview_eq(function.name, sview("main", 0, -1)) and typed_has_global_initializers(ctx))
         needs_unsafe: bool = typed_function_needs_unsafe(ctx, function) or (sview_eq(function.name, sview("main", 0, -1)) and typed_has_global_initializers(ctx))
         if not needs_global and not needs_unsafe:
             append_view(out, sview(":\n", 0, -1))

@@ -1,0 +1,16 @@
+# Optional frontend memory/size diagnostics.
+extend CTranslator:
+    def cli_emit_frontend_stats(source: sview, raw_bytes: usize, projected_bytes: usize, arena_bytes: usize, json_values: i64) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("frontend-stats source=", 0, -1))
+        append_view(&output, source)
+        append_view(&output, sview(" raw_json_bytes=", 0, -1))
+        append_i64(&output, raw_bytes.i64())
+        append_view(&output, sview(" projected_json_bytes=", 0, -1))
+        append_i64(&output, projected_bytes.i64())
+        append_view(&output, sview(" parsed_arena_bytes=", 0, -1))
+        append_i64(&output, arena_bytes.i64())
+        append_view(&output, sview(" projected_json_values=", 0, -1))
+        append_i64(&output, json_values)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast

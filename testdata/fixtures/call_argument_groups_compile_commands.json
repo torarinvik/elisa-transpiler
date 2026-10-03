@@ -1,0 +1,14 @@
+[
+  {
+    "directory": ".",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-c",
+      "testdata/fixtures/call_argument_groups.cpp",
+      "-o",
+      "/tmp/call_argument_groups.o"
+    ],
+    "file": "testdata/fixtures/call_argument_groups.cpp"
+  }
+]

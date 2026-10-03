@@ -1,254 +1,208 @@
 extend CTranslator:
-    def append_view(out: mutable darray[u8]&, value: sview) -> void:
-        for index in 0..<value.len |out, value|:
-            out.push(string_view_index(value, index).u8())
-
-    def append_indent(out: mutable darray[u8]&, level: i64) -> void:
-        for _index in 0..<level |out|:
-            append_view(out, sview("    ", 0, -1))
-
-    def append_view_range(out: mutable darray[u8]&, value: sview, start: i64, end: i64) -> void:
-        for index in start..<end |out, value|:
-            out.push(string_view_index(value, index).u8())
-
-    def type_starts_with(value: sview, prefix: sview) -> bool:
-        return sview_starts_with(value, prefix)
-
-    def c_type_without_qualifiers(value: sview) -> sview:
-        result: mutable sview = value
-        while sview_starts_with(result, sview("const ", 0, -1)) or sview_starts_with(result, sview("volatile ", 0, -1)) or sview_starts_with(result, sview("restrict ", 0, -1)) |result|:
-            if sview_starts_with(result, sview("const ", 0, -1)):
-                result <- string_view_suffix(result, 6)
-            elif sview_starts_with(result, sview("volatile ", 0, -1)):
-                result <- string_view_suffix(result, 9)
-            else:
-                result <- string_view_suffix(result, 9)
-        return result
-
-    def c_type_pointer_base(qual_type: sview) -> sview:
-        star: i64 = sview_find_byte(qual_type, 42)
-        return string_view_prefix(qual_type, star) if star >= 0 else qual_type
-
-    def c_find_byte_from(value: sview, wanted: i64, start: i64) -> i64:
-        for index in start..<value.len |value, wanted, start|:
-            return index if string_view_index(value, index) == wanted
-        return -1
-
-    def c_find_last_byte(value: sview, wanted: i64) -> i64:
-        index: mutable i64 = value.len - 1
-        while index >= 0 |value, wanted, index|:
-            return index if string_view_index(value, index) == wanted
-            index <- index - 1
-        return -1
-
-    # Clang spells a C function pointer as `return (*)(params)`, optionally with
-    # a pointer in the return type (`void *(*)(size_t)`). The `(*` marker avoids
-    # confusing the return pointer with the function-pointer declarator.
-    def c_function_pointer_marker(qual_type: sview) -> i64:
-        for index in 0..<qual_type.len |qual_type|:
-            if string_view_index(qual_type, index) != 40:
-                continue
-            cursor: mutable i64 = index + 1
-            while cursor < qual_type.len and string_view_index(qual_type, cursor) == 32 |qual_type, cursor|:
-                cursor <- cursor + 1
-            return index if cursor < qual_type.len and string_view_index(qual_type, cursor) == 42
-        return -1
-
-    def c_type_is_function_pointer(qual_type: sview) -> bool:
-        return c_function_pointer_marker(qual_type) >= 0
-
-    def c_type_is_function(qual_type: sview) -> bool:
-        open_paren: i64 = sview_find_byte(qual_type, 40)
-        close_paren: i64 = c_find_last_byte(qual_type, 41)
-        return open_paren >= 0 and close_paren > open_paren
-
-    def c_trim_spaces(value: sview) -> sview:
-        result: mutable sview = value
-        while result.len > 0 and string_view_index(result, 0) == 32:
-            result <- string_view_suffix(result, 1)
-        while result.len > 0 and string_view_index(result, result.len - 1) == 32:
-            result <- string_view_prefix(result, result.len - 1)
-        return result
-
-    def c_type_named_base(qual_type: sview) -> sview:
-        base: mutable sview = c_type_without_qualifiers(c_type_pointer_base(qual_type))
-        base <- sview_trim_trailing(base, 32)
-        if sview_starts_with(base, sview("struct ", 0, -1)):
-            return string_view_suffix(base, 7)
-        if sview_starts_with(base, sview("union ", 0, -1)):
-            return string_view_suffix(base, 6)
-        if sview_starts_with(base, sview("enum ", 0, -1)):
-            return string_view_suffix(base, 5)
-        return base
-
-    def c_type_abi_base(qual_type: sview) -> sview:
-        # These C spellings share one Elisa storage representation. Keeping the
-        # normalization here lets cast-elision recognize harmless signedness and
-        # typedef spelling changes while still distinguishing real void/record
-        # pointer reinterpretations.
-        base: sview = c_type_named_base(qual_type)
-        return sview("u8", 0, -1) if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("cc_t", 0, -1)) else sview("i8", 0, -1) if sview_eq(base, sview("signed char", 0, -1)) else sview("i16", 0, -1) if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) else sview("u16", 0, -1) if sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) else sview("i32", 0, -1) if sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) else sview("u32", 0, -1) if sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) else sview("i64", 0, -1) if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) else sview("u64", 0, -1) if sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) else sview("usize", 0, -1) if sview_eq(base, sview("size_t", 0, -1)) else sview("isize", 0, -1) if sview_eq(base, sview("ssize_t", 0, -1)) else sview("f32", 0, -1) if sview_eq(base, sview("float", 0, -1)) else sview("f64", 0, -1) if sview_eq(base, sview("double", 0, -1)) else base
-
-    def append_elisa_type_name(out: mutable darray[u8]&, name: mutable sview) -> void:
-        return if name.len == 0
-        name <- safe_identifier(name)
-        first: u8 = string_view_index(name, 0).u8()
-        if first >= 97 and first <= 122:
-            out.push(first - 32)
-        elif (first < 65 or first > 90):
-            append_view(out, sview("C_", 0, -1))
-            out.push(first)
-        else:
-            out.push(first)
-        for index in 1..<name.len |out, name|:
-            out.push(string_view_index(name, index).u8())
-
-    def c_array_length(qual_type: sview) -> i64:
-        open_bracket: i64 = sview_find_byte(qual_type, 91)
-        close_bracket: i64 = sview_find_byte(qual_type, 93)
-        return 0 if open_bracket < 0 or close_bracket <= open_bracket
-        result: mutable i64 = 0
-        for index in (open_bracket + 1)..<close_bracket |qual_type, result|:
-            digit: i64 = string_view_index(qual_type, index) - 48
-            result <- result * 10 + digit if digit >= 0 and digit <= 9
-        return result
-
-    def c_hex_digit(byte: i64) -> i64:
-        return byte - 48 if byte >= 48 and byte <= 57
-        return byte - 65 + 10 if byte >= 65 and byte <= 70
-        return byte - 97 + 10 if byte >= 97 and byte <= 102
-        return -1
-
-    def append_c_string_array(out: mutable darray[u8]&, literal: sview, target_type: sview) -> void:
-        capacity: i64 = c_array_length(target_type)
-        append_view(out, sview("[", 0, -1))
-        source_index: mutable i64 = 1
-        emitted: mutable i64 = 0
-        source_end: i64 = literal.len - 1
-        while source_index < source_end and emitted < capacity |out, literal, source_index, emitted|:
-            value: mutable i64 = string_view_index(literal, source_index)
-            source_index <- source_index + 1
-            if value == 92 and source_index < source_end:
-                escaped: i64 = string_view_index(literal, source_index)
-                source_index <- source_index + 1
-                if escaped == 110:
-                    value <- 10
-                elif escaped == 114:
-                    value <- 13
-                elif escaped == 116:
-                    value <- 9
-                elif escaped == 98:
-                    value <- 8
-                elif escaped == 102:
-                    value <- 12
-                elif escaped == 118:
-                    value <- 11
-                elif escaped == 97:
-                    value <- 7
-                elif escaped == 120:
-                    value <- 0
-                    while source_index < source_end and c_hex_digit(string_view_index(literal, source_index)) >= 0 |literal, source_index, value|:
-                        value <- value * 16 + c_hex_digit(string_view_index(literal, source_index))
-                        source_index <- source_index + 1
-                elif escaped >= 48 and escaped <= 55:
-                    value <- escaped - 48
-                    digits: mutable i64 = 1
-                    while digits < 3 and source_index < source_end and string_view_index(literal, source_index) >= 48 and string_view_index(literal, source_index) <= 55 |literal, source_index, value, digits|:
-                        value <- value * 8 + string_view_index(literal, source_index) - 48
-                        source_index <- source_index + 1
-                        digits <- digits + 1
-                else:
-                    value <- escaped
-            append_view(out, sview(", ", 0, -1)) if emitted > 0
-            append_i64(out, value)
-            emitted <- emitted + 1
-        while emitted < capacity |out, emitted|:
-            append_view(out, sview(", ", 0, -1)) if emitted > 0
-            append_view(out, sview("0", 0, -1))
-            emitted <- emitted + 1
-        append_view(out, sview("]", 0, -1))
-
-    def append_hex_digit(out: mutable darray[u8]&, value: i64) -> void:
-        out.push((48 + value).u8()) if value < 10
-        out.push((55 + value).u8()) if value >= 10
-
-    # Clang's JSON value keeps C's octal and hexadecimal escapes verbatim. Elisa
-    # intentionally has no octal string escapes, so canonicalize byte escapes to
-    # `\xNN` while preserving the ordinary Elisa-compatible escapes.
-    def append_elisa_string_literal(out: mutable darray[u8]&, literal: sview) -> void:
-        return if literal.len == 0
-        out.push(34)
-        index: mutable i64 = 1
-        end: i64 = literal.len - 1
-        while index < end |out, literal, index, end|:
-            value: i64 = string_view_index(literal, index)
-            index <- index + 1
-            if value != 92:
-                out.push(92) if value == 34
-                out.push(value.u8())
-                continue
-            break if index >= end
-            escaped: i64 = string_view_index(literal, index)
-            index <- index + 1
-            byte: mutable i64 = -1
-            digits: mutable i64 = 0
-            if escaped >= 48 and escaped <= 55:
-                byte <- escaped - 48
-                digits <- 1
-                while digits < 3 and index < end and string_view_index(literal, index) >= 48 and string_view_index(literal, index) <= 55 |literal, index, end, byte, digits|:
-                    byte <- byte * 8 + string_view_index(literal, index) - 48
-                    index <- index + 1
-                    digits <- digits + 1
-            elif escaped == 120:
-                byte <- 0
-                digits <- 0
-                while digits < 2 and index < end and c_hex_digit(string_view_index(literal, index)) >= 0 |literal, index, end, byte, digits|:
-                    byte <- byte * 16 + c_hex_digit(string_view_index(literal, index))
-                    index <- index + 1
-                    digits <- digits + 1
-            if byte >= 0:
-                out.push(92)
-                out.push(120)
-                append_hex_digit(out, (byte / 16) % 16)
-                append_hex_digit(out, byte % 16)
-            else:
-                out.push(92)
-                out.push(escaped.u8())
-        out.push(34)
-
     def c_type_is_const_pointer(qual_type: sview) -> bool:
-        base: sview = c_type_pointer_base(qual_type)
-        return sview_starts_with(base, sview("const ", 0, -1))
+        # Clang prints the qualifier for the first pointee before the first
+        # star (`const T *`).  Looking only for a `const ` prefix misses the
+        # equally valid normalized spelling `T const *`, which is common in
+        # AST output for typedef-heavy C and C++ headers.  Keep this helper
+        # about pointee capability; top-level pointer-slot constness is handled
+        # separately by c_type_pointer_binding_is_mutable.
+        return c_type_pointer_qualifiers_at_depth(qual_type, 0) % 2 == 1
+
+    # Clang spells a C++ lvalue reference as a trailing `&` on the referred
+    # type (`int&`, `byte *&`). Keep that spelling intact in the semantic IR so
+    # expression lowering can distinguish a reference-to-pointer from an
+    # ordinary C pointer. The type renderer turns the reference into one
+    # additional Elisa reference layer.
+    def c_type_reference_count(qual_type: sview) -> i64:
+        cursor: mutable i64 = qual_type.len - 1
+        count: mutable i64 = 0
+        while cursor >= 0 and (string_view_index(qual_type, cursor) == 32 or string_view_index(qual_type, cursor) == 9):
+            cursor <- cursor - 1
+        while cursor >= 0 and string_view_index(qual_type, cursor) == 38 |qual_type, cursor, count|:
+            count <- count + 1
+            cursor <- cursor - 1
+            while cursor >= 0 and (string_view_index(qual_type, cursor) == 32 or string_view_index(qual_type, cursor) == 9):
+                cursor <- cursor - 1
+        return count
+
+    def c_type_reference_base(qual_type: sview) -> sview:
+        cursor: mutable i64 = qual_type.len - 1
+        while cursor >= 0 and (string_view_index(qual_type, cursor) == 32 or string_view_index(qual_type, cursor) == 9):
+            cursor <- cursor - 1
+        while cursor >= 0 and string_view_index(qual_type, cursor) == 38:
+            cursor <- cursor - 1
+            while cursor >= 0 and (string_view_index(qual_type, cursor) == 32 or string_view_index(qual_type, cursor) == 9):
+                cursor <- cursor - 1
+        return c_trim_spaces(string_view_prefix(qual_type, cursor + 1)) if cursor + 1 > 0 else sview("", 0, 0)
+
+    def c_type_reference_can_write(qual_type: sview) -> bool:
+        return false if c_type_reference_count(qual_type) == 0
+        referred: sview = c_type_reference_base(qual_type)
+        pointer_count: i64 = c_type_pointer_count(referred)
+        if pointer_count > 0:
+            # `const T *&` is a mutable reference to a pointer, while
+            # `T * const &` is a reference to a const pointer. The qualifier
+            # after the final star is therefore the one that matters here.
+            last_star: i64 = c_find_last_byte(referred, 42)
+            suffix: sview = string_view_suffix(referred, last_star + 1) if last_star >= 0 else referred
+            return not sview_starts_with(c_trim_spaces(suffix), sview("const", 0, -1))
+        return c_type_pointer_qualifiers_at_depth(referred, 0) % 2 == 0
+
+    # A reference-to-pointer expression (`T*&`) is non-null as a reference,
+    # but the pointer stored in the referenced slot is still nullable. This
+    # expression-level fact is separate from type emission, which records each
+    # nullable C pointer slot on its own Elisa reference layer when composable.
+    def c_type_value_optional(qual_type: sview) -> bool:
+        return true if c_type_pointer_optional(qual_type)
+        return c_type_reference_count(qual_type) > 0 and c_type_pointer_count(qual_type) > 0
 
     def c_type_pointer_can_write(qual_type: sview) -> bool:
-        # For T **, the outer pointer writes a pointer slot even when the
-        # ultimate pointee is const (for example `const char **`). For a single
-        # pointer, only a non-const pointee permits writes through the view.
-        return c_type_pointer_count(qual_type) > 1 or not c_type_is_const_pointer(qual_type)
+        # Flow/effect analysis asks whether any reachable pointee layer can be
+        # written. Type emission uses c_type_pointer_layers_composable to keep
+        # each layer's capability separate instead of flattening this fact.
+        return c_type_reference_can_write(qual_type) if c_type_reference_count(qual_type) > 0
+        pointer_count: i64 = c_type_pointer_count(qual_type)
+        return not c_type_is_const_pointer(qual_type) if pointer_count <= 1
+        depth: mutable i64 = 0
+        while depth < pointer_count |qual_type, pointer_count, depth|:
+            # The mask's low bit represents const at this dereference level.
+            return true if c_type_pointer_qualifiers_at_depth(qual_type, depth) % 2 == 0
+            depth <- depth + 1
+        return false
+
+    # Clang's printed type spelling places qualifiers beside the declarator
+    # level they qualify: `const T **`, `T * const *`, and `T ** const` are
+    # distinct. Record the qualifier set at each count of pointer stars rather
+    # than flattening all constness onto the base type.
+    def c_type_pointer_qualifiers_at_depth(qual_type: sview, wanted_depth: i64) -> i64:
+        shape: ClangTypeSpellingShape = clang_type_spelling_shape(qual_type)
+        return clang_type_pointer_qualifiers_at_depth(qual_type, shape, wanted_depth)
+
+    # Top-level pointer constness controls whether the local pointer SLOT can
+    # be rebound. It is independent of constness at the pointee levels, which
+    # c_type_pointer_can_write uses for the Elisa reference capability.
+    def c_type_pointer_binding_is_mutable(qual_type: sview) -> bool:
+        pointer_count: i64 = c_type_pointer_count(qual_type)
+        return false if pointer_count == 0
+        return c_type_pointer_qualifiers_at_depth(qual_type, pointer_count) % 2 == 0
+
+    # C's top-level object qualifier maps to Elisa's binding mutability. A
+    # qualifier on a pointee is intentionally excluded: `const T *p` still
+    # has a rebindable pointer slot, while `T * const p` has an immutable slot
+    # whose referenced T remains writable. References are storage aliases, not
+    # objects that Elisa can rebind as globals.
+    def c_type_is_const_object(qual_type: sview) -> bool:
+        return false if c_type_reference_count(qual_type) > 0
+        template_depth: mutable i64 = 0
+        paren_depth: mutable i64 = 0
+        bracket_depth: mutable i64 = 0
+        last_top_level_star: mutable i64 = -1
+        has_top_level_parentheses: mutable bool = false
+        for cursor in 0..<qual_type.len |qual_type, template_depth, paren_depth, bracket_depth, last_top_level_star, has_top_level_parentheses|:
+            byte: i64 = string_view_index(qual_type, cursor)
+            template_depth <- template_depth + 1 if byte == 60
+            template_depth <- template_depth - 1 if byte == 62 and template_depth > 0
+            has_top_level_parentheses <- true if byte == 40 and template_depth == 0
+            paren_depth <- paren_depth + 1 if byte == 40
+            paren_depth <- paren_depth - 1 if byte == 41 and paren_depth > 0
+            bracket_depth <- bracket_depth + 1 if byte == 91
+            bracket_depth <- bracket_depth - 1 if byte == 93 and bracket_depth > 0
+            if byte == 42 and template_depth == 0 and paren_depth == 0 and bracket_depth == 0:
+                last_top_level_star <- cursor
+        return false if has_top_level_parentheses and last_top_level_star < 0
+        start: i64 = last_top_level_star + 1 if last_top_level_star >= 0 else 0
+        # Reuse the depth-aware token scanner used by project const-linkage
+        # analysis. Scanning only after the final top-level star keeps
+        # `const T *` as a writable/rebindable pointer object while nested
+        # template qualifiers such as `unordered_map<Key, const char *>` stay
+        # attached to their mapped type.
+        suffix: sview = string_view_suffix(qual_type, start)
+        return typed_project_type_has_const_token(suffix, 0, suffix.len)
 
     def c_type_pointer_qualifiers_match(left: sview, right: sview) -> bool:
         # ABI compatibility alone must not erase an explicit C cast that adds
-        # or removes pointee constness. The distinction controls Elisa's
-        # mutable-reference capability even when both values use the same ABI.
-        return c_type_is_const_pointer(left) == c_type_is_const_pointer(right)
+        # or removes qualifiers at any pointer level. Function and pointer-to-
+        # array declarators need the structural type model; until then, only
+        # identical spellings are safe to treat as qualifier-equivalent.
+        return true if sview_eq(left, right)
+        return false if c_type_pointer_count(left) != c_type_pointer_count(right)
+        return false if c_type_pointer_count(left) == 0
+        return false if c_type_is_function(left) or c_type_is_function(right) or c_type_is_pointer_to_array(left) or c_type_is_pointer_to_array(right)
+        # Parenthesized declarators, arrays, references and templates can
+        # contain their own pointer layers. Keep those casts unless the full
+        # spelling is identical; counting stars in those forms is not a
+        # structural type comparison.
+        return false if sview_find_byte(left, 40) >= 0 or sview_find_byte(right, 40) >= 0 or sview_find_byte(left, 91) >= 0 or sview_find_byte(right, 91) >= 0 or sview_find_byte(left, 60) >= 0 or sview_find_byte(right, 60) >= 0 or sview_find_byte(left, 38) >= 0 or sview_find_byte(right, 38) >= 0
+        pointer_count: i64 = c_type_pointer_count(left)
+        depth: mutable i64 = 0
+        while depth <= pointer_count |left, right, pointer_count, depth|:
+            return false if c_type_pointer_qualifiers_at_depth(left, depth) != c_type_pointer_qualifiers_at_depth(right, depth)
+            depth <- depth + 1
+        return true
 
     def c_type_pointer_optional(qual_type: sview) -> bool:
         # The optional marker belongs to the pointer value, not to an array
         # aggregate containing pointer elements.
-        if c_type_is_function(qual_type) or sview_find_byte(qual_type, 91) >= 0 or sview_find_byte(qual_type, 42) < 0:
+        return true if c_type_is_pointer_to_array(qual_type)
+        # C function pointers are nullable pointer values too. Their Elisa
+        # representation is a first-class `fn` value, so the optional marker
+        # is applied by the declarator/return renderer around that type.
+        return true if c_type_is_function_pointer(qual_type)
+        # A C++ reference itself is non-null. A reference-to-pointer still
+        # carries a nullable pointer in its slot, but that is handled by
+        # c_type_value_optional at expression boundaries rather than by
+        # marking the outer Elisa reference optional.
+        return false if c_type_reference_count(qual_type) > 0
+        if c_type_is_function(qual_type) or sview_find_byte(qual_type, 91) >= 0 or c_type_pointer_count(qual_type) == 0:
             return false
-        raw_base: sview = c_type_pointer_base(qual_type)
-        base: sview = c_type_without_qualifiers(raw_base)
-        pointer_count: mutable i64 = 0
-        for index in 0..<qual_type.len |qual_type, pointer_count|:
-            pointer_count <- pointer_count + 1 if string_view_index(qual_type, index) == 42
         return true
 
     def c_type_pointer_count(qual_type: sview) -> i64:
-        count: mutable i64 = 0
-        for index in 0..<qual_type.len |qual_type, count|:
-            count <- count + 1 if string_view_index(qual_type, index) == 42
-        return count
+        return clang_type_spelling_shape(qual_type).pointer_count
+
+    # Legacy fallback for pointer declarators whose complete shape is not yet
+    # composable (callbacks, pointer-to-array and C++ reference spellings).
+    # Ordinary scalar/record pointer chains use the qualifier-aware renderer
+    # below, which parenthesizes every reference layer explicitly.
+    def append_c_pointer_layers(out: mutable darray[u8]&, pointer_count: i64) -> void:
+        for index in 1..<pointer_count |out, pointer_count|:
+            append_view(out, sview("&", 0, -1))
+
+    def c_type_pointer_layers_composable(qual_type: sview) -> bool:
+        return false if c_type_pointer_count(qual_type) == 0 or c_type_is_function_pointer(qual_type) or c_pointer_to_array_open(qual_type) >= 0 or c_type_is_array(qual_type) or c_type_reference_count(qual_type) > 0
+        return sview_find_byte(qual_type, 40) < 0
+
+    def c_type_pointer_outer_optional_suffix_needed(qual_type: sview) -> bool:
+        # Function pointers are emitted as a grouped optional function value;
+        # appending `?` at the call site would bind it to the result type.
+        return c_type_pointer_optional(qual_type) and not c_type_pointer_layers_composable(qual_type) and not c_type_is_function_pointer(qual_type)
+
+    # Emit each C pointer's referent as a separate Elisa reference layer. The
+    # innermost C pointee is emitted once, then the reference wrappers are
+    # nested from inner to outer. Qualifier depth N-1 is the outermost
+    # referent; depth zero qualifies the final scalar/record pointee. Each C
+    # pointer value can be null independently, so every layer gets its own `?`.
+    def append_c_pointer_type_layers(out: mutable darray[u8]&, qual_type: sview, terminal_type: sview, pointer_count: i64, layer: i64, terminal_is_char_pointer: bool, terminal_is_elisa_type: bool, terminal_is_record_name: bool) -> void:
+        if layer >= pointer_count:
+            if terminal_is_record_name:
+                append_elisa_type_name(out, terminal_type)
+            elif terminal_is_elisa_type:
+                append_view(out, terminal_type)
+            elif terminal_is_char_pointer:
+                append_view(out, sview("cstr", 0, -1)) if c_type_is_const_pointer(qual_type) else append_view(out, sview("u8", 0, -1))
+            elif sview_eq(c_type_named_base(terminal_type), sview("FILE", 0, -1)) or type_starts_with(c_type_named_base(terminal_type), sview("void", 0, -1)):
+                append_view(out, sview("void", 0, -1))
+            else:
+                append_c_type(out, terminal_type)
+            return
+        qualifier_depth: i64 = pointer_count - layer - 1
+        grouped: bool = layer < pointer_count - 1
+        append_view(out, sview("mutable ", 0, -1)) if c_type_pointer_qualifiers_at_depth(qual_type, qualifier_depth) % 2 == 0
+        append_view(out, sview("(", 0, -1)) if grouped
+        append_c_pointer_type_layers(out, qual_type, terminal_type, pointer_count, layer + 1, terminal_is_char_pointer, terminal_is_elisa_type, terminal_is_record_name)
+        append_view(out, sview(") ", 0, -1)) if grouped
+        append_view(out, sview("&", 0, -1))
+        append_view(out, sview("?", 0, -1))
 
     def c_type_is_char_pointer(qual_type: sview) -> bool:
         base: sview = c_type_named_base(qual_type)
@@ -260,7 +214,14 @@ extend CTranslator:
         return c_find_byte_from(qual_type, 40, close_marker + 1) if marker >= 0 and close_marker >= 0 else -1
 
     def c_function_parameter_type(function_type: sview, wanted: i64) -> sview:
-        params_start: i64 = c_function_pointer_params_start(function_type)
+        # Function declarations from system headers are often absent from the
+        # projected AST, while a call still carries a complete direct function
+        # type such as `void (Uint32)`. Reuse the same parameter splitter for
+        # both callback types (`R (*)(Args)`) and direct function types
+        # (`R (Args)`) so external ABI recovery does not depend on retaining a
+        # system-header declaration node.
+        params_start: mutable i64 = c_function_pointer_params_start(function_type)
+        params_start <- sview_find_byte(function_type, 40) if params_start < 0 and c_type_is_function(function_type)
         params_end: i64 = c_find_last_byte(function_type, 41)
         if params_start < 0 or params_end <= params_start or wanted < 0:
             return sview("", 0, 0)
@@ -281,9 +242,9 @@ extend CTranslator:
         return sview("", 0, 0)
 
     def append_c_function_result(out: mutable darray[u8]&, return_type: sview) -> void:
-        append_view(out, sview("mutable ", 0, -1)) if sview_find_byte(return_type, 42) >= 0 and not c_type_is_const_pointer(return_type)
+        append_view(out, sview("mutable ", 0, -1)) if not c_type_pointer_layers_composable(return_type) and sview_find_byte(return_type, 42) >= 0 and not c_type_is_const_pointer(return_type)
         append_c_type(out, return_type)
-        append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(return_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(return_type)
 
     def append_c_function_type(out: mutable darray[u8]&, function_type: sview) -> void:
         marker: i64 = c_function_pointer_marker(function_type)
@@ -300,9 +261,9 @@ extend CTranslator:
                 if sview_eq(current, sview("...", 0, -1)):
                     append_view(out, sview("...", 0, -1))
                 else:
-                    append_view(out, sview("mutable ", 0, -1)) if sview_find_byte(current, 42) >= 0 and not c_type_is_function_pointer(current) and not c_type_is_const_pointer(current)
+                    append_view(out, sview("mutable ", 0, -1)) if not c_type_pointer_layers_composable(current) and (sview_find_byte(current, 42) >= 0 or c_type_reference_count(current) > 0) and not c_type_is_function_pointer(current) and c_type_pointer_can_write(current)
                     append_c_type(out, current)
-                    append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(current)
+                    append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(current)
                 parameter <- parameter + 1
                 break if c_function_parameter_type(function_type, parameter).len == 0
         append_view(out, sview(") -> ", 0, -1))
@@ -311,26 +272,61 @@ extend CTranslator:
     def append_c_type(out: mutable darray[u8]&, qual_type: sview) -> void:
         # C pointer values are represented as Elisa references. The declaration
         # site supplies `mutable` when C allows writes through that pointer.
+        reference_count: i64 = c_type_reference_count(qual_type)
+        if reference_count > 0:
+            append_c_type(out, c_type_reference_base(qual_type))
+            for _index in 0..<reference_count |out, reference_count|:
+                append_view(out, sview("&", 0, -1))
+            return
+        if cpp_type_is_unordered_map(qual_type):
+            append_cpp_unordered_map_type(out, qual_type)
+            return
+        pointer_array_open: i64 = c_pointer_to_array_open(qual_type)
         open_bracket: i64 = sview_find_byte(qual_type, 91)
         close_bracket: i64 = sview_find_byte(qual_type, 93)
-        if c_type_is_function_pointer(qual_type):
+        if pointer_array_open >= 0:
+            append_c_pointer_to_array_type(out, qual_type, 0, c_array_dimension_count(qual_type))
+            append_view(out, sview("&", 0, -1))
+            append_c_pointer_layers(out, c_type_pointer_count(qual_type) - 1)
+        elif c_type_is_function_pointer(qual_type):
+            append_view(out, sview("(", 0, -1))
             append_c_function_type(out, qual_type)
+            append_view(out, sview(")?", 0, -1))
         elif open_bracket >= 0 and close_bracket > open_bracket:
-            append_view(out, sview("array[", 0, -1))
-            element_type: sview = string_view_prefix(qual_type, open_bracket)
-            append_c_type(out, element_type)
-            append_view(out, sview("?", 0, -1)) if c_type_pointer_optional(element_type)
-            append_view(out, sview(", ", 0, -1))
-            append_view_range(out, qual_type, open_bracket + 1, close_bracket)
-            append_view(out, sview("]", 0, -1))
+            if c_type_is_incomplete_array(qual_type):
+                # An incomplete array declaration (`extern T values[]`) is an
+                # addressable object whose size is supplied by another module.
+                # Elisa cannot spell an array with an unknown bound, so retain
+                # the C ABI as a reference to its first element. The expression
+                # lowering still recognizes the original array spelling for
+                # decay and indexing decisions.
+                append_c_array_type(out, qual_type, 1, c_array_dimension_count(qual_type))
+                append_view(out, sview("&", 0, -1))
+            else:
+                append_c_array_type(out, qual_type, 0, c_array_dimension_count(qual_type))
         elif sview_find_byte(qual_type, 42) >= 0:
+            if c_type_pointer_layers_composable(qual_type):
+                pointer_count: i64 = c_type_pointer_count(qual_type)
+                pointer_base: sview = c_trim_spaces(c_type_pointer_base(qual_type))
+                char_pointer: bool = pointer_count >= 2 and c_type_is_char_pointer(qual_type)
+                append_c_pointer_type_layers(out, qual_type, pointer_base, pointer_count, 0, char_pointer, false, false)
+                return
             base: mutable sview = c_type_without_qualifiers(c_type_pointer_base(qual_type))
             base <- sview_trim_trailing(base, 32)
             pointer_count: mutable i64 = 0
+            nested_pointer_special: mutable bool = false
             for index in 0..<qual_type.len |qual_type, pointer_count|:
                 pointer_count <- pointer_count + 1 if string_view_index(qual_type, index) == 42
             if pointer_count >= 2 and (sview_starts_with(base, sview("char", 0, -1)) or sview_starts_with(base, sview("const char", 0, -1)) or sview_starts_with(base, sview("unsigned char", 0, -1)) or sview_starts_with(base, sview("const unsigned char", 0, -1))):
                 append_view(out, sview("cstr&&", 0, -1)) if c_type_is_const_pointer(qual_type) else append_view(out, sview("u8&&", 0, -1))
+                nested_pointer_special <- true
+            elif c_type_abi_base(base) == sview("i8", 0, -1) or c_type_abi_base(base) == sview("u8", 0, -1) or c_type_abi_base(base) == sview("i16", 0, -1) or c_type_abi_base(base) == sview("u16", 0, -1) or c_type_abi_base(base) == sview("i32", 0, -1) or c_type_abi_base(base) == sview("u32", 0, -1) or c_type_abi_base(base) == sview("i64", 0, -1) or c_type_abi_base(base) == sview("u64", 0, -1) or c_type_abi_base(base) == sview("usize", 0, -1) or c_type_abi_base(base) == sview("isize", 0, -1) or c_type_abi_base(base) == sview("f32", 0, -1) or c_type_abi_base(base) == sview("f64", 0, -1):
+                # Fixed-width libc typedefs (`int32_t`, `__uint16_t`, …) carry
+                # no desugared spelling on array/pointer type nodes. Normalize
+                # them to the same ABI scalar as their builtin spelling before
+                # adding the reference layer.
+                append_view(out, c_type_abi_base(base))
+                append_view(out, sview("&", 0, -1))
             elif sview_find_byte(base, 40) >= 0:
                 append_view(out, sview("void&", 0, -1))
             elif sview_starts_with(base, sview("char", 0, -1)) or sview_starts_with(base, sview("unsigned char", 0, -1)) or sview_starts_with(base, sview("cc_t", 0, -1)):
@@ -370,10 +366,20 @@ extend CTranslator:
                 else:
                     append_elisa_type_name(out, named)
                     append_view(out, sview("&", 0, -1))
+            if nested_pointer_special:
+                for index in 2..<pointer_count |out, pointer_count|:
+                    append_view(out, sview("&", 0, -1))
+            else:
+                append_c_pointer_layers(out, pointer_count)
         elif type_starts_with(qual_type, sview("void", 0, -1)):
             append_view(out, sview("void", 0, -1))
         elif type_starts_with(qual_type, sview("__builtin_va_list", 0, -1)) or type_starts_with(qual_type, sview("va_list", 0, -1)):
             append_view(out, sview("va_list", 0, -1))
+        elif c_type_abi_base(qual_type) == sview("i8", 0, -1) or c_type_abi_base(qual_type) == sview("u8", 0, -1) or c_type_abi_base(qual_type) == sview("i16", 0, -1) or c_type_abi_base(qual_type) == sview("u16", 0, -1) or c_type_abi_base(qual_type) == sview("i32", 0, -1) or c_type_abi_base(qual_type) == sview("u32", 0, -1) or c_type_abi_base(qual_type) == sview("i64", 0, -1) or c_type_abi_base(qual_type) == sview("u64", 0, -1) or c_type_abi_base(qual_type) == sview("usize", 0, -1) or c_type_abi_base(qual_type) == sview("isize", 0, -1) or c_type_abi_base(qual_type) == sview("f32", 0, -1) or c_type_abi_base(qual_type) == sview("f64", 0, -1):
+            # Clang often preserves standard fixed-width typedef spellings on
+            # arrays and declarations even when the typedef itself is system
+            # owned. Emit the canonical Elisa scalar instead of an opaque name.
+            append_view(out, c_type_abi_base(qual_type))
         elif type_starts_with(qual_type, sview("time_t", 0, -1)) or type_starts_with(qual_type, sview("__darwin_time_t", 0, -1)):
             append_view(out, sview("i64", 0, -1))
         elif type_starts_with(qual_type, sview("size_t", 0, -1)) or type_starts_with(qual_type, sview("__darwin_size_t", 0, -1)) or type_starts_with(qual_type, sview("__size_t", 0, -1)):

@@ -1,0 +1,66 @@
+include "../src/.compiler_std/elisacore_runtime.elisa"
+include "../src/.compiler_std/elisacore_json.elisa"
+
+module CTranslator:
+    struct AstProjectionSchemaTestModule:
+        _unused: u8
+
+extend CTranslator:
+    def ast_field[@r](node: JsonValueHandle[r], key: sview) -> JsonValueHandle[r]:
+        return try json_handle_get(node, key) else json_handle_null(node)
+
+    def ast_string[@r](value: JsonValueHandle[r]) -> sview @r:
+        return try json_handle_as_string(value) else sview("", 0, 0)
+
+    # The schema file also contains the raw-Clang scanner entry point. This
+    # focused harness tests the compact DOM contract, so its unrelated scanner
+    # dependencies are inert stubs and are never called.
+    def ast_json_skip_space(text: sview, cursor: i64) -> i64:
+        return cursor
+
+    def ast_json_skip_string(text: sview, start: i64) -> i64:
+        return start
+
+    def ast_json_skip_value(text: sview, start: i64) -> i64:
+        return start
+
+    def ast_json_key_is(text: sview, start: i64, stop: i64, expected: sview) -> bool:
+        return false
+
+include "../src/clang_ast_projection_schema.elisa"
+include "../src/clang_ast_schema.elisa"
+
+extend CTranslator:
+    def ast_projection_expect_issue(text: sview, expected: sview) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        region ast_projection_test_arena(65536):
+            parsed: JsonParseResult = json_parse_checked(&ast_projection_test_arena, text)
+            return false if parsed.code != JsonErrorCode.OK
+            root: JsonValueHandle = json_handle_from_result(parsed)
+            return sview_eq(ast_root_schema_issue(root), expected)
+
+    def run_ast_projection_schema_checks() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        valid: sview = sview("{\"kind\":\"TranslationUnitDecl\",\"elisaProjectionVersion\":2,\"inner\":[]}", 0, -1)
+        return 1 if not ast_projection_expect_issue(valid, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        missing: sview = sview("{\"kind\":\"TranslationUnitDecl\",\"inner\":[]}", 0, -1)
+        return 2 if not ast_projection_expect_issue(missing, sview("missing-required-field:root.elisaProjectionVersion", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        wrong_type: sview = sview("{\"kind\":\"TranslationUnitDecl\",\"elisaProjectionVersion\":\"1\",\"inner\":[]}", 0, -1)
+        return 3 if not ast_projection_expect_issue(wrong_type, sview("invalid-type:root.elisaProjectionVersion", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        fractional: sview = sview("{\"kind\":\"TranslationUnitDecl\",\"elisaProjectionVersion\":2.5,\"inner\":[]}", 0, -1)
+        return 4 if not ast_projection_expect_issue(fractional, sview("unsupported-projection-version", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        unsupported: sview = sview("{\"kind\":\"TranslationUnitDecl\",\"elisaProjectionVersion\":3,\"inner\":[]}", 0, -1)
+        return 5 if not ast_projection_expect_issue(unsupported, sview("unsupported-projection-version", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+
+        duplicated: sview = sview("{\"kind\":\"TranslationUnitDecl\",\"elisaProjectionVersion\":2,\"elisaProjectionVersion\":3,\"inner\":[]}", 0, -1)
+        return 6 if not ast_projection_expect_issue(duplicated, sview("duplicate-field:root.elisaProjectionVersion", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return 7 if not ast_json_project_is_expression_kind(sview("ConditionalOperator", 0, -1))
+        return 8 if not ast_json_project_is_expression_kind(sview("BinaryConditionalOperator", 0, -1))
+        return 9 if ast_json_project_is_expression_kind(sview("FunctionDecl", 0, -1))
+        print("compact AST projection schema checks passed\n")
+        return 0
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    return CTranslator::run_ast_projection_schema_checks() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

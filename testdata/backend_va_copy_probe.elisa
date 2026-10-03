@@ -1,0 +1,21 @@
+extern va_list
+
+extern llvm_va_copy(destination: mutable void&, source: mutable void&) -> void
+
+@intrinsic("llvm.va_start")
+extern llvm_va_start(storage: mutable void&) -> void
+
+@intrinsic("llvm.va_end")
+extern llvm_va_end(storage: mutable void&) -> void
+
+def probe(tag: i32, ...) -> i32:
+    first: mutable va_list = zeroed
+    second: mutable va_list = zeroed
+    llvm_va_start((&first).cast[mutable void&])
+    llvm_va_copy((&second).cast[mutable void&], (&first).cast[mutable void&])
+    llvm_va_end((&second).cast[mutable void&])
+    llvm_va_end((&first).cast[mutable void&])
+    return tag
+
+def main() -> i32:
+    return probe(42, 7) - 42

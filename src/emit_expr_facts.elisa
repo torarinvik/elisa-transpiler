@@ -1,24 +1,23 @@
 extend CTranslator:
     # Flow facts are kept separate from expression spelling so every emitter
     # can use the same place identity and C NULL classification.
-    def typed_name_is_currently_nonnull(ctx: TypedContext&, index: i64) -> bool:
+    def typed_name_is_currently_nonnull[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return true if c_type_is_array(expression.type_name) or expression.kind == TypedExprKind.String
         if expression.kind == TypedExprKind.Cast and expression.lhs >= 0:
             return true if c_type_is_array(typed_expr_at(ctx, expression.lhs).type_name)
-        return false if not c_type_pointer_optional(expression.type_name)
+        return false if not c_type_value_optional(expression.type_name)
         for fact_index in 0..<ctx.current_nonnull_exprs.count |ctx, index|:
             return true if typed_expr_is_same_place(ctx, index, ctx.current_nonnull_exprs[fact_index])
         return false if expression.kind != TypedExprKind.Name
         for offset in 0..<ctx.current_nonnull_names.count |ctx, expression|:
             return true if sview_eq(ctx.current_nonnull_names[offset.usize()], expression.text)
         return false
-
-    def typed_expr_is_same_place(ctx: TypedContext&, left_index: i64, right_index: i64) -> bool:
+    def typed_expr_is_same_place[@r](ctx: TypedContext[r]&, left_index: i64, right_index: i64) -> bool:
         return false if left_index < 0 or right_index < 0 or left_index >= ctx.exprs.count.i64() or right_index >= ctx.exprs.count.i64()
-        left: TypedExpr = typed_expr_at(ctx, left_index)
-        right: TypedExpr = typed_expr_at(ctx, right_index)
+        left: TypedExpr[r] = typed_expr_at(ctx, left_index)
+        right: TypedExpr[r] = typed_expr_at(ctx, right_index)
         return typed_expr_is_same_place(ctx, left.lhs, right_index) if left.kind == TypedExprKind.Cast
         return typed_expr_is_same_place(ctx, left_index, right.lhs) if right.kind == TypedExprKind.Cast
         return typed_expr_is_same_place(ctx, left.lhs, right.lhs) if left.kind == TypedExprKind.Unary and right.kind == TypedExprKind.Unary and sview_eq(left.text, sview("&", 0, -1)) and sview_eq(right.text, sview("&", 0, -1))
@@ -26,10 +25,9 @@ extend CTranslator:
         return left.kind == TypedExprKind.Member and right.kind == TypedExprKind.Member and sview_eq(left.text, right.text) and typed_expr_is_same_place(ctx, left.lhs, right.lhs)
         return left.kind == TypedExprKind.ArrayIndex and right.kind == TypedExprKind.ArrayIndex and typed_expr_is_same_place(ctx, left.lhs, right.lhs) and typed_expr_is_same_place(ctx, left.rhs, right.rhs)
         return false
-
-    def typed_expr_is_null_value(ctx: TypedContext&, index: i64) -> bool:
+    def typed_expr_is_null_value[@r](ctx: TypedContext[r]&, index: i64) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return true if expression.kind == TypedExprKind.Null
         # Clang commonly lowers the C `NULL` macro as a zero integer wrapped in
         # one or more pointer casts. Treat that canonical null pointer constant
@@ -40,32 +38,31 @@ extend CTranslator:
                 return true
             return expression.lhs >= 0 and typed_expr_is_null_value(ctx, expression.lhs)
         return false
-
-    def typed_null_guard_name(ctx: TypedContext&, index: i64, wants_nonnull: bool) -> sview:
+    def typed_null_guard_name[@r](ctx: TypedContext[r]&, index: i64, wants_nonnull: bool) -> sview @r:
         return sview("", 0, 0) if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return sview("", 0, 0) if expression.kind != TypedExprKind.Binary
         expected_opcode: sview = sview("!=", 0, -1) if wants_nonnull else sview("==", 0, -1)
         return sview("", 0, 0) if not sview_eq(expression.text, expected_opcode)
-        lhs: TypedExpr = typed_expr_at(ctx, expression.lhs)
-        rhs: TypedExpr = typed_expr_at(ctx, expression.rhs)
-        if lhs.kind == TypedExprKind.Name and c_type_pointer_optional(lhs.type_name) and typed_expr_is_null_value(ctx, expression.rhs):
+        lhs: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
+        rhs: TypedExpr[r] = typed_expr_at(ctx, expression.rhs)
+        if lhs.kind == TypedExprKind.Name and c_type_value_optional(lhs.type_name) and typed_expr_is_null_value(ctx, expression.rhs):
             return lhs.text
-        if rhs.kind == TypedExprKind.Name and c_type_pointer_optional(rhs.type_name) and typed_expr_is_null_value(ctx, expression.lhs):
+        if rhs.kind == TypedExprKind.Name and c_type_value_optional(rhs.type_name) and typed_expr_is_null_value(ctx, expression.lhs):
             return rhs.text
         return sview("", 0, 0)
 
     # A call invalidates a null fact only when it can write through the same
     # pointer root. The old whole-context reset was safe but made ordinary
     # read-only library calls destroy useful proofs for every local in scope.
-    def typed_call_may_mutate_root(ctx: TypedContext&, index: i64, root: sview) -> bool:
+    def typed_call_may_mutate_root[@r](ctx: TypedContext[r]&, index: i64, root: sview) -> bool:
         return false if index < 0 or index >= ctx.exprs.count.i64()
-        expression: TypedExpr = typed_expr_at(ctx, index)
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
         if expression.kind == TypedExprKind.Call:
             if expression.value == 1:
                 return true
             for function_index in 0..<ctx.functions.count |ctx, expression, root|:
-                function: TypedFunction = ctx.functions[function_index.usize()]
+                function: TypedFunction[r] = ctx.functions[function_index.usize()]
                 if sview_eq(function.name, expression.text):
                     return true if (typed_global_index(ctx, root) >= 0 or typed_external_global_index(ctx, root) >= 0) and function.has_global_effect
                     if expression.args_count > 0:
@@ -76,7 +73,7 @@ extend CTranslator:
                                 return true
                     return false
             for external_index in 0..<ctx.externs.count |ctx, expression, root|:
-                external: TypedExtern = ctx.externs[external_index.usize()]
+                external: TypedExtern[r] = ctx.externs[external_index.usize()]
                 if sview_eq(external.name, expression.text) or sview_eq(external.link_name, expression.text):
                     if expression.args_count > 0:
                         for offset in 0..<expression.args_count |ctx, expression, root, external|:

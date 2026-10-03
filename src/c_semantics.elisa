@@ -1,4 +1,18 @@
 extend CTranslator:
+    def c_type_fixed_width_abi(qual_type: sview) -> sview:
+        # Some platform headers expose fixed-width typedefs with a
+        # capitalized spelling after Clang alias expansion (for example
+        # `Int32_t`). Treat those spellings like their standard C counterparts
+        # instead of inventing opaque records for them.
+        base: sview = c_type_named_base(qual_type)
+        # Clang may expose the target's wide-character typedef chain as
+        # `wchar_t`, `__darwin_wchar_t`, or a wrapper spelling such as
+        # `Wchar_t` after a C++ header has been desugared. Elisa has no
+        # platform-specific wchar type; on the supported Darwin ABI it is a
+        # signed 32-bit scalar, so keep it in the scalar ABI family instead
+        # of inventing an opaque record for every wide-string helper.
+        return sview("i32", 0, -1) if sview_eq(base, sview("wchar_t", 0, -1)) or sview_eq(base, sview("__darwin_wchar_t", 0, -1)) or sview_eq(base, sview("Wchar_t", 0, -1)) else sview("u32", 0, -1) if sview_eq(base, sview("wint_t", 0, -1)) else sview("f64", 0, -1) if sview_eq(base, sview("long double", 0, -1)) or sview_eq(base, sview("Long_double", 0, -1)) else sview("i8", 0, -1) if sview_eq(base, sview("int8_t", 0, -1)) or sview_eq(base, sview("Int8_t", 0, -1)) or sview_eq(base, sview("__int8_t", 0, -1)) else sview("u8", 0, -1) if sview_eq(base, sview("uint8_t", 0, -1)) or sview_eq(base, sview("Uint8_t", 0, -1)) or sview_eq(base, sview("UInt8_t", 0, -1)) or sview_eq(base, sview("__uint8_t", 0, -1)) else sview("i16", 0, -1) if sview_eq(base, sview("int16_t", 0, -1)) or sview_eq(base, sview("Int16_t", 0, -1)) or sview_eq(base, sview("__int16_t", 0, -1)) else sview("u16", 0, -1) if sview_eq(base, sview("uint16_t", 0, -1)) or sview_eq(base, sview("Uint16_t", 0, -1)) or sview_eq(base, sview("UInt16_t", 0, -1)) or sview_eq(base, sview("__uint16_t", 0, -1)) else sview("i32", 0, -1) if sview_eq(base, sview("int32_t", 0, -1)) or sview_eq(base, sview("Int32_t", 0, -1)) or sview_eq(base, sview("__int32_t", 0, -1)) else sview("u32", 0, -1) if sview_eq(base, sview("uint32_t", 0, -1)) or sview_eq(base, sview("Uint32_t", 0, -1)) or sview_eq(base, sview("UInt32_t", 0, -1)) else sview("i64", 0, -1) if sview_eq(base, sview("int64_t", 0, -1)) or sview_eq(base, sview("Int64_t", 0, -1)) or sview_eq(base, sview("__int64_t", 0, -1)) else sview("u64", 0, -1) if sview_eq(base, sview("uint64_t", 0, -1)) or sview_eq(base, sview("Uint64_t", 0, -1)) or sview_eq(base, sview("UInt64_t", 0, -1)) else sview("", 0, 0)
+
     def c_type_is_enum(qual_type: sview) -> bool:
         return false if c_type_pointer_count(qual_type) > 0 or sview_find_byte(qual_type, 91) >= 0 or c_type_is_function(qual_type)
         return sview_starts_with(c_type_without_qualifiers(qual_type), sview("enum ", 0, -1))
@@ -10,16 +24,33 @@ extend CTranslator:
         # comparisons acquire bogus `.i32()`/`.u32()` conversions.
         return false if c_type_pointer_count(qual_type) > 0 or sview_find_byte(qual_type, 91) >= 0 or c_type_is_function(qual_type)
         base: sview = c_type_named_base(qual_type)
-        return sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) or sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1))
+        return true if c_type_fixed_width_abi(base).len > 0
+        return true if sview_eq(base, sview("ptrdiff_t", 0, -1)) or sview_eq(base, sview("__ptrdiff_t", 0, -1)) or sview_eq(base, sview("__darwin_ptrdiff_t", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("__size_t", 0, -1)) or sview_eq(base, sview("__darwin_size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) or sview_eq(base, sview("__ssize_t", 0, -1)) or sview_eq(base, sview("__darwin_ssize_t", 0, -1))
+        return sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) or sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) or sview_eq(base, sview("int8_t", 0, -1)) or sview_eq(base, sview("uint8_t", 0, -1)) or sview_eq(base, sview("int16_t", 0, -1)) or sview_eq(base, sview("uint16_t", 0, -1)) or sview_eq(base, sview("int32_t", 0, -1)) or sview_eq(base, sview("uint32_t", 0, -1)) or sview_eq(base, sview("int64_t", 0, -1)) or sview_eq(base, sview("uint64_t", 0, -1)) or sview_eq(base, sview("__int8_t", 0, -1)) or sview_eq(base, sview("__uint8_t", 0, -1)) or sview_eq(base, sview("__int16_t", 0, -1)) or sview_eq(base, sview("__uint16_t", 0, -1)) or sview_eq(base, sview("__int32_t", 0, -1)) or sview_eq(base, sview("__uint32_t", 0, -1)) or sview_eq(base, sview("__int64_t", 0, -1)) or sview_eq(base, sview("__uint64_t", 0, -1))
+
+    def c_type_is_floating(qual_type: sview) -> bool:
+        return false if c_type_pointer_count(qual_type) > 0 or sview_find_byte(qual_type, 91) >= 0 or c_type_is_function(qual_type)
+        base: sview = c_type_named_base(qual_type)
+        return sview_eq(base, sview("float", 0, -1)) or sview_eq(base, sview("double", 0, -1)) or sview_eq(base, sview("long double", 0, -1))
 
     def c_type_is_unsigned_integer(qual_type: sview) -> bool:
         return false if not c_type_is_integer(qual_type)
         base: sview = c_type_named_base(qual_type)
-        return sview_starts_with(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("size_t", 0, -1))
+        fixed: sview = c_type_fixed_width_abi(base)
+        return true if sview_eq(fixed, sview("u8", 0, -1)) or sview_eq(fixed, sview("u16", 0, -1)) or sview_eq(fixed, sview("u32", 0, -1)) or sview_eq(fixed, sview("u64", 0, -1))
+        return sview_starts_with(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("__size_t", 0, -1)) or sview_eq(base, sview("__darwin_size_t", 0, -1)) or sview_eq(base, sview("uint8_t", 0, -1)) or sview_eq(base, sview("uint16_t", 0, -1)) or sview_eq(base, sview("uint32_t", 0, -1)) or sview_eq(base, sview("uint64_t", 0, -1)) or sview_eq(base, sview("__uint8_t", 0, -1)) or sview_eq(base, sview("__uint16_t", 0, -1)) or sview_eq(base, sview("__uint32_t", 0, -1)) or sview_eq(base, sview("__uint64_t", 0, -1))
 
     def c_type_integer_width(qual_type: sview) -> i64:
         base: sview = c_type_named_base(qual_type)
-        return 8 if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) else 16 if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) else 64 if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) else 32
+        fixed: sview = c_type_fixed_width_abi(base)
+        if sview_eq(fixed, sview("i8", 0, -1)) or sview_eq(fixed, sview("u8", 0, -1)):
+            return 8
+        if sview_eq(fixed, sview("i16", 0, -1)) or sview_eq(fixed, sview("u16", 0, -1)):
+            return 16
+        if sview_eq(fixed, sview("i64", 0, -1)) or sview_eq(fixed, sview("u64", 0, -1)):
+            return 64
+        return 64 if sview_eq(base, sview("ptrdiff_t", 0, -1)) or sview_eq(base, sview("__ptrdiff_t", 0, -1)) or sview_eq(base, sview("__darwin_ptrdiff_t", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("__size_t", 0, -1)) or sview_eq(base, sview("__darwin_size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) or sview_eq(base, sview("__ssize_t", 0, -1)) or sview_eq(base, sview("__darwin_ssize_t", 0, -1))
+        return 8 if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("int8_t", 0, -1)) or sview_eq(base, sview("uint8_t", 0, -1)) or sview_eq(base, sview("__int8_t", 0, -1)) or sview_eq(base, sview("__uint8_t", 0, -1)) else 16 if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("int16_t", 0, -1)) or sview_eq(base, sview("uint16_t", 0, -1)) or sview_eq(base, sview("__int16_t", 0, -1)) or sview_eq(base, sview("__uint16_t", 0, -1)) else 64 if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("int64_t", 0, -1)) or sview_eq(base, sview("uint64_t", 0, -1)) or sview_eq(base, sview("__int64_t", 0, -1)) or sview_eq(base, sview("__uint64_t", 0, -1)) or sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("ssize_t", 0, -1)) else 32
 
     def c_type_integer_promotion(qual_type: sview) -> sview:
         return sview("", 0, 0) if not c_type_is_integer(qual_type)
@@ -39,3 +70,82 @@ extend CTranslator:
         left_promoted: sview = c_type_integer_promotion(left)
         right_promoted: sview = c_type_integer_promotion(right)
         return left_promoted.len > 0 and sview_eq(left_promoted, right_promoted)
+
+    def clang_target_integer_type(width: i64, unsigned: bool) -> sview:
+        return sview("u8", 0, -1) if width == 8 and unsigned else sview("i8", 0, -1) if width == 8 else sview("u16", 0, -1) if width == 16 and unsigned else sview("i16", 0, -1) if width == 16 else sview("u32", 0, -1) if width == 32 and unsigned else sview("i32", 0, -1) if width == 32 else sview("u64", 0, -1) if width == 64 and unsigned else sview("i64", 0, -1) if width == 64 else sview("", 0, 0)
+
+    def clang_target_type_abi_base(abi: ClangTargetABI, qual_type: sview) -> sview:
+        return c_type_abi_base(qual_type) if not abi.valid
+        base: sview = c_type_named_base(qual_type)
+        return sview("bool", 0, -1) if sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1))
+        fixed: sview = c_type_fixed_width_abi(base)
+        return fixed if fixed.len > 0
+        if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("signed char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)):
+            return clang_target_integer_type(abi.char_bits, sview_eq(base, sview("unsigned char", 0, -1)) or (sview_eq(base, sview("char", 0, -1)) and abi.char_unsigned))
+        if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) or sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) or sview_eq(base, sview("signed short", 0, -1)) or sview_eq(base, sview("signed short int", 0, -1)):
+            return clang_target_integer_type(abi.short_bits, sview_starts_with(base, sview("unsigned", 0, -1)))
+        if sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) or sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)):
+            return clang_target_integer_type(abi.int_bits, sview_starts_with(base, sview("unsigned", 0, -1)))
+        if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("signed long", 0, -1)) or sview_eq(base, sview("signed long int", 0, -1)) or sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("long unsigned int", 0, -1)):
+            return clang_target_integer_type(abi.long_bits, sview_starts_with(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("long unsigned int", 0, -1)))
+        if sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) or sview_eq(base, sview("signed long long", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) or sview_eq(base, sview("long long unsigned int", 0, -1)):
+            return clang_target_integer_type(abi.long_long_bits, sview_starts_with(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("long long unsigned int", 0, -1)))
+        if sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("__darwin_size_t", 0, -1)) or sview_eq(base, sview("__size_t", 0, -1)):
+            return clang_target_integer_type(abi.size_type_bits, true)
+        if sview_eq(base, sview("ssize_t", 0, -1)) or sview_eq(base, sview("__darwin_ssize_t", 0, -1)) or sview_eq(base, sview("__ssize_t", 0, -1)):
+            return clang_target_integer_type(abi.size_type_bits, false)
+        if sview_eq(base, sview("ptrdiff_t", 0, -1)) or sview_eq(base, sview("__ptrdiff_t", 0, -1)) or sview_eq(base, sview("__darwin_ptrdiff_t", 0, -1)):
+            return clang_target_integer_type(abi.pointer_bits, false)
+        return c_type_abi_base(qual_type)
+
+    def clang_target_type_integer_width(abi: ClangTargetABI, qual_type: sview) -> i64:
+        return c_type_integer_width(qual_type) if not abi.valid
+        return clang_target_abi_type_integer_width(clang_target_type_abi_base(abi, qual_type))
+
+    def clang_target_type_is_unsigned(abi: ClangTargetABI, qual_type: sview) -> bool:
+        return c_type_is_unsigned_integer(qual_type) if not abi.valid
+        return clang_target_abi_type_is_unsigned(clang_target_type_abi_base(abi, qual_type))
+
+    # Return a size only when it follows from the selected Clang target facts
+    # and the translator's supported scalar/pointer model. Composite layout
+    # still requires Clang record-layout metadata and is deliberately unknown.
+    def clang_target_type_size_bytes(abi: ClangTargetABI, qual_type: sview) -> i64:
+        return -1 if not abi.valid or abi.char_bits <= 0
+        if c_type_pointer_count(qual_type) > 0 or c_type_is_function_pointer(qual_type):
+            return abi.pointer_bits / abi.char_bits if abi.pointer_bits > 0 and abi.pointer_bits % abi.char_bits == 0 else -1
+        base: sview = c_type_named_base(qual_type)
+        if sview_eq(base, sview("float", 0, -1)):
+            return abi.float_bytes if abi.float_bytes > 0 else -1
+        if sview_eq(base, sview("double", 0, -1)):
+            return abi.double_bytes if abi.double_bytes > 0 else -1
+        if sview_eq(base, sview("long double", 0, -1)):
+            return abi.long_double_bytes if abi.long_double_bytes > 0 else -1
+        if sview_eq(base, sview("bool", 0, -1)) or sview_eq(base, sview("_Bool", 0, -1)):
+            return 1
+        width: i64 = clang_target_type_integer_width(abi, qual_type)
+        return width / abi.char_bits if width > 0 and width % abi.char_bits == 0 else -1
+    def typed_increment_scalar_key[@r](ctx: TypedContext[r]&, qual_type: sview) -> sview @r:
+        return sview("bool", 0, -1) if sview_eq(qual_type, sview("bool", 0, -1)) or sview_eq(qual_type, sview("_Bool", 0, -1))
+        return clang_target_type_abi_base(ctx.target_abi, qual_type) if c_type_is_integer(qual_type) and not c_type_is_enum(qual_type)
+        return c_type_abi_base(qual_type) if c_type_is_floating(qual_type)
+        return sview("", 0, 0)
+
+    def clang_target_abi_type_integer_width(abi_type: sview) -> i64:
+        return 8 if sview_eq(abi_type, sview("i8", 0, -1)) or sview_eq(abi_type, sview("u8", 0, -1)) else 16 if sview_eq(abi_type, sview("i16", 0, -1)) or sview_eq(abi_type, sview("u16", 0, -1)) else 32 if sview_eq(abi_type, sview("i32", 0, -1)) or sview_eq(abi_type, sview("u32", 0, -1)) else 64 if sview_eq(abi_type, sview("i64", 0, -1)) or sview_eq(abi_type, sview("u64", 0, -1)) else 0
+
+    def clang_target_abi_type_is_unsigned(abi_type: sview) -> bool:
+        return sview_eq(abi_type, sview("u8", 0, -1)) or sview_eq(abi_type, sview("u16", 0, -1)) or sview_eq(abi_type, sview("u32", 0, -1)) or sview_eq(abi_type, sview("u64", 0, -1))
+
+    def clang_target_abi_integer_promotion(abi_type: sview) -> sview:
+        width: i64 = clang_target_abi_type_integer_width(abi_type)
+        return sview("", 0, 0) if width == 0 else sview("i32", 0, -1) if width < 32 else abi_type
+
+    def clang_target_abi_usual_arithmetic_type(left: sview, right: sview) -> sview:
+        left_promoted: sview = clang_target_abi_integer_promotion(left)
+        right_promoted: sview = clang_target_abi_integer_promotion(right)
+        return sview("", 0, 0) if left_promoted.len == 0 or right_promoted.len == 0
+        return left_promoted if sview_eq(left_promoted, right_promoted) else sview("u64", 0, -1) if sview_eq(left_promoted, sview("u64", 0, -1)) or sview_eq(right_promoted, sview("u64", 0, -1)) else sview("i64", 0, -1) if (sview_eq(left_promoted, sview("i64", 0, -1)) and sview_eq(right_promoted, sview("u32", 0, -1))) or (sview_eq(right_promoted, sview("i64", 0, -1)) and sview_eq(left_promoted, sview("u32", 0, -1))) else sview("u32", 0, -1) if sview_eq(left_promoted, sview("u32", 0, -1)) or sview_eq(right_promoted, sview("u32", 0, -1)) else sview("i32", 0, -1)
+
+    def clang_target_usual_arithmetic_type(abi: ClangTargetABI, left: sview, right: sview) -> sview:
+        return c_type_usual_arithmetic_type(left, right) if not abi.valid
+        return clang_target_abi_usual_arithmetic_type(clang_target_type_abi_base(abi, left), clang_target_type_abi_base(abi, right))

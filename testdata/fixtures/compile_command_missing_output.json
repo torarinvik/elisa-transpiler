@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/compile_command_quoted.c",
+    "command": "clang -std=c11 -o"
+  }
+]

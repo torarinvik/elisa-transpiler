@@ -1,0 +1,9 @@
+# Translator-owned compatibility entry point for the subset of C++ unordered_map
+# currently lowered by the C++ frontend. The default repository layout keeps
+# this wrapper convenient for local development; relocatable output can include
+# unordered_map_core.elisa directly after selecting explicit support directories.
+
+include "../src/.compiler_std/elisacore_runtime.elisa"
+include "../src/.compiler_std/collections.elisa"
+
+include "./unordered_map_core.elisa"

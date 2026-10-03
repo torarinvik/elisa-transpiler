@@ -6,6 +6,47 @@ uncommitted work before this snapshot. No pre-existing files were reset or
 removed. After capturing the snapshot, only this new inventory document was
 staged and committed; all other dirty paths remained untouched.
 
+## Re-audit — 2026-10-03
+
+This read-only re-audit supersedes the compiler revisions and artifact-freshness
+claims below; the September 29 translator preservation snapshot remains useful
+for its historical ownership caveats. No build, checkout, merge, or lock
+operation was started by this audit.
+
+- Translator: branch `work`, HEAD `588e6880034f4b0c95513a6619c107a8407acbe1`;
+  31 modified tracked paths, 341 untracked non-ignored paths, and zero staged
+  paths. Existing changes remain unattributed and must not be blanket-staged.
+  `build/elisa-c-transpiler` is an October 1 artifact (SHA-256
+  `39e15bb1b09e0e9f107b23433753d036b1017146dfe310eeac4504aa780e22f7`), so it
+  is not evidence for the current translator sources.
+- Selected isolated Stage0: `../elisa-transpiler-worktrees/stage0-latest`,
+  branch `codex/transpiler-local-stage0-latest`, HEAD
+  `a98ef9228144619570f0aa47c5a92c4050f7d4ae`; its on-disk binary SHA-256 is
+  `915d12bba8a4c2a89eb826d61d741f952ec3be718cf023b84f51f71ffaf28ba1`.
+- Selected isolated Stage1: `../elisa-transpiler-worktrees/transpiler`,
+  branch `codex/transpiler-local-stage1`, HEAD
+  `9e1ddcbc8ccc5646d5f668bee2fbaaa56bf3a978`, with 31 dirty status entries.
+  Against the local compiler `main` checkout at
+  `9486c95679e635e4d77c8a406b35bbcdf622a5e6`, the selected Stage1 branch has
+  five commits not in `main`, while `main` has 23 commits not in the Stage1
+  branch (merge base `bb5a13cfd1ed90ccb6257a8d2cfbd3925c5b5270`). The `main`
+  checkout itself has 47 dirty status entries. Neither checkout was modified.
+  The selected Stage1 executable (SHA-256
+  `df31f9d00a8a3ffbb61302d02d05e00a7cc5eb23e7f03d36bb6fb0cedad4e369`) and
+  runtime object (SHA-256
+  `6a8d933dc5d9e77d491de34225ca21b7a37c117182e1e0e14d3a3e20ff6afc5e`) are
+  dated September 30 and are not source-fresh for either dirty checkout.
+- During the audit a separate Stage1 seed process was active in another
+  scratchpad worktree and the shared seed lock existed; system-wide memory
+  reported 53% free. No compiler build was started. Wait for the shared lock to
+  be released and re-check active compiler work and memory before refreshing
+  the local Stage1 product from the newer local `main` source.
+
+Consequently the translator currently has no verified build against the
+latest local compiler `main` source. Historical test results below remain
+historical until rerun against a source-fresh Stage1 binary and its matching
+runtime.
+
 ## Translator checkout
 
 - Repository: `elisa-transpiler`

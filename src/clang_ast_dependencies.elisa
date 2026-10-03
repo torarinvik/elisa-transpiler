@@ -1,0 +1,579 @@
+struct AstDependencySet:
+    slots: mutable darray[sview]
+    count: mutable usize
+
+struct AstDependencyEdge:
+    target: sview
+    next: i64
+
+struct AstDependencyNode:
+    id: sview
+    first_edge: mutable i64
+
+struct AstDependencyGraph:
+    nodes: mutable darray[AstDependencyNode]
+    edges: mutable darray[AstDependencyEdge]
+    node_count: mutable usize
+    source_type_alias_ids: mutable AstDependencySet
+    source_template_types: mutable darray[sview]
+
+struct AstDependencyNamedType:
+    name: sview
+    identifier: mutable sview
+    ambiguous: mutable bool
+    complete: mutable bool
+
+struct AstDependencyAliasName:
+    value: sview
+
+struct AstDependencyTypeIndex:
+    slots: mutable darray[AstDependencyNamedType]
+    count: mutable usize
+    # This metadata is scoped to one compacted AST. Keep aliases in a fixed
+    # open-addressed table so the type index remains self-contained without
+    # needing a region borrow of a nested darray-bearing field.
+    alias_names: mutable darray[AstDependencyAliasName]
+    alias_count: mutable usize
+    alias_overflow: mutable bool
+
+extend CTranslator:
+    def ast_json_decl_id(text: sview, start: i64) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("id", 0, -1)) and string_view_index(text, value_start) == 34:
+                value_stop: i64 = ast_json_skip_string(text, value_start)
+                return string_view_slice(text, value_start + 1, value_stop - 1)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)
+
+    def ast_json_object_kind(text: sview, start: i64) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)) and string_view_index(text, value_start) == 34:
+                value_stop: i64 = ast_json_skip_string(text, value_start)
+                return string_view_slice(text, value_start + 1, value_stop - 1)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)
+
+    def ast_json_decl_name(text: sview, start: i64) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("name", 0, -1)) and string_view_index(text, value_start) == 34:
+                value_stop: i64 = ast_json_skip_string(text, value_start)
+                return string_view_slice(text, value_start + 1, value_stop - 1)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)
+
+    def ast_json_object_member_decl_id(text: sview, start: i64, wanted: sview) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, wanted) and string_view_index(text, value_start) == 123:
+                return ast_json_decl_id(text, value_start)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)
+
+    def ast_json_object_member_is_true(text: sview, start: i64, wanted: sview) -> bool:
+        return false if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, wanted):
+                value_stop: i64 = ast_json_skip_value(text, value_start)
+                return sview_eq(string_view_slice(text, value_start, value_stop), sview("true", 0, -1))
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return false
+
+    def ast_dependency_tag_name_from_string(text: sview, start: i64, stop: i64) -> sview:
+        return sview("", 0, 0) if start >= stop or string_view_index(text, start) != 34
+        content_stop: i64 = stop - 1
+        cursor: mutable i64 = start + 1
+        while cursor < content_stop:
+            byte: mutable i64 = string_view_index(text, cursor)
+            is_identifier: mutable bool = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+            if not is_identifier:
+                cursor <- cursor + 1
+            else:
+                token_start: i64 = cursor
+                while cursor < content_stop:
+                    byte <- string_view_index(text, cursor)
+                    is_identifier <- (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+                    break if not is_identifier
+                    cursor <- cursor + 1
+                token: sview = string_view_slice(text, token_start, cursor)
+                is_tag_keyword: bool = sview_eq(token, sview("struct", 0, -1)) or sview_eq(token, sview("union", 0, -1)) or sview_eq(token, sview("class", 0, -1)) or sview_eq(token, sview("enum", 0, -1))
+                if is_tag_keyword:
+                    while cursor < content_stop:
+                        byte <- string_view_index(text, cursor)
+                        break if byte != 32 and byte != 9
+                        cursor <- cursor + 1
+                    name_start: i64 = cursor
+                    while cursor < content_stop:
+                        byte <- string_view_index(text, cursor)
+                        is_identifier <- (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+                        break if not is_identifier
+                        cursor <- cursor + 1
+                    return sview("", 0, 0) if cursor == name_start
+                    next_byte: i64 = string_view_index(text, cursor) if cursor < content_stop else -1
+                    # Qualified names and template-ids require scope-aware lookup;
+                    # refusing them avoids binding a same-spelled type from elsewhere.
+                    return sview("", 0, 0) if next_byte == 58 or next_byte == 60
+                    return string_view_slice(text, name_start, cursor)
+        return sview("", 0, 0)
+
+    def ast_dependency_unqualified_type_name_from_string(text: sview, start: i64, stop: i64) -> sview:
+        return sview("", 0, 0) if start >= stop or string_view_index(text, start) != 34
+        content_stop: i64 = stop - 1
+        cursor: mutable i64 = start + 1
+        name: mutable sview = sview("", 0, 0)
+        while cursor < content_stop:
+            byte: mutable i64 = string_view_index(text, cursor)
+            if byte == 32 or byte == 9 or byte == 10 or byte == 13:
+                cursor <- cursor + 1
+            else:
+                token_start: i64 = cursor
+                while cursor < content_stop:
+                    byte <- string_view_index(text, cursor)
+                    is_identifier: bool = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+                    break if not is_identifier
+                    cursor <- cursor + 1
+                return sview("", 0, 0) if cursor == token_start
+                token: sview = string_view_slice(text, token_start, cursor)
+                is_qualifier: bool = sview_eq(token, sview("const", 0, -1)) or sview_eq(token, sview("volatile", 0, -1)) or sview_eq(token, sview("restrict", 0, -1)) or sview_eq(token, sview("__restrict", 0, -1)) or sview_eq(token, sview("__restrict__", 0, -1))
+                if not is_qualifier:
+                    return sview("", 0, 0) if name.len > 0
+                    name <- token
+        return name
+
+    def ast_dependency_tag_name_from_type_object(text: sview, start: i64) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if (ast_json_key_is(text, key_start, key_stop, sview("qualType", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("desugaredQualType", 0, -1))) and string_view_index(text, value_start) == 34:
+                type_stop: i64 = ast_json_skip_string(text, value_start)
+                tag_name: sview = ast_dependency_tag_name_from_string(text, value_start, type_stop)
+                return tag_name if tag_name.len > 0
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)
+
+    def ast_dependency_set_place(set: mutable AstDependencySet&, candidate: sview) -> void:
+        capacity: usize = set.slots.count.usize()
+        return if capacity == 0 or candidate.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(candidate).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: sview = set.slots[slot]
+            if existing.len == 0:
+                set.slots[slot] <- candidate
+                set.count <- set.count + 1.usize()
+                return
+            return if sview_eq(existing, candidate)
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+
+    def ast_dependency_set_grow(set: mutable AstDependencySet&) -> void can[Memory.Allocate, Abort.Panic]:
+        previous_slots: darray[sview] = set.slots
+        previous_capacity: usize = previous_slots.count.usize()
+        new_capacity: usize = 64.usize() if previous_capacity == 0 else previous_capacity * 2.usize()
+        set.slots <- []
+        for _index in 0..<new_capacity.i64() |set|:
+            set.slots.push(sview("", 0, 0))
+        set.count <- 0.usize()
+        if previous_capacity > 0:
+            for index in 0..<previous_capacity |set, previous_slots|:
+                ast_dependency_set_place(set, previous_slots[index])
+
+    def ast_dependency_set_add(set: mutable AstDependencySet&, candidate: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if candidate.len == 0
+        capacity: usize = set.slots.count.usize()
+        ast_dependency_set_grow(set) can Memory.Allocate, Abort.Panic if capacity == 0 or (set.count + 1.usize()) * 2.usize() >= capacity
+        ast_dependency_set_place(set, candidate)
+
+    def ast_dependency_set_contains(set: AstDependencySet&, candidate: sview) -> bool:
+        capacity: usize = set.slots.count.usize()
+        return false if capacity == 0 or candidate.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(candidate).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: sview = set.slots[slot]
+            return false if existing.len == 0
+            return true if sview_eq(existing, candidate)
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+        return false
+
+    def ast_json_dependency_target(text: sview, start: i64, stop: i64) -> sview:
+        first: i64 = string_view_index(text, start) if start < stop else -1
+        return ast_json_decl_id(text, start) if first == 123
+        return string_view_slice(text, start + 1, stop - 1) if first == 34
+        return sview("", 0, 0)
+
+    def ast_json_is_dependency_edge_key(text: sview, key_start: i64, key_stop: i64) -> bool:
+        return ast_json_key_is(text, key_start, key_stop, sview("referencedDecl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("referencedMemberDecl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("decl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("templateDecl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("specializedTemplate", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("ownedTagDecl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("previousDecl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("canonicalDecl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("typeAliasDeclId", 0, -1))
+
+    def ast_dependency_graph_place_node(graph: mutable AstDependencyGraph&, node: AstDependencyNode) -> void:
+        capacity: usize = graph.nodes.count.usize()
+        return if capacity == 0 or node.id.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(node.id).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: AstDependencyNode = graph.nodes[slot]
+            if existing.id.len == 0:
+                graph.nodes[slot] <- node
+                graph.node_count <- graph.node_count + 1.usize()
+                return
+            if sview_eq(existing.id, node.id):
+                graph.nodes[slot].first_edge <- node.first_edge if existing.first_edge < 0
+                return
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+
+    def ast_dependency_graph_grow(graph: mutable AstDependencyGraph&) -> void can[Memory.Allocate, Abort.Panic]:
+        previous_nodes: darray[AstDependencyNode] = graph.nodes
+        previous_capacity: usize = previous_nodes.count.usize()
+        new_capacity: usize = 64.usize() if previous_capacity == 0 else previous_capacity * 2.usize()
+        graph.nodes <- []
+        for _index in 0..<new_capacity.i64() |graph|:
+            graph.nodes.push(AstDependencyNode{id: sview("", 0, 0), first_edge: -1})
+        graph.node_count <- 0.usize()
+        if previous_capacity > 0:
+            for index in 0..<previous_capacity |graph, previous_nodes|:
+                node: AstDependencyNode = previous_nodes[index]
+                ast_dependency_graph_place_node(graph, node) if node.id.len > 0
+
+    def ast_dependency_graph_find_slot(graph: AstDependencyGraph&, wanted: sview) -> i64:
+        capacity: usize = graph.nodes.count.usize()
+        return -1 if capacity == 0 or wanted.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(wanted).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: AstDependencyNode = graph.nodes[slot]
+            return -1 if existing.id.len == 0
+            return slot.i64() if sview_eq(existing.id, wanted)
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+        return -1
+
+    def ast_dependency_graph_get_or_insert_node(graph: mutable AstDependencyGraph&, wanted: sview) -> i64 can[Memory.Allocate, Abort.Panic]:
+        return -1 if wanted.len == 0
+        capacity: usize = graph.nodes.count.usize()
+        ast_dependency_graph_grow(graph) can Memory.Allocate, Abort.Panic if capacity == 0 or (graph.node_count + 1.usize()) * 2.usize() >= capacity
+        existing_slot: i64 = ast_dependency_graph_find_slot(graph, wanted)
+        return existing_slot if existing_slot >= 0
+        new_slot: AstDependencyNode = AstDependencyNode{id: wanted, first_edge: -1}
+        ast_dependency_graph_place_node(graph, new_slot)
+        return ast_dependency_graph_find_slot(graph, wanted)
+
+    def ast_dependency_graph_add_edge(graph: mutable AstDependencyGraph&, source: sview, target: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        return if source.len == 0 or target.len == 0
+        source_slot: i64 = ast_dependency_graph_get_or_insert_node(graph, source) can Memory.Allocate, Abort.Panic
+        return if source_slot < 0
+        new_edge_index: i64 = graph.edges.count.i64()
+        graph.edges.push(AstDependencyEdge{target: target, next: graph.nodes[source_slot.usize()].first_edge})
+        graph.nodes[source_slot.usize()].first_edge <- new_edge_index
+
+    def ast_dependency_graph_add_source_template_type(graph: mutable AstDependencyGraph&, candidate: sview) -> void can[Memory.Allocate]:
+        return if sview_find_byte(candidate, 60) < 0 or sview_find_byte(candidate, 62) < 0
+        for existing in graph.source_template_types |graph, candidate|:
+            return if sview_eq(existing, candidate)
+        graph.source_template_types.push(candidate)
+
+    def ast_dependency_type_index_place(index: mutable AstDependencyTypeIndex&, candidate: AstDependencyNamedType) -> void:
+        capacity: usize = index.slots.count.usize()
+        return if capacity == 0 or candidate.name.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(candidate.name).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: AstDependencyNamedType = index.slots[slot]
+            if existing.name.len == 0:
+                index.slots[slot] <- candidate
+                index.count <- index.count + 1.usize()
+                return
+            if sview_eq(existing.name, candidate.name):
+                if not sview_eq(existing.identifier, candidate.identifier):
+                    index.slots[slot].ambiguous <- true
+                index.slots[slot].ambiguous <- true if candidate.ambiguous
+                return
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+
+    def ast_dependency_type_index_grow(index: mutable AstDependencyTypeIndex&) -> void can[Memory.Allocate, Abort.Panic]:
+        previous_slots: darray[AstDependencyNamedType] = index.slots
+        previous_capacity: usize = previous_slots.count.usize()
+        new_capacity: usize = 64.usize() if previous_capacity == 0 else previous_capacity * 2.usize()
+        index.slots <- []
+        for _position in 0..<new_capacity.i64() |index|:
+            index.slots.push(AstDependencyNamedType{name: sview("", 0, 0), identifier: sview("", 0, 0), ambiguous: false, complete: false})
+        index.count <- 0.usize()
+        if previous_capacity > 0:
+            for position in 0..<previous_capacity |index, previous_slots|:
+                symbol: AstDependencyNamedType = previous_slots[position]
+                ast_dependency_type_index_place(index, symbol) if symbol.name.len > 0
+
+    def ast_dependency_type_index_add(index: mutable AstDependencyTypeIndex&, name: sview, identifier: sview, previous_id: sview, complete: bool) -> void can[Memory.Allocate, Abort.Panic]:
+        return if name.len == 0 or identifier.len == 0
+        capacity: usize = index.slots.count.usize()
+        if capacity > 0:
+            mask: usize = capacity - 1.usize()
+            slot: mutable usize = hash_sview(name).usize() & mask
+            remaining: mutable usize = capacity
+            while remaining > 0:
+                existing: AstDependencyNamedType = index.slots[slot]
+                break if existing.name.len == 0
+                if sview_eq(existing.name, name):
+                    if sview_eq(existing.identifier, identifier):
+                        index.slots[slot].complete <- true if complete
+                        return
+                    if previous_id.len > 0 and sview_eq(previous_id, existing.identifier):
+                        if complete or not existing.complete:
+                            index.slots[slot].identifier <- identifier
+                            index.slots[slot].complete <- complete
+                        return
+                    # A same-spelled declaration not connected by previousDecl
+                    # may belong to another scope. Never bind by spelling alone.
+                    index.slots[slot].ambiguous <- true
+                    return
+                slot <- (slot + 1.usize()) & mask
+                remaining <- remaining - 1.usize()
+        ast_dependency_type_index_grow(index) can Memory.Allocate, Abort.Panic if capacity == 0 or (index.count + 1.usize()) * 2.usize() >= capacity
+        ast_dependency_type_index_place(index, AstDependencyNamedType{name: name, identifier: identifier, ambiguous: false, complete: complete})
+
+    def ast_dependency_type_index_find(index: AstDependencyTypeIndex&, name: sview) -> sview:
+        capacity: usize = index.slots.count.usize()
+        return sview("", 0, 0) if capacity == 0 or name.len == 0
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(name).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            symbol: AstDependencyNamedType = index.slots[slot]
+            return sview("", 0, 0) if symbol.name.len == 0
+            if sview_eq(symbol.name, name):
+                return sview("", 0, 0) if symbol.ambiguous
+                return symbol.identifier
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+        return sview("", 0, 0)
+
+    def ast_dependency_type_index_find_bare(index: AstDependencyTypeIndex&, name: sview) -> sview:
+        # A typedef/using name occupies a distinct identity from a same-spelled
+        # tag. Without the Clang alias edge, spelling alone cannot choose one.
+        return sview("", 0, 0) if name.len == 0 or ast_dependency_type_index_has_alias(index, name)
+        return ast_dependency_type_index_find(index, name)
+
+    def ast_dependency_type_index_has_alias(index: AstDependencyTypeIndex&, name: sview) -> bool:
+        return false if name.len == 0
+        return true if index.alias_overflow
+        return false if index.alias_count == 0
+        capacity: usize = 8192.usize()
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(name).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: sview = index.alias_names[slot].value
+            return false if existing.len == 0
+            return true if sview_eq(existing, name)
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+        return false
+
+    def ast_dependency_type_index_add_alias(index: mutable AstDependencyTypeIndex&, name: sview) -> void:
+        return if name.len == 0
+        if index.alias_count >= 4096.usize():
+            index.alias_overflow <- true
+            return
+        capacity: usize = 8192.usize()
+        mask: usize = capacity - 1.usize()
+        slot: mutable usize = hash_sview(name).usize() & mask
+        remaining: mutable usize = capacity
+        while remaining > 0:
+            existing: sview = index.alias_names[slot].value
+            if existing.len == 0:
+                index.alias_names[slot] <- AstDependencyAliasName{value: name}
+                index.alias_count <- index.alias_count + 1.usize()
+                return
+            return if sview_eq(existing, name)
+            slot <- (slot + 1.usize()) & mask
+            remaining <- remaining - 1.usize()
+
+    def ast_dependency_type_index_find_for_type(index: AstDependencyTypeIndex&, text: sview, start: i64, stop: i64) -> sview:
+        tag_name: sview = ast_dependency_tag_name_from_string(text, start, stop)
+        return ast_dependency_type_index_find(index, tag_name) if tag_name.len > 0
+        bare_name: sview = ast_dependency_unqualified_type_name_from_string(text, start, stop)
+        return ast_dependency_type_index_find_bare(index, bare_name)
+
+    def ast_dependency_type_index_scan(text: sview, start: i64, index: mutable AstDependencyTypeIndex&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        if index.alias_names.count == 0.usize():
+            index.alias_names.reserve(8192.usize())
+            for _ in 0..<8192:
+                index.alias_names.push(AstDependencyAliasName{value: sview("", 0, 0)})
+        return start if start >= text.len
+        first: i64 = string_view_index(text, start)
+        if first == 91:
+            cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+            while cursor < text.len and string_view_index(text, cursor) != 93:
+                cursor <- ast_dependency_type_index_scan(text, cursor, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                cursor <- ast_json_skip_space(text, cursor)
+                cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+                cursor <- ast_json_skip_space(text, cursor)
+            return cursor + 1 if cursor < text.len
+            return cursor
+        return ast_json_skip_value(text, start) if first != 123
+        kind: sview = ast_json_object_kind(text, start)
+        is_alias: bool = sview_eq(kind, sview("TypedefDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasDecl", 0, -1))
+        is_named_type: bool = sview_eq(kind, sview("RecordDecl", 0, -1)) or sview_eq(kind, sview("CXXRecordDecl", 0, -1)) or sview_eq(kind, sview("EnumDecl", 0, -1))
+        if is_alias or is_named_type:
+            is_implicit: bool = ast_json_object_member_is_true(text, start, sview("isImplicit", 0, -1))
+            ast_dependency_type_index_add_alias(index, ast_json_decl_name(text, start)) if is_alias and not is_implicit
+            if is_named_type and not is_implicit:
+                # Keep incomplete declarations in the name group too: otherwise a
+                # unique complete type from an unrelated C++ namespace could be
+                # mistaken for a scoped forward declaration. Ignore implicit
+                # injected-class-name declarations; only redeclarations joined by
+                # previousDecl are treated as one identity.
+                ast_dependency_type_index_add(index, ast_json_decl_name(text, start), ast_json_decl_id(text, start), ast_json_object_member_decl_id(text, start, sview("previousDecl", 0, -1)), ast_json_object_member_is_true(text, start, sview("completeDefinition", 0, -1))) can Memory.Allocate, Abort.Panic
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_stop: i64 = ast_json_skip_string(text, cursor)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: mutable i64 = ast_json_skip_value(text, value_start)
+            if string_view_index(text, value_start) == 123 or string_view_index(text, value_start) == 91:
+                value_stop <- ast_dependency_type_index_scan(text, value_start, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return cursor + 1 if cursor < text.len
+        return cursor
+
+    def ast_json_dependency_leaf_declaration(kind: sview) -> bool:
+        return sview_eq(kind, sview("ParmVarDecl", 0, -1)) or sview_eq(kind, sview("FieldDecl", 0, -1)) or sview_eq(kind, sview("EnumConstantDecl", 0, -1)) or sview_eq(kind, sview("TemplateTypeParmDecl", 0, -1)) or sview_eq(kind, sview("NonTypeTemplateParmDecl", 0, -1)) or sview_eq(kind, sview("TemplateTemplateParmDecl", 0, -1))
+
+    def ast_json_collect_source_and_dependency_facts(text: sview, start: i64, source: sview, canonical_source: sview, working_directory: sview, type_names: mutable darray[sview]&, enum_names: mutable darray[sview]&, dependency_ids: mutable AstDependencySet&, graph: mutable AstDependencyGraph&, type_index: AstDependencyTypeIndex&, inherited_source: bool, inherited_enum_source: bool, inherited_external: bool, inherited_project_include: bool, precomputed_source_state: i64, inherited_owner: sview) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return start if start >= text.len
+        first: i64 = string_view_index(text, start)
+        if first == 91:
+            cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+            while cursor < text.len and string_view_index(text, cursor) != 93:
+                cursor <- ast_json_collect_source_and_dependency_facts(text, cursor, source, canonical_source, working_directory, type_names, enum_names, dependency_ids, graph, type_index, inherited_source, inherited_enum_source, inherited_external, inherited_project_include, -1, inherited_owner) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                cursor <- ast_json_skip_space(text, cursor)
+                cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+                cursor <- ast_json_skip_space(text, cursor)
+            return cursor + 1 if cursor < text.len
+            return cursor
+        return ast_json_skip_value(text, start) if first != 123
+        source_state: i64 = precomputed_source_state if precomputed_source_state >= 0 else ast_json_node_source_state(text, start, source, canonical_source, working_directory, inherited_source, inherited_external, inherited_project_include, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        node_is_source: bool = (source_state & 1) != 0
+        local_source: bool = (source_state & 2) != 0
+        node_is_external: bool = (source_state & 4) != 0
+        node_is_project_include: bool = (source_state & 8) != 0
+        node_is_enum_source: bool = (inherited_enum_source or local_source) and not node_is_external
+        kind: sview = ast_json_object_kind(text, start)
+        identifier: sview = ast_json_decl_id(text, start)
+        is_declaration: bool = sview_ends_with(kind, sview("Decl", 0, -1)) and identifier.len > 0
+        owner: mutable sview = inherited_owner
+        if is_declaration:
+            ast_dependency_graph_add_edge(graph, inherited_owner, identifier) can Memory.Allocate, Abort.Panic if inherited_owner.len > 0 and not ast_json_dependency_leaf_declaration(kind)
+            owner <- identifier if inherited_owner.len == 0 or not ast_json_dependency_leaf_declaration(kind)
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: mutable i64 = ast_json_skip_value(text, value_start)
+            if node_is_source and (ast_json_key_is(text, key_start, key_stop, sview("qualType", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("desugaredQualType", 0, -1))) and string_view_index(text, value_start) == 34:
+                ast_dependency_graph_add_source_template_type(graph, string_view_slice(text, value_start + 1, value_stop - 1)) can Memory.Allocate
+            if node_is_source and (ast_json_key_is(text, key_start, key_stop, sview("qualType", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("desugaredQualType", 0, -1))):
+                ast_json_collect_type_candidate(text, value_start, ast_json_skip_string(text, value_start), type_names)
+            if ast_json_key_is(text, key_start, key_stop, sview("qualType", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("desugaredQualType", 0, -1)):
+                tag_id: sview = ast_dependency_type_index_find_for_type(type_index, text, value_start, value_stop)
+                # Clang can omit DeclRef IDs for a by-value FieldDecl type;
+                # convert only uniquely resolved tag spellings back to IDs.
+                ast_dependency_set_add(dependency_ids, tag_id) can Memory.Allocate, Abort.Panic if node_is_source and tag_id.len > 0
+                ast_dependency_graph_add_edge(graph, owner, tag_id) can Memory.Allocate, Abort.Panic if owner.len > 0 and tag_id.len > 0
+            if node_is_enum_source and ast_json_key_is(text, key_start, key_stop, sview("referencedDecl", 0, -1)):
+                ast_json_add_type_candidate(enum_names, ast_json_referenced_enum_constant_name(text, value_start))
+            if node_is_source and ast_json_is_dependency_edge_key(text, key_start, key_stop):
+                dependency_target: sview = ast_json_dependency_target(text, value_start, value_stop)
+                ast_dependency_set_add(dependency_ids, dependency_target) can Memory.Allocate, Abort.Panic
+                ast_dependency_set_add(&graph.source_type_alias_ids, dependency_target) can Memory.Allocate, Abort.Panic if ast_json_key_is(text, key_start, key_stop, sview("typeAliasDeclId", 0, -1)) and dependency_target.len > 0
+            if owner.len > 0 and ast_json_is_dependency_edge_key(text, key_start, key_stop):
+                edge_target: sview = ast_json_dependency_target(text, value_start, value_stop)
+                ast_dependency_graph_add_edge(graph, owner, edge_target) can Memory.Allocate, Abort.Panic
+                # A source reference often names the earlier prototype while
+                # the callable body belongs to a later redeclaration. Clang's
+                # previousDecl/canonicalDecl links prove those IDs describe
+                # the same entity, so make only these identity edges
+                # bidirectional; ordinary reference edges remain one-way.
+                if ast_json_key_is(text, key_start, key_stop, sview("previousDecl", 0, -1)) or ast_json_key_is(text, key_start, key_stop, sview("canonicalDecl", 0, -1)):
+                    ast_dependency_graph_add_edge(graph, edge_target, owner) can Memory.Allocate, Abort.Panic if edge_target.len > 0
+            if string_view_index(text, value_start) == 123 or string_view_index(text, value_start) == 91:
+                inner_member: bool = ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1))
+                type_member: bool = ast_json_key_is(text, key_start, key_stop, sview("type", 0, -1))
+                child_source: bool = node_is_source and (inner_member or type_member)
+                child_enum_source: bool = node_is_enum_source and inner_member
+                child_external: bool = node_is_external and (inner_member or type_member)
+                child_project_include: bool = node_is_project_include and (inner_member or type_member)
+                value_stop <- ast_json_collect_source_and_dependency_facts(text, value_start, source, canonical_source, working_directory, type_names, enum_names, dependency_ids, graph, type_index, child_source, child_enum_source, child_external, child_project_include, -1, owner) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return cursor + 1 if cursor < text.len
+        return cursor

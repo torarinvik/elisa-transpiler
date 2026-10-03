@@ -1,0 +1,260 @@
+# Project typedef recovery.
+#
+# Clang's JSON AST exposes the ABI-expanded spelling for many declarations, but
+# not for every use of a typedef. In particular, a parameter declared as
+# `memptr *` often has only that spelling even though `memptr` is `void *`.
+# Resolve only aliases owned by the translated project and preserve all other
+# type spellings for the existing C ABI renderer.
+
+extend CTranslator:
+    def typed_type_alias_index[@r](ctx: TypedContext[r]&, name: sview) -> i64:
+        found: mutable i64 = -1
+        for index in 0..<ctx.type_aliases.count |ctx, name|:
+            if sview_eq(ctx.type_aliases[index.usize()].name, name):
+                return -1 if found >= 0
+                found <- index
+        return found
+    def typed_type_alias_qualified_index[@r](ctx: TypedContext[r]&, name: sview) -> i64:
+        for index in 0..<ctx.type_aliases.count |ctx, name|:
+            return index if sview_eq(ctx.type_aliases[index.usize()].qualified_name, name)
+        return -1
+
+    def typed_type_scope_child(scope: sview, name: sview) -> sview can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return scope if name.len == 0
+        out: mutable darray[u8] = []
+        append_view(&out, scope)
+        append_view(&out, sview("::", 0, -1)) if scope.len > 0
+        append_view(&out, name)
+        copied: cstr = string_view_copy(bytes_view(out)) can Memory.Allocate
+        return sview(copied, 0, -1)
+    def typed_enum_decl_is_scoped[@r](node: JsonValueHandle[r]) -> bool:
+        return ast_string(ast_field(node, sview("scopedEnumTag", 0, -1))).len > 0
+    def typed_enum_decl_source_name[@r](node: JsonValueHandle[r], fallback: sview) -> sview @r:
+        return fallback if not typed_enum_decl_is_scoped(node)
+        count: i64 = ast_child_count(node)
+        if count > 0:
+            for index in 0..<count |node|:
+                constant: JsonValueHandle[r] = ast_child(node, index)
+                if sview_eq(ast_kind(constant), sview("EnumConstantDecl", 0, -1)):
+                    qualified: sview = c_type_named_base(ast_qual_type(constant))
+                    return qualified if qualified.len > 0
+        return fallback if fallback.len > 0 else ast_name(node)
+    def typed_scoped_enum_alias_type[@r](ctx: TypedContext[r]&, alias: TypedTypeAlias[r]) -> sview @r:
+        return sview("", 0, 0) if not typed_type_alias_expandable(alias)
+        declaration: JsonValueHandle[r] = typed_decl_lookup(ctx, alias.canonical_decl_id)
+        return sview("", 0, 0) if json_handle_is_null(declaration)
+        enum_id: sview = typed_find_type_decl_id_through_alias(ctx, declaration, sview("EnumType", 0, -1))
+        enumeration: JsonValueHandle[r] = typed_decl_lookup(ctx, enum_id)
+        return sview("", 0, 0) if json_handle_is_null(enumeration) or not typed_enum_decl_is_scoped(enumeration)
+        return typed_enum_decl_source_name(enumeration, sview("", 0, 0))
+    def typed_type_alias_qualified_match_at[@r](ctx: TypedContext[r]&, value: sview, start: i64, stop: mutable i64&) -> i64:
+        stop[0] <- start
+        if start > 0:
+            previous: i64 = string_view_index(value, start - 1)
+            return -1 if typed_type_identifier_byte(previous)
+            # Never match an alias as a suffix of a differently qualified
+            # spelling; Clang may omit global-scope qualification context.
+            return -1 if previous == 58
+        for index in 0..<ctx.type_aliases.count.i64() |ctx, value, start|:
+            alias: TypedTypeAlias[r] = ctx.type_aliases[index.usize()]
+            alias_length: i64 = alias.qualified_name.len
+            continue if alias_length == 0 or start + alias_length > value.len
+            same: mutable bool = true
+            for offset in 0..<alias_length |alias, value, start, same|:
+                same <- false if string_view_index(alias.qualified_name, offset) != string_view_index(value, start + offset)
+            continue if not same
+            after: i64 = start + alias_length
+            continue if after < value.len and (typed_type_identifier_byte(string_view_index(value, after)) or string_view_index(value, after) == 58)
+            stop[0] <- after
+            return index
+        return -1
+    def typed_collect_type_aliases[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], source: cstr, scope: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        kind: sview = ast_kind(node)
+        child_scope: mutable sview = scope
+        if sview_eq(kind, sview("NamespaceDecl", 0, -1)):
+            child_scope <- typed_type_scope_child(scope, ast_name(node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        is_type_alias: bool = sview_eq(kind, sview("TypedefDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasDecl", 0, -1))
+        if is_type_alias and ast_name(node).len > 0:
+            name: sview = ast_name(node)
+            target: sview = ast_c_type(node)
+            # Function declarations keep typedef spellings in their complete
+            # function type even when the corresponding ParmVarDecl exposes a
+            # desugared type.  Collect pointer-shaped aliases from system
+            # headers as well as project-owned aliases so an ABI handle such
+            # as `SDL_GLContext` (a typedef to an opaque pointer) cannot fall
+            # through to the scalar fallback in the type renderer.
+            #
+            # Keep the existing ownership boundary for record/scalar aliases:
+            # expanding every libc typedef would discard intentional special
+            # cases such as FILE and va_list and would make system-only record
+            # declarations leak into the generated Elisa surface.
+            collect: bool = ast_is_user_type_declaration(node, source) or sview_find_byte(target, 42) >= 0
+            if target.len > 0 and collect:
+                qualified_name: sview = typed_type_scope_child(scope, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                existing: i64 = typed_type_alias_qualified_index(ctx, qualified_name)
+                declaration_identifier: sview = ast_string(ast_field(node, sview("id", 0, -1)))
+                declaration_id: mutable sview = typed_decl_canonical_id(ctx, declaration_identifier)
+                # A first typedef declaration is its own canonical declaration.
+                # Keep that stable identity if a compact AST omitted its index
+                # entry; never guess across a redeclaration chain.
+                if declaration_id.len == 0 and ast_string(ast_field(node, sview("previousDecl", 0, -1))).len == 0:
+                    declaration_id <- declaration_identifier
+                if existing < 0:
+                    ctx.type_aliases.push(TypedTypeAlias[r]{name: name, qualified_name: qualified_name, target: target, canonical_decl_id: declaration_id, ambiguous: declaration_id.len == 0})
+                else:
+                    alias: mutable TypedTypeAlias[r] = ctx.type_aliases[existing.usize()]
+                    conflict: bool = typed_type_alias_identity_conflicts(alias, declaration_id, target)
+                    alias.ambiguous <- true if conflict
+                    alias.target <- target if not conflict and alias.target.len == 0
+                    ctx.type_aliases[existing.usize()] <- alias
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, source|:
+                typed_collect_type_aliases(ctx, ast_child(node, index), source, child_scope) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_type_identifier_byte(byte: i64) -> bool:
+        return (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+
+    def typed_replace_record_alias_token[@r](value: sview, alias_name: sview, record_name: sview) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return value if value.len == 0 or alias_name.len == 0 or sview_eq(alias_name, record_name)
+        out: mutable darray[u8] = []
+        cursor: mutable i64 = 0
+        changed: mutable bool = false
+        while cursor < value.len:
+            if typed_type_identifier_byte(string_view_index(value, cursor)):
+                token_start: i64 = cursor
+                cursor <- cursor + 1
+                while cursor < value.len and typed_type_identifier_byte(string_view_index(value, cursor)):
+                    cursor <- cursor + 1
+                token: sview = string_view_slice(value, token_start, cursor)
+                if sview_eq(token, alias_name):
+                    append_view(&out, record_name)
+                    changed <- true
+                else:
+                    append_view_range(&out, value, token_start, cursor)
+            else:
+                out.push(string_view_index(value, cursor).u8())
+                cursor <- cursor + 1
+        return value if not changed
+        copied: cstr = string_view_copy(bytes_view(out)) can Memory.Allocate
+        return sview(copied, 0, -1)
+
+    def typed_record_alias_type[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        type_view: ClangTypeView[r] = clang_type_view_of_decl(node)
+        alias_id: sview = type_view.type_alias_decl_id
+        return sview("", 0, 0) if alias_id.len == 0
+        alias: JsonValueHandle[r] = typed_decl_lookup(ctx, alias_id)
+        return sview("", 0, 0) if json_handle_is_null(alias) or not ast_is_type_alias_declaration(alias)
+        alias_spelling: sview = ast_c_type(alias)
+        # A pointer/reference alias carries a RecordType edge too, but it is
+        # not itself a record value. Preserve the existing ABI expansion for
+        # those aliases instead of mistaking the pointee's layout for theirs.
+        return sview("", 0, 0) if c_type_pointer_count(alias_spelling) > 0 or c_type_is_array(alias_spelling) or c_type_is_function(alias_spelling) or sview_find_byte(alias_spelling, 38) >= 0
+        record_id: sview = typed_find_type_decl_id_through_alias(ctx, alias, sview("RecordType", 0, -1))
+        return sview("", 0, 0) if record_id.len == 0 or json_handle_is_null(typed_record_lookup(ctx, record_id))
+        record_index: i64 = typed_record_index(ctx, ast_name(alias))
+        return sview("", 0, 0) if record_index < 0
+        spelled: sview = ast_qual_type(node)
+        return typed_replace_record_alias_token(spelled, ast_name(alias), ctx.records[record_index.usize()].name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_type_previous_word(value: sview, start: i64) -> sview:
+        cursor: mutable i64 = start - 1
+        while cursor >= 0 and (string_view_index(value, cursor) == 32 or string_view_index(value, cursor) == 9):
+            cursor <- cursor - 1
+        end: i64 = cursor + 1
+        while cursor >= 0 and typed_type_identifier_byte(string_view_index(value, cursor)):
+            cursor <- cursor - 1
+        return string_view_slice(value, cursor + 1, end) if end > cursor + 1
+        return sview("", 0, 0)
+
+    def typed_type_token_is_qualified(value: sview, start: i64) -> bool:
+        cursor: mutable i64 = start - 1
+        while cursor >= 0 and (string_view_index(value, cursor) == 32 or string_view_index(value, cursor) == 9):
+            cursor <- cursor - 1
+        return cursor >= 1 and string_view_index(value, cursor - 1) == 58 and string_view_index(value, cursor) == 58
+    def typed_type_has_alias_token[@r](ctx: TypedContext[r]&, value: sview) -> bool:
+        cursor: mutable i64 = 0
+        while cursor < value.len:
+            byte: i64 = string_view_index(value, cursor)
+            if typed_type_identifier_byte(byte):
+                previous: sview = typed_type_previous_word(value, cursor)
+                if not sview_eq(previous, sview("struct", 0, -1)) and not sview_eq(previous, sview("union", 0, -1)) and not sview_eq(previous, sview("enum", 0, -1)) and not sview_eq(previous, sview("class", 0, -1)):
+                    qualified_stop: mutable i64 = cursor
+                    qualified_index: i64 = typed_type_alias_qualified_match_at(ctx, value, cursor, qualified_stop)
+                    return true if qualified_index >= 0 and typed_type_alias_expandable(ctx.type_aliases[qualified_index.usize()])
+            if not typed_type_identifier_byte(byte):
+                cursor <- cursor + 1
+                continue
+            token_start: i64 = cursor
+            cursor <- cursor + 1
+            while cursor < value.len and typed_type_identifier_byte(string_view_index(value, cursor)):
+                cursor <- cursor + 1
+            token: sview = string_view_slice(value, token_start, cursor)
+            previous: sview = typed_type_previous_word(value, token_start)
+            alias_index: mutable i64 = typed_type_alias_index(ctx, token)
+            alias_index <- -1 if typed_type_token_is_qualified(value, token_start)
+            if alias_index >= 0 and typed_type_alias_expandable(ctx.type_aliases[alias_index.usize()]) and not sview_eq(previous, sview("struct", 0, -1)) and not sview_eq(previous, sview("union", 0, -1)) and not sview_eq(previous, sview("enum", 0, -1)) and not sview_eq(previous, sview("class", 0, -1)):
+                return true
+        return false
+    def typed_expand_type_alias_once[@r](ctx: TypedContext[r]&, value: sview, changed: mutable bool&) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return value if not typed_type_has_alias_token(ctx, value)
+        out: mutable darray[u8] = []
+        cursor: mutable i64 = 0
+        changed <- false
+        changed_value: mutable bool = false
+        while cursor < value.len:
+            byte: i64 = string_view_index(value, cursor)
+            if typed_type_identifier_byte(byte):
+                previous: sview = typed_type_previous_word(value, cursor)
+                if not sview_eq(previous, sview("struct", 0, -1)) and not sview_eq(previous, sview("union", 0, -1)) and not sview_eq(previous, sview("enum", 0, -1)) and not sview_eq(previous, sview("class", 0, -1)):
+                    qualified_stop: mutable i64 = cursor
+                    qualified_index: i64 = typed_type_alias_qualified_match_at(ctx, value, cursor, qualified_stop)
+                    if qualified_index >= 0 and typed_type_alias_expandable(ctx.type_aliases[qualified_index.usize()]):
+                        alias: TypedTypeAlias[r] = ctx.type_aliases[qualified_index.usize()]
+                        enum_type: sview = typed_scoped_enum_alias_type(ctx, alias)
+                        append_view(&out, alias.target if enum_type.len == 0 else enum_type)
+                        cursor <- qualified_stop
+                        changed <- true
+                        changed_value <- true
+                        continue
+            if not typed_type_identifier_byte(byte):
+                out.push(byte.u8())
+                cursor <- cursor + 1
+                continue
+            token_start: i64 = cursor
+            cursor <- cursor + 1
+            while cursor < value.len and typed_type_identifier_byte(string_view_index(value, cursor)):
+                cursor <- cursor + 1
+            token: sview = string_view_slice(value, token_start, cursor)
+            previous: sview = typed_type_previous_word(value, token_start)
+            alias_index: mutable i64 = typed_type_alias_index(ctx, token)
+            alias_index <- -1 if typed_type_token_is_qualified(value, token_start)
+            if alias_index >= 0 and typed_type_alias_expandable(ctx.type_aliases[alias_index.usize()]) and not sview_eq(previous, sview("struct", 0, -1)) and not sview_eq(previous, sview("union", 0, -1)) and not sview_eq(previous, sview("enum", 0, -1)) and not sview_eq(previous, sview("class", 0, -1)):
+                alias: TypedTypeAlias[r] = ctx.type_aliases[alias_index.usize()]
+                enum_type: sview = typed_scoped_enum_alias_type(ctx, alias)
+                append_view(&out, alias.target if enum_type.len == 0 else enum_type)
+                changed <- true
+                changed_value <- true
+            else:
+                append_view_range(&out, value, token_start, cursor)
+        return value if not changed_value
+        copied: cstr = string_view_copy(bytes_view(out)) can Memory.Allocate
+        return sview(copied, 0, -1)
+    def typed_resolve_type_aliases[@r](ctx: TypedContext[r]&, value: sview) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        resolved: mutable sview = value
+        return resolved if ctx.type_aliases.count == 0 or not typed_type_has_alias_token(ctx, resolved)
+        for _iteration in 0..<16 |ctx, resolved|:
+            changed: mutable bool = false
+            expanded: sview = typed_expand_type_alias_once(ctx, resolved, changed) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            resolved <- expanded if changed
+            break if not changed
+        return resolved
+    def typed_c_type[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        enum_id: sview = typed_find_type_decl_id_through_alias(ctx, node, sview("EnumType", 0, -1))
+        enumeration: JsonValueHandle[r] = typed_decl_lookup(ctx, enum_id)
+        type_name: sview = ast_c_type(node)
+        if not json_handle_is_null(enumeration) and typed_enum_decl_is_scoped(enumeration) and c_type_pointer_count(type_name) == 0 and c_type_reference_count(type_name) == 0 and not c_type_is_array(type_name) and not c_type_is_function(type_name):
+            return typed_enum_decl_source_name(enumeration, type_name)
+        record_alias_type: sview = typed_record_alias_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return record_alias_type if record_alias_type.len > 0
+        return typed_resolve_type_aliases(ctx, ast_c_type(node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

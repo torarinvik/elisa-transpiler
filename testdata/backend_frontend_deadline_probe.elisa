@@ -1,0 +1,19 @@
+@link_name("waitpid")
+extern deadline_probe_waitpid(process: i32, status: mutable i32&, options: i32) -> i32
+
+def deadline_probe_reap(process: i32, status: mutable i32&, timed_out: bool, capture_failed: mutable bool&) -> i32:
+    waited: mutable i32 = process
+    if timed_out:
+        waited <- deadline_probe_waitpid(process, status, 0)
+    else:
+        waited <- deadline_probe_waitpid(process, status, 1)
+        if waited == 0:
+            capture_failed <- true
+            waited <- deadline_probe_waitpid(process, status, 0)
+        elif waited < 0:
+            capture_failed <- true
+            waited <- deadline_probe_waitpid(process, status, 0)
+    return waited
+
+def main() -> i32:
+    return 0

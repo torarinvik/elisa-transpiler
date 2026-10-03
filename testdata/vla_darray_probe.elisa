@@ -1,0 +1,5 @@
+def main() -> i32 can[Memory.Allocate, Abort.Panic]:
+    count: i32 = 4
+    values: mutable darray[i32] = [zeroed for index in 0..<count]
+    values[2] <- 17
+    return values[2] - 17

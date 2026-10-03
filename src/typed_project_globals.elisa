@@ -1,0 +1,41 @@
+extend CTranslator:
+    # File-scope and block-scope static objects need stable project identities
+    # independent of source names and compilation-database order.
+    def typed_global_identity_hash[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], name: sview, type_name: sview) -> i64:
+        identity: mutable darray[u8] = []
+        append_view(identity, ctx.canonical_source)
+        identity.push(0)
+        append_view(identity, ast_location_file(node))
+        identity.push(0)
+        append_i64(identity, ast_location_line(node))
+        identity.push(58)
+        append_i64(identity, ast_location_column(node))
+        identity.push(58)
+        append_i64(identity, ast_location_offset(node))
+        identity.push(0)
+        append_view(identity, name)
+        identity.push(0)
+        append_view(identity, type_name)
+        return (hash_sview(bytes_view(identity)) & 0x7fffffffffffffff).i64()
+    def typed_collect_globals[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if sview_eq(ast_kind(node), sview("VarDecl", 0, -1)) and ast_is_static_decl(node):
+            name: sview = safe_identifier(ast_name(node))
+            declaration_id: mutable sview = typed_decl_canonical_id(ctx, ast_string(ast_field(node, sview("id", 0, -1))))
+            declaration_id <- ast_string(ast_field(node, sview("id", 0, -1))) if declaration_id.len == 0
+            if typed_global_declaration_index(ctx, declaration_id) < 0:
+                global_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                initializer: mutable i64 = -1
+                if ast_child_count(node) > 0:
+                    for child_index in 0..<ast_child_count(node) |ctx, node, initializer|:
+                        initializer_node: JsonValueHandle[r] = ast_child(node, child_index)
+                        continue if ast_is_comment_node(initializer_node)
+                        initializer <- typed_lower_expr(ctx, initializer_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        break
+                initializer_is_direct: bool = typed_global_initializer_is_direct(ctx, initializer, global_type) if initializer >= 0 else false
+                is_mutable: bool = typed_global_source_is_mutable(ctx, node, global_type, initializer) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                ctx.globals.push(TypedGlobal[r]{name: name, type_name: global_type, comment: ast_comment_text(node), declaration_id: declaration_id, initializer: initializer, is_mutable: is_mutable, initializer_is_direct: initializer_is_direct, identity_hash: typed_global_identity_hash(ctx, node, name, global_type), project_private: true})
+            return
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                typed_collect_globals(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

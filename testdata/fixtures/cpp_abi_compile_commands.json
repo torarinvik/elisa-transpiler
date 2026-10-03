@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/Users/torarinvikbjarko/Documents/Coding Projects/Elisa Projects/elisa-transpiler",
+    "command": "/opt/homebrew/opt/llvm/bin/clang++ -std=gnu++11 -c testdata/fixtures/cpp_abi.cpp -o /private/tmp/cpp_abi.o",
+    "file": "testdata/fixtures/cpp_abi.cpp"
+  }
+]

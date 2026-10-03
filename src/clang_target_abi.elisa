@@ -1,0 +1,98 @@
+extend CTranslator:
+    # Target facts come from Clang's predefined macros, never from the host
+    # running the translator. Integer widths are stored in bits; floating
+    # sizes are stored in target bytes for safe sizeof constant evaluation.
+    def clang_target_abi_unknown() -> ClangTargetABI:
+        return ClangTargetABI{char_bits: 0, short_bits: 0, int_bits: 0, long_bits: 0, long_long_bits: 0, float_bytes: 0, double_bytes: 0, long_double_bytes: 0, pointer_bits: 0, size_type_bits: 0, char_unsigned: false, short_enums: false, valid: false}
+
+    def clang_target_abi_load(macros: darray[u8], succeeded: bool) -> ClangTargetABI:
+        return clang_target_abi_load_with_options(macros, succeeded, false)
+
+    def clang_target_abi_load_with_options(macros: darray[u8], succeeded: bool, short_enums: bool) -> ClangTargetABI:
+        return clang_target_abi_from_macros_with_options(macros, short_enums) if succeeded else clang_target_abi_unknown()
+
+    def clang_target_language_is_cxx(macros: darray[u8], succeeded: bool) -> bool:
+        return succeeded and clang_target_macro_value(macros, sview("__cplusplus", 0, -1)).len > 0
+
+    def clang_target_macro_value(macros: darray[u8], name: sview) -> sview:
+        text: sview = bytes_view(macros)
+        line_start: mutable i64 = 0
+        while line_start < text.len |text, line_start, name|:
+            line_end: mutable i64 = line_start
+            while line_end < text.len |text, line_end|:
+                break if string_view_index(text, line_end) == 10
+                line_end <- line_end + 1
+            if line_end - line_start >= 9 and sview_eq(string_view_slice(text, line_start, line_start + 8), sview("#define ", 0, -1)):
+                key_start: i64 = line_start + 8
+                key_end: mutable i64 = key_start
+                while key_end < line_end |text, key_end|:
+                    byte: i64 = string_view_index(text, key_end)
+                    break if byte == 32 or byte == 9
+                    key_end <- key_end + 1
+                if sview_eq(string_view_slice(text, key_start, key_end), name):
+                    value_start: mutable i64 = key_end
+                    while value_start < line_end |text, value_start|:
+                        byte: i64 = string_view_index(text, value_start)
+                        break if byte != 32 and byte != 9
+                        value_start <- value_start + 1
+                    return string_view_slice(text, value_start, line_end)
+            line_start <- line_end + 1
+        return sview("", 0, 0)
+
+    def clang_target_macro_decimal(macros: darray[u8], name: sview) -> i64:
+        value: sview = clang_target_macro_value(macros, name)
+        return -1 if value.len == 0
+        number: mutable i64 = 0
+        for index in 0..<value.len |value, number|:
+            digit: i64 = string_view_index(value, index) - 48
+            return -1 if digit < 0 or digit > 9
+            return -1 if number > (9223372036854775807 - digit) / 10
+            number <- number * 10 + digit
+        return number
+
+    def clang_target_size_type_bits(macros: darray[u8], char_bits: i64, short_bits: i64, int_bits: i64, long_bits: i64, long_long_bits: i64) -> i64:
+        type_name: sview = clang_target_macro_value(macros, sview("__SIZE_TYPE__", 0, -1))
+        if sview_eq(type_name, sview("unsigned int", 0, -1)) or sview_eq(type_name, sview("unsigned", 0, -1)):
+            return int_bits
+        if sview_eq(type_name, sview("unsigned long", 0, -1)) or sview_eq(type_name, sview("unsigned long int", 0, -1)) or sview_eq(type_name, sview("long unsigned int", 0, -1)):
+            return long_bits
+        if sview_eq(type_name, sview("unsigned long long", 0, -1)) or sview_eq(type_name, sview("unsigned long long int", 0, -1)) or sview_eq(type_name, sview("long long unsigned int", 0, -1)):
+            return long_long_bits
+        _ = char_bits
+        _ = short_bits
+        return -1
+
+    def clang_target_width_supported(width: i64) -> bool:
+        return width == 8 or width == 16 or width == 32 or width == 64
+
+    def clang_target_abi_from_macros(macros: darray[u8]) -> ClangTargetABI:
+        return clang_target_abi_from_macros_with_options(macros, false)
+
+    def clang_target_abi_from_macros_with_options(macros: darray[u8], short_enums: bool) -> ClangTargetABI:
+        char_bits_per_byte: i64 = clang_target_macro_decimal(macros, sview("__CHAR_BIT__", 0, -1))
+        # Clang does not define __SIZEOF_CHAR__; C defines sizeof(char) as one byte.
+        char_bytes: i64 = 1
+        short_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_SHORT__", 0, -1))
+        int_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_INT__", 0, -1))
+        long_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_LONG__", 0, -1))
+        long_long_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_LONG_LONG__", 0, -1))
+        float_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_FLOAT__", 0, -1))
+        double_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_DOUBLE__", 0, -1))
+        long_double_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_LONG_DOUBLE__", 0, -1))
+        pointer_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_POINTER__", 0, -1))
+        return clang_target_abi_unknown() if char_bits_per_byte <= 0 or char_bytes <= 0 or short_bytes <= 0 or int_bytes <= 0 or long_bytes <= 0 or long_long_bytes <= 0 or pointer_bytes <= 0
+        return clang_target_abi_unknown() if char_bits_per_byte != 8 or short_bytes > 8 or int_bytes > 8 or long_bytes > 8 or long_long_bytes > 8 or pointer_bytes > 8
+        char_bits: i64 = char_bytes * char_bits_per_byte
+        short_bits: i64 = short_bytes * char_bits_per_byte
+        int_bits: i64 = int_bytes * char_bits_per_byte
+        long_bits: i64 = long_bytes * char_bits_per_byte
+        long_long_bits: i64 = long_long_bytes * char_bits_per_byte
+        pointer_bits: i64 = pointer_bytes * char_bits_per_byte
+        host_pointer_bits: i64 = size_of[uintptr].i64() * 8
+        size_type_bits: i64 = clang_target_size_type_bits(macros, char_bits, short_bits, int_bits, long_bits, long_long_bits)
+        char_unsigned: bool = clang_target_macro_value(macros, sview("__CHAR_UNSIGNED__", 0, -1)).len > 0
+        # Current C integer promotion and string lowering require 8-bit bytes
+        # and a 32-bit int. Other widths are intentionally rejected rather
+        # than silently routed through the host's i32 arithmetic rules.
+        valid: bool = char_bits == 8 and int_bits == 32 and clang_target_width_supported(short_bits) and clang_target_width_supported(long_bits) and clang_target_width_supported(long_long_bits) and clang_target_width_supported(pointer_bits) and pointer_bits == host_pointer_bits and clang_target_width_supported(size_type_bits)
+        return ClangTargetABI{char_bits: char_bits, short_bits: short_bits, int_bits: int_bits, long_bits: long_bits, long_long_bits: long_long_bits, float_bytes: float_bytes, double_bytes: double_bytes, long_double_bytes: long_double_bytes, pointer_bits: pointer_bits, size_type_bits: size_type_bits, char_unsigned: char_unsigned, short_enums: short_enums, valid: valid} if valid else clang_target_abi_unknown()

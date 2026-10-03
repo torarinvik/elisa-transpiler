@@ -1,0 +1,531 @@
+extend CTranslator:
+    def typed_dump_append_view(out: mutable darray[u8]&, value: sview) -> void:
+        for index in 0..<value.len |out, value|:
+            out.push(string_view_index(value, index).u8())
+
+    def typed_dump_expr_kind(kind: TypedExprKind) -> sview:
+        match kind:
+            TypedExprKind.Invalid:
+                return "Invalid"
+            TypedExprKind.Integer:
+                return "Integer"
+            TypedExprKind.Floating:
+                return "Floating"
+            TypedExprKind.String:
+                return "String"
+            TypedExprKind.Character:
+                return "Character"
+            TypedExprKind.Name:
+                return "Name"
+            TypedExprKind.Binary:
+                return "Binary"
+            TypedExprKind.Unary:
+                return "Unary"
+            TypedExprKind.ArrayIndex:
+                return "ArrayIndex"
+            TypedExprKind.Conditional:
+                return "Conditional"
+            TypedExprKind.Member:
+                return "Member"
+            TypedExprKind.Call:
+                return "Call"
+            TypedExprKind.Sizeof:
+                return "Sizeof"
+            TypedExprKind.ObjectSizeRemaining:
+                return "ObjectSizeRemaining"
+            TypedExprKind.Cast:
+                return "Cast"
+            TypedExprKind.Aggregate:
+                return "Aggregate"
+            TypedExprKind.Sequence:
+                return "Sequence"
+            TypedExprKind.Null:
+                return "Null"
+            TypedExprKind.Zeroed:
+                return "Zeroed"
+        return "UnknownExpr"
+
+    def typed_dump_stmt_kind(kind: TypedStmtKind) -> sview:
+        match kind:
+            TypedStmtKind.Invalid:
+                return "Invalid"
+            TypedStmtKind.Block:
+                return "Block"
+            TypedStmtKind.Return:
+                return "Return"
+            TypedStmtKind.Declaration:
+                return "Declaration"
+            TypedStmtKind.If:
+                return "If"
+            TypedStmtKind.Expression:
+                return "Expression"
+            TypedStmtKind.For:
+                return "For"
+            TypedStmtKind.While:
+                return "While"
+            TypedStmtKind.DoWhile:
+                return "DoWhile"
+            TypedStmtKind.Break:
+                return "Break"
+            TypedStmtKind.Continue:
+                return "Continue"
+            TypedStmtKind.Goto:
+                return "Goto"
+            TypedStmtKind.Label:
+                return "Label"
+            TypedStmtKind.Switch:
+                return "Switch"
+            TypedStmtKind.SwitchBreak:
+                return "SwitchBreak"
+            TypedStmtKind.Null:
+                return "Null"
+        return "UnknownStmt"
+
+    def typed_dump_append_i64(out: mutable darray[u8]&, value: i64) -> void:
+        if value == -9223372036854775808:
+            typed_dump_append_view(out, sview("-9223372036854775808", 0, -1))
+            return
+        magnitude: mutable i64 = value
+        if magnitude < 0:
+            out.push(45)
+            magnitude <- 0 - magnitude
+        if magnitude == 0:
+            out.push(48)
+            return
+        digits: mutable i64[24] = zeroed
+        count: mutable i64 = 0
+        while magnitude > 0 |magnitude, digits, count|:
+            digits[count] <- magnitude % 10
+            magnitude <- magnitude / 10
+            count <- count + 1
+        for index in 0..<count |out, digits, count|:
+            out.push((digits[count - index - 1] + 48).u8())
+
+    def typed_dump_append_hex(out: mutable darray[u8]&, value: sview) -> void:
+        digits: sview = "0123456789abcdef"
+        for index in 0..<value.len |out, value, digits|:
+            byte: i64 = string_view_index(value, index)
+            out.push(string_view_index(digits, byte / 16).u8())
+            out.push(string_view_index(digits, byte % 16).u8())
+
+    def typed_dump_append_bool(out: mutable darray[u8]&, value: bool) -> void:
+        if value:
+            typed_dump_append_view(out, sview("true", 0, -1))
+        else:
+            typed_dump_append_view(out, sview("false", 0, -1))
+
+    def typed_dump_diagnostic(out: mutable darray[u8]&, index: i64, diagnostic: TypedDiagnostic) -> void:
+        typed_dump_append_view(out, sview("diagnostic ", 0, -1))
+        typed_dump_append_i64(out, index)
+        typed_dump_append_view(out, sview(" category_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.category)
+        typed_dump_append_view(out, sview(" kind_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.kind)
+        typed_dump_append_view(out, sview(" subject_type_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.subject_type)
+        typed_dump_append_view(out, sview(" required_capability_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.required_capability)
+        typed_dump_append_view(out, sview(" range_start_offset=", 0, -1))
+        typed_dump_append_i64(out, diagnostic.range_start_offset)
+        typed_dump_append_view(out, sview(" range_end_offset=", 0, -1))
+        typed_dump_append_i64(out, diagnostic.range_end_offset)
+        typed_dump_append_view(out, sview(" source_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.source)
+        typed_dump_append_view(out, sview(" physical_source_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.canonical_source)
+        typed_dump_append_view(out, sview(" spelling_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.spelling_source)
+        typed_dump_append_view(out, sview(" spelling_physical_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.spelling_canonical_source)
+        typed_dump_append_view(out, sview(" spelling_included_from_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.spelling_included_from)
+        typed_dump_append_view(out, sview(" spelling_included_from_physical_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.spelling_included_from_canonical)
+        typed_dump_append_view(out, sview(" expansion_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.expansion_source)
+        typed_dump_append_view(out, sview(" expansion_physical_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.expansion_canonical_source)
+        typed_dump_append_view(out, sview(" expansion_included_from_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.expansion_included_from)
+        typed_dump_append_view(out, sview(" expansion_included_from_physical_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.expansion_included_from_canonical)
+        typed_dump_append_view(out, sview(" location=", 0, -1))
+        typed_dump_append_i64(out, diagnostic.line)
+        typed_dump_append_view(out, sview(":", 0, -1))
+        typed_dump_append_i64(out, diagnostic.column)
+        typed_dump_append_view(out, sview(" spelling_location=", 0, -1))
+        typed_dump_append_i64(out, diagnostic.spelling_line)
+        typed_dump_append_view(out, sview(":", 0, -1))
+        typed_dump_append_i64(out, diagnostic.spelling_column)
+        typed_dump_append_view(out, sview(" expansion_location=", 0, -1))
+        typed_dump_append_i64(out, diagnostic.expansion_line)
+        typed_dump_append_view(out, sview(":", 0, -1))
+        typed_dump_append_i64(out, diagnostic.expansion_column)
+        typed_dump_append_view(out, sview("\n", 0, -1))
+
+    # Stable, line-oriented diagnostic format. Textual fields are hex encoded,
+    # so arbitrary source names/operators cannot inject new records or depend on
+    # terminal escaping. The version tag is intentionally independent of Elisa
+    # source formatting and can be consumed by regression tooling.
+    def typed_dump_ir[@r](ctx: TypedContext[r]&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+        out: mutable darray[u8] = []
+        typed_dump_append_view(&out, sview("typed-ir-v13\nsource_hex=", 0, -1))
+        typed_dump_append_hex(&out, sview(ctx.source, 0, -1))
+        typed_dump_append_view(&out, sview("\n", 0, -1))
+        typed_dump_append_view(&out, sview("counts exprs=", 0, -1))
+        typed_dump_append_i64(&out, ctx.exprs.count.i64())
+        typed_dump_append_view(&out, sview(" expr_children=", 0, -1))
+        typed_dump_append_i64(&out, ctx.expr_children.count.i64())
+        typed_dump_append_view(&out, sview(" stmts=", 0, -1))
+        typed_dump_append_i64(&out, ctx.stmts.count.i64())
+        typed_dump_append_view(&out, sview(" stmt_children=", 0, -1))
+        typed_dump_append_i64(&out, ctx.stmt_children.count.i64())
+        typed_dump_append_view(&out, sview(" functions=", 0, -1))
+        typed_dump_append_i64(&out, ctx.functions.count.i64())
+        typed_dump_append_view(&out, sview(" params=", 0, -1))
+        typed_dump_append_i64(&out, ctx.params.count.i64())
+        typed_dump_append_view(&out, sview(" externs=", 0, -1))
+        typed_dump_append_i64(&out, ctx.externs.count.i64())
+        typed_dump_append_view(&out, sview(" extern_params=", 0, -1))
+        typed_dump_append_i64(&out, ctx.extern_params.count.i64())
+        typed_dump_append_view(&out, sview(" extern_globals=", 0, -1))
+        typed_dump_append_i64(&out, ctx.extern_globals.count.i64())
+        typed_dump_append_view(&out, sview(" records=", 0, -1))
+        typed_dump_append_i64(&out, ctx.records.count.i64())
+        typed_dump_append_view(&out, sview(" record_layouts=", 0, -1))
+        typed_dump_append_i64(&out, ctx.record_layouts.count.i64())
+        typed_dump_append_view(&out, sview(" fields=", 0, -1))
+        typed_dump_append_i64(&out, ctx.fields.count.i64())
+        typed_dump_append_view(&out, sview(" globals=", 0, -1))
+        typed_dump_append_i64(&out, ctx.globals.count.i64())
+        typed_dump_append_view(&out, sview(" enums=", 0, -1))
+        typed_dump_append_i64(&out, ctx.enums.count.i64())
+        typed_dump_append_view(&out, sview(" enum_consts=", 0, -1))
+        typed_dump_append_i64(&out, ctx.enum_consts.count.i64())
+        typed_dump_append_view(&out, sview(" type_aliases=", 0, -1))
+        typed_dump_append_i64(&out, ctx.type_aliases.count.i64())
+        typed_dump_append_view(&out, sview(" signatures=", 0, -1))
+        typed_dump_append_i64(&out, ctx.user_function_signatures.count.i64())
+        typed_dump_append_view(&out, sview(" decl_infos=", 0, -1))
+        typed_dump_append_i64(&out, ctx.decl_infos.count.i64())
+        typed_dump_append_view(&out, sview(" labels=", 0, -1))
+        typed_dump_append_i64(&out, ctx.labels.count.i64())
+        typed_dump_append_view(&out, sview(" switch_cases=", 0, -1))
+        typed_dump_append_i64(&out, ctx.switch_cases.count.i64())
+        typed_dump_append_view(&out, sview(" mode=", 0, -1))
+        typed_dump_append_i64(&out, ctx.mode.i8().i64())
+        typed_dump_append_view(&out, sview(" project_mode=", 0, -1))
+        typed_dump_append_bool(&out, ctx.project_mode)
+        typed_dump_append_view(&out, sview(" cpp_unordered_map=", 0, -1))
+        typed_dump_append_bool(&out, ctx.needs_cpp_unordered_map)
+        typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.diagnostics.count.i64() |ctx, out|:
+            typed_dump_diagnostic(&out, index, ctx.diagnostics[index.usize()])
+
+        for index in 0..<ctx.exprs.count.i64() |ctx, out|:
+            expression: TypedExpr[r] = ctx.exprs[index.usize()]
+            typed_dump_append_view(&out, sview("expr ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" kind=", 0, -1))
+            typed_dump_append_view(&out, typed_dump_expr_kind(expression.kind))
+            typed_dump_append_view(&out, sview(" lhs=", 0, -1))
+            typed_dump_append_i64(&out, expression.lhs)
+            typed_dump_append_view(&out, sview(" rhs=", 0, -1))
+            typed_dump_append_i64(&out, expression.rhs)
+            typed_dump_append_view(&out, sview(" third=", 0, -1))
+            typed_dump_append_i64(&out, expression.third)
+            typed_dump_append_view(&out, sview(" args_start=", 0, -1))
+            typed_dump_append_i64(&out, expression.args_start)
+            typed_dump_append_view(&out, sview(" args_count=", 0, -1))
+            typed_dump_append_i64(&out, expression.args_count)
+            typed_dump_append_view(&out, sview(" value=", 0, -1))
+            typed_dump_append_i64(&out, expression.value)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, expression.type_name)
+            typed_dump_append_view(&out, sview(" text_hex=", 0, -1))
+            typed_dump_append_hex(&out, expression.text)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.expr_children.count.i64() |ctx, out|:
+            typed_dump_append_view(&out, sview("expr-child ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" value=", 0, -1))
+            typed_dump_append_i64(&out, ctx.expr_children[index.usize()])
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.stmts.count.i64() |ctx, out|:
+            statement: TypedStmt[r] = ctx.stmts[index.usize()]
+            typed_dump_append_view(&out, sview("stmt ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" kind=", 0, -1))
+            typed_dump_append_view(&out, typed_dump_stmt_kind(statement.kind))
+            typed_dump_append_view(&out, sview(" expr=", 0, -1))
+            typed_dump_append_i64(&out, statement.expr)
+            typed_dump_append_view(&out, sview(" aux=", 0, -1))
+            typed_dump_append_i64(&out, statement.aux)
+            typed_dump_append_view(&out, sview(" aux2=", 0, -1))
+            typed_dump_append_i64(&out, statement.aux2)
+            typed_dump_append_view(&out, sview(" children_start=", 0, -1))
+            typed_dump_append_i64(&out, statement.children_start)
+            typed_dump_append_view(&out, sview(" children_count=", 0, -1))
+            typed_dump_append_i64(&out, statement.children_count)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, statement.name)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, statement.type_name)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.stmt_children.count.i64() |ctx, out|:
+            typed_dump_append_view(&out, sview("stmt-child ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" value=", 0, -1))
+            typed_dump_append_i64(&out, ctx.stmt_children[index.usize()])
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.functions.count.i64() |ctx, out|:
+            function: TypedFunction[r] = ctx.functions[index.usize()]
+            typed_dump_append_view(&out, sview("function ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" params_start=", 0, -1))
+            typed_dump_append_i64(&out, function.params_start)
+            typed_dump_append_view(&out, sview(" params_count=", 0, -1))
+            typed_dump_append_i64(&out, function.params_count)
+            typed_dump_append_view(&out, sview(" declaration_identity=", 0, -1))
+            typed_dump_append_bool(&out, function.declaration_id.len > 0)
+            typed_dump_append_view(&out, sview(" body=", 0, -1))
+            typed_dump_append_i64(&out, function.body)
+            typed_dump_append_view(&out, sview(" labels=", 0, -1))
+            typed_dump_append_i64(&out, function.label_count)
+            typed_dump_append_view(&out, sview(" variadic=", 0, -1))
+            typed_dump_append_bool(&out, function.variadic)
+            typed_dump_append_view(&out, sview(" internal_linkage=", 0, -1))
+            typed_dump_append_bool(&out, function.internal_linkage)
+            typed_dump_append_view(&out, sview(" global_effect=", 0, -1))
+            typed_dump_append_bool(&out, function.has_global_effect)
+            typed_dump_append_view(&out, sview(" unsafe_effect=", 0, -1))
+            typed_dump_append_bool(&out, function.has_unsafe_effect)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, function.name)
+            typed_dump_append_view(&out, sview(" link_name_hex=", 0, -1))
+            typed_dump_append_hex(&out, function.link_name)
+            typed_dump_append_view(&out, sview(" return_type_hex=", 0, -1))
+            typed_dump_append_hex(&out, function.return_type)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.params.count.i64() |ctx, out|:
+            parameter: TypedParam[r] = ctx.params[index.usize()]
+            typed_dump_append_view(&out, sview("param ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" mutable=", 0, -1))
+            typed_dump_append_bool(&out, parameter.is_mutable)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, parameter.name)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, parameter.type_name)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.externs.count.i64() |ctx, out|:
+            external: TypedExtern[r] = ctx.externs[index.usize()]
+            typed_dump_append_view(&out, sview("extern ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" params_start=", 0, -1))
+            typed_dump_append_i64(&out, external.params_start)
+            typed_dump_append_view(&out, sview(" params_count=", 0, -1))
+            typed_dump_append_i64(&out, external.params_count)
+            typed_dump_append_view(&out, sview(" variadic=", 0, -1))
+            typed_dump_append_bool(&out, external.variadic)
+            typed_dump_append_view(&out, sview(" declaration_identity=", 0, -1))
+            typed_dump_append_bool(&out, external.declaration_id.len > 0)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, external.name)
+            typed_dump_append_view(&out, sview(" link_name_hex=", 0, -1))
+            typed_dump_append_hex(&out, external.link_name)
+            typed_dump_append_view(&out, sview(" return_type_hex=", 0, -1))
+            typed_dump_append_hex(&out, external.return_type)
+            typed_dump_append_view(&out, sview(" result_type_hex=", 0, -1))
+            typed_dump_append_hex(&out, external.result_type)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.extern_params.count.i64() |ctx, out|:
+            parameter: TypedParam[r] = ctx.extern_params[index.usize()]
+            typed_dump_append_view(&out, sview("extern-param ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" mutable=", 0, -1))
+            typed_dump_append_bool(&out, parameter.is_mutable)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, parameter.name)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, parameter.type_name)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.extern_globals.count.i64() |ctx, out|:
+            global_value: TypedExternGlobal[r] = ctx.extern_globals[index.usize()]
+            typed_dump_append_view(&out, sview("extern-global ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, global_value.name)
+            typed_dump_append_view(&out, sview(" link_name_hex=", 0, -1))
+            typed_dump_append_hex(&out, global_value.link_name)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, global_value.type_name)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.records.count.i64() |ctx, out|:
+            record: TypedRecord[r] = ctx.records[index.usize()]
+            typed_dump_append_view(&out, sview("record ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" fields_start=", 0, -1))
+            typed_dump_append_i64(&out, record.fields_start)
+            typed_dump_append_view(&out, sview(" fields_count=", 0, -1))
+            typed_dump_append_i64(&out, record.fields_count)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, record.name)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.record_layouts.count.i64() |ctx, out|:
+            layout: TypedRecordLayout = ctx.record_layouts[index.usize()]
+            typed_dump_append_view(&out, sview("record-layout ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" record_index=", 0, -1))
+            typed_dump_append_i64(&out, layout.record_index)
+            typed_dump_append_view(&out, sview(" size_bytes=", 0, -1))
+            typed_dump_append_i64(&out, layout.size_bytes)
+            typed_dump_append_view(&out, sview(" alignment_bytes=", 0, -1))
+            typed_dump_append_i64(&out, layout.alignment_bytes)
+            typed_dump_append_view(&out, sview(" fields_count=", 0, -1))
+            typed_dump_append_i64(&out, layout.field_offsets_count)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.fields.count.i64() |ctx, out|:
+            field: TypedField[r] = ctx.fields[index.usize()]
+            typed_dump_append_view(&out, sview("field ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" mutable=", 0, -1))
+            typed_dump_append_bool(&out, field.is_mutable)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, field.name)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, field.type_name)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.globals.count.i64() |ctx, out|:
+            global_value: TypedGlobal[r] = ctx.globals[index.usize()]
+            typed_dump_append_view(&out, sview("global ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" initializer=", 0, -1))
+            typed_dump_append_i64(&out, global_value.initializer)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, global_value.name)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, global_value.type_name)
+            typed_dump_append_view(&out, sview(" project_private=", 0, -1))
+            typed_dump_append_bool(&out, global_value.project_private)
+            typed_dump_append_view(&out, sview(" identity_hash=", 0, -1))
+            typed_dump_append_i64(&out, global_value.identity_hash)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.enums.count.i64() |ctx, out|:
+            enumeration: TypedEnum[r] = ctx.enums[index.usize()]
+            typed_dump_append_view(&out, sview("enum ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, enumeration.name)
+            typed_dump_append_view(&out, sview(" underlying_hex=", 0, -1))
+            typed_dump_append_hex(&out, enumeration.underlying_type)
+            typed_dump_append_view(&out, sview(" storage_hex=", 0, -1))
+            typed_dump_append_hex(&out, enumeration.storage_type)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.enum_consts.count.i64() |ctx, out|:
+            constant: TypedEnumConst[r] = ctx.enum_consts[index.usize()]
+            typed_dump_append_view(&out, sview("enum-const ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" value=", 0, -1))
+            typed_dump_append_i64(&out, constant.value)
+            typed_dump_append_view(&out, sview(" enum_hex=", 0, -1))
+            typed_dump_append_hex(&out, constant.enum_name)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, constant.name)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.type_aliases.count.i64() |ctx, out|:
+            alias: TypedTypeAlias[r] = ctx.type_aliases[index.usize()]
+            typed_dump_append_view(&out, sview("type-alias ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, alias.name)
+            typed_dump_append_view(&out, sview(" target_hex=", 0, -1))
+            typed_dump_append_hex(&out, alias.target)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.user_function_signatures.count.i64() |ctx, out|:
+            signature: TypedUserFunctionSignature[r] = ctx.user_function_signatures[index.usize()]
+            typed_dump_append_view(&out, sview("function-signature ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, signature.name)
+            typed_dump_append_view(&out, sview(" type_hex=", 0, -1))
+            typed_dump_append_hex(&out, signature.type_name)
+            typed_dump_append_view(&out, sview(" result_type_hex=", 0, -1))
+            typed_dump_append_hex(&out, signature.result_type)
+            typed_dump_append_view(&out, sview(" function_index=", 0, -1))
+            typed_dump_append_i64(&out, signature.function_index)
+            typed_dump_append_view(&out, sview(" declaration_identity=", 0, -1))
+            typed_dump_append_bool(&out, signature.declaration_id.len > 0)
+            typed_dump_append_view(&out, sview(" params_count=", 0, -1))
+            typed_dump_append_i64(&out, signature.params_count)
+            typed_dump_append_view(&out, sview(" variadic=", 0, -1))
+            typed_dump_append_bool(&out, signature.variadic)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.decl_infos.count.i64() |ctx, out|:
+            declaration: TypedDeclInfo[r] = ctx.decl_infos[index.usize()]
+            typed_dump_append_view(&out, sview("declaration-info ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" canonical=", 0, -1))
+            typed_dump_append_bool(&out, declaration.is_canonical)
+            typed_dump_append_view(&out, sview(" has_previous=", 0, -1))
+            typed_dump_append_bool(&out, declaration.has_previous)
+            typed_dump_append_view(&out, sview(" user=", 0, -1))
+            typed_dump_append_bool(&out, declaration.is_user)
+            typed_dump_append_view(&out, sview(" extern=", 0, -1))
+            typed_dump_append_bool(&out, declaration.is_extern)
+            typed_dump_append_view(&out, sview(" cpp_iterator_map_type_hex=", 0, -1))
+            typed_dump_append_hex(&out, declaration.cpp_iterator_map_type)
+            typed_dump_append_view(&out, sview(" cpp_iterator_name_hex=", 0, -1))
+            typed_dump_append_hex(&out, declaration.cpp_iterator_decl_name)
+            typed_dump_append_view(&out, sview(" cpp_iterator_line=", 0, -1))
+            typed_dump_append_i64(&out, declaration.cpp_iterator_decl_line)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.labels.count.i64() |ctx, out|:
+            label: TypedLabel[r] = ctx.labels[index.usize()]
+            typed_dump_append_view(&out, sview("label ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.packed_record_names.count.i64() |ctx, out|:
+            typed_dump_append_view(&out, sview("packed-record ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" name_hex=", 0, -1))
+            typed_dump_append_hex(&out, ctx.packed_record_names[index.usize()])
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        for index in 0..<ctx.switch_cases.count.i64() |ctx, out|:
+            switch_case: TypedSwitchCase = ctx.switch_cases[index.usize()]
+            typed_dump_append_view(&out, sview("switch-case ", 0, -1))
+            typed_dump_append_i64(&out, index)
+            typed_dump_append_view(&out, sview(" value=", 0, -1))
+            typed_dump_append_i64(&out, switch_case.value)
+            typed_dump_append_view(&out, sview(" body=", 0, -1))
+            typed_dump_append_i64(&out, switch_case.body)
+            typed_dump_append_view(&out, sview(" default=", 0, -1))
+            typed_dump_append_bool(&out, switch_case.is_default)
+            typed_dump_append_view(&out, sview(" constant=", 0, -1))
+            typed_dump_append_bool(&out, switch_case.is_constant)
+            typed_dump_append_view(&out, sview(" constant_value=", 0, -1))
+            typed_dump_append_i64(&out, switch_case.constant_value)
+            typed_dump_append_view(&out, sview("\n", 0, -1))
+
+        return out

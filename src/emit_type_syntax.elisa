@@ -1,0 +1,413 @@
+extend CTranslator:
+    def append_view(out: mutable darray[u8]&, value: sview) -> void:
+        for index in 0..<value.len |out, value|:
+            out.push(string_view_index(value, index).u8())
+
+    def append_indent(out: mutable darray[u8]&, level: i64) -> void:
+        for _index in 0..<level |out|:
+            append_view(out, sview("    ", 0, -1))
+
+    def append_view_range(out: mutable darray[u8]&, value: sview, start: i64, end: i64) -> void:
+        for index in start..<end |out, value|:
+            out.push(string_view_index(value, index).u8())
+
+    def type_starts_with(value: sview, prefix: sview) -> bool:
+        return false if not sview_starts_with(value, prefix)
+        return true if value.len == prefix.len
+        # Type dispatch must match a complete C token. Without this boundary
+        # check a typedef such as `boolean` is mistaken for the builtin `bool`
+        # and gets an ABI-incompatible Elisa type.
+        next_byte: i64 = string_view_index(value, prefix.len)
+        return next_byte == 32 or next_byte == 9 or next_byte == 42 or next_byte == 38 or next_byte == 91 or next_byte == 40
+
+    def c_type_without_qualifiers(value: sview) -> sview:
+        result: mutable sview = value
+        while sview_starts_with(result, sview("const ", 0, -1)) or sview_starts_with(result, sview("volatile ", 0, -1)) or sview_starts_with(result, sview("restrict ", 0, -1)) |result|:
+            if sview_starts_with(result, sview("const ", 0, -1)):
+                result <- string_view_suffix(result, 6)
+            elif sview_starts_with(result, sview("volatile ", 0, -1)):
+                result <- string_view_suffix(result, 9)
+            else:
+                result <- string_view_suffix(result, 9)
+        return result
+
+    def c_type_pointer_base(qual_type: sview) -> sview:
+        return clang_type_pointer_base(qual_type)
+
+    def c_find_byte_from(value: sview, wanted: i64, start: i64) -> i64:
+        for index in start..<value.len |value, wanted, start|:
+            return index if string_view_index(value, index) == wanted
+        return -1
+
+    def c_find_last_byte(value: sview, wanted: i64) -> i64:
+        index: mutable i64 = value.len - 1
+        while index >= 0 |value, wanted, index|:
+            return index if string_view_index(value, index) == wanted
+            index <- index - 1
+        return -1
+
+    # Keep the old call surface for type rendering, but source declarator-group
+    # identity from the shared shape parser so callbacks and pointer-to-array
+    # types use the same structural recognition as pointer-depth analysis.
+    def c_function_pointer_marker(qual_type: sview) -> i64:
+        group: ClangTypePointerGroup = clang_type_pointer_group(qual_type)
+        return group.open if group.is_function_pointer else -1
+
+    def c_type_is_anonymous_record_value(qual_type: sview) -> bool:
+        # Clang represents a source-level anonymous record as
+        # `struct (unnamed at file.cpp:line:column)`, and newer C++ AST paths
+        # may desugar that to `(unnamed struct at file.cpp:line:column)`.
+        # The parentheses are part of the record identity, not a function
+        # declarator. Recognize both spellings so the function-type heuristic
+        # does not hide the record-location lookup.
+        base: sview = c_type_without_qualifiers(qual_type)
+        return false if not (sview_starts_with(base, sview("struct (unnamed at ", 0, -1)) or sview_starts_with(base, sview("union (unnamed at ", 0, -1)) or sview_starts_with(base, sview("(unnamed struct at ", 0, -1)) or sview_starts_with(base, sview("(unnamed union at ", 0, -1)) or sview_starts_with(base, sview("(anonymous struct at ", 0, -1)) or sview_starts_with(base, sview("(anonymous union at ", 0, -1)))
+        close: mutable i64 = -1
+        for index in 0..<base.len |base, close|:
+            close <- index if string_view_index(base, index) == 41
+        return false if close < 0
+        cursor: mutable i64 = close + 1
+        while cursor < base.len and (string_view_index(base, cursor) == 32 or string_view_index(base, cursor) == 9):
+            cursor <- cursor + 1
+        return true if cursor >= base.len
+        next: i64 = string_view_index(base, cursor)
+        return next == 38 or next == 42 or next == 91
+
+    def c_type_is_function_pointer(qual_type: sview) -> bool:
+        return c_function_pointer_marker(qual_type) >= 0
+
+    def c_pointer_to_array_open(qual_type: sview) -> i64:
+        group: ClangTypePointerGroup = clang_type_pointer_group(qual_type)
+        return group.open if group.is_pointer_to_array else -1
+
+    def c_type_is_pointer_to_array(qual_type: sview) -> bool:
+        return c_pointer_to_array_open(qual_type) >= 0
+
+    def c_type_is_function(qual_type: sview) -> bool:
+        return false if c_type_is_anonymous_record_value(qual_type)
+        return true if c_type_is_function_pointer(qual_type)
+        open_paren: i64 = sview_find_byte(qual_type, 40)
+        close_paren: i64 = c_find_last_byte(qual_type, 41)
+        return false if open_paren < 0 or close_paren <= open_paren
+        cursor: mutable i64 = close_paren + 1
+        while cursor < qual_type.len and (string_view_index(qual_type, cursor) == 32 or string_view_index(qual_type, cursor) == 9):
+            cursor <- cursor + 1
+        # A direct function type ends at its parameter list. A pointer-to-array
+        # declarator continues with `[N]`, so it must not be parsed as a
+        # callback merely because it contains `(*)`.
+        return cursor >= qual_type.len
+
+    def c_trim_spaces(value: sview) -> sview:
+        result: mutable sview = value
+        while result.len > 0 and string_view_index(result, 0) == 32:
+            result <- string_view_suffix(result, 1)
+        while result.len > 0 and string_view_index(result, result.len - 1) == 32:
+            result <- string_view_prefix(result, result.len - 1)
+        return result
+
+    def c_type_strip_trailing_qualifiers(value: sview) -> sview:
+        result: mutable sview = c_trim_spaces(c_type_without_qualifiers(value))
+        while sview_ends_with(result, sview(" const", 0, -1)) or sview_ends_with(result, sview(" volatile", 0, -1)) or sview_ends_with(result, sview(" restrict", 0, -1)) or sview_ends_with(result, sview(" __restrict", 0, -1)) or sview_ends_with(result, sview(" __restrict__", 0, -1)) or sview_ends_with(result, sview(" _Atomic", 0, -1)) |result|:
+            if sview_ends_with(result, sview(" const", 0, -1)):
+                result <- c_trim_spaces(string_view_prefix(result, result.len - 6))
+            elif sview_ends_with(result, sview(" volatile", 0, -1)):
+                result <- c_trim_spaces(string_view_prefix(result, result.len - 9))
+            elif sview_ends_with(result, sview(" restrict", 0, -1)):
+                result <- c_trim_spaces(string_view_prefix(result, result.len - 9))
+            elif sview_ends_with(result, sview(" __restrict", 0, -1)):
+                result <- c_trim_spaces(string_view_prefix(result, result.len - 11))
+            elif sview_ends_with(result, sview(" __restrict__", 0, -1)):
+                result <- c_trim_spaces(string_view_prefix(result, result.len - 13))
+            else:
+                result <- c_trim_spaces(string_view_prefix(result, result.len - 8))
+        return result
+
+    def c_type_named_base(qual_type: sview) -> sview:
+        base: mutable sview = c_type_strip_trailing_qualifiers(c_type_pointer_base(qual_type))
+        if sview_starts_with(base, sview("struct ", 0, -1)):
+            return string_view_suffix(base, 7)
+        if sview_starts_with(base, sview("union ", 0, -1)):
+            return string_view_suffix(base, 6)
+        if sview_starts_with(base, sview("enum ", 0, -1)):
+            return string_view_suffix(base, 5)
+        return base
+
+    def c_type_abi_base(qual_type: sview) -> sview:
+        # These C spellings share one Elisa storage representation. Keeping the
+        # normalization here lets cast-elision recognize harmless signedness and
+        # typedef spelling changes while still distinguishing real void/record
+        # pointer reinterpretations.
+        base: sview = c_type_named_base(qual_type)
+        fixed_width: sview = c_type_fixed_width_abi(qual_type)
+        return fixed_width if fixed_width.len > 0
+        return sview("bool", 0, -1) if sview_eq(base, sview("_Bool", 0, -1)) or sview_eq(base, sview("bool", 0, -1))
+        # Clang may expose pointer-difference results through the target
+        # headers' implementation spelling rather than `ptrdiff_t`. Keep all
+        # of those aliases in Elisa's signed pointer-width family; the
+        # target-aware ABI mapper refines the width when one is available.
+        return sview("isize", 0, -1) if sview_eq(base, sview("ptrdiff_t", 0, -1)) or sview_eq(base, sview("__ptrdiff_t", 0, -1)) or sview_eq(base, sview("__darwin_ptrdiff_t", 0, -1))
+        return sview("usize", 0, -1) if sview_eq(base, sview("size_t", 0, -1)) or sview_eq(base, sview("__size_t", 0, -1)) or sview_eq(base, sview("__darwin_size_t", 0, -1))
+        return sview("isize", 0, -1) if sview_eq(base, sview("ssize_t", 0, -1)) or sview_eq(base, sview("__ssize_t", 0, -1)) or sview_eq(base, sview("__darwin_ssize_t", 0, -1))
+        return sview("i8", 0, -1) if sview_eq(base, sview("int8_t", 0, -1)) or sview_eq(base, sview("__int8_t", 0, -1)) else sview("u8", 0, -1) if sview_eq(base, sview("uint8_t", 0, -1)) or sview_eq(base, sview("__uint8_t", 0, -1)) else sview("i16", 0, -1) if sview_eq(base, sview("int16_t", 0, -1)) or sview_eq(base, sview("__int16_t", 0, -1)) else sview("u16", 0, -1) if sview_eq(base, sview("uint16_t", 0, -1)) or sview_eq(base, sview("__uint16_t", 0, -1)) else sview("i32", 0, -1) if sview_eq(base, sview("int32_t", 0, -1)) or sview_eq(base, sview("__int32_t", 0, -1)) else sview("u32", 0, -1) if sview_eq(base, sview("uint32_t", 0, -1)) or sview_eq(base, sview("__uint32_t", 0, -1)) else sview("i64", 0, -1) if sview_eq(base, sview("int64_t", 0, -1)) or sview_eq(base, sview("__int64_t", 0, -1)) else sview("u64", 0, -1) if sview_eq(base, sview("uint64_t", 0, -1)) or sview_eq(base, sview("__uint64_t", 0, -1)) else sview("u8", 0, -1) if sview_eq(base, sview("char", 0, -1)) or sview_eq(base, sview("unsigned char", 0, -1)) or sview_eq(base, sview("cc_t", 0, -1)) else sview("i8", 0, -1) if sview_eq(base, sview("signed char", 0, -1)) else sview("i16", 0, -1) if sview_eq(base, sview("short", 0, -1)) or sview_eq(base, sview("short int", 0, -1)) else sview("u16", 0, -1) if sview_eq(base, sview("unsigned short", 0, -1)) or sview_eq(base, sview("unsigned short int", 0, -1)) else sview("i32", 0, -1) if sview_eq(base, sview("int", 0, -1)) or sview_eq(base, sview("signed", 0, -1)) or sview_eq(base, sview("signed int", 0, -1)) else sview("u32", 0, -1) if sview_eq(base, sview("unsigned", 0, -1)) or sview_eq(base, sview("unsigned int", 0, -1)) else sview("i64", 0, -1) if sview_eq(base, sview("long", 0, -1)) or sview_eq(base, sview("long int", 0, -1)) or sview_eq(base, sview("long long", 0, -1)) or sview_eq(base, sview("long long int", 0, -1)) else sview("u64", 0, -1) if sview_eq(base, sview("unsigned long", 0, -1)) or sview_eq(base, sview("unsigned long int", 0, -1)) or sview_eq(base, sview("unsigned long long", 0, -1)) or sview_eq(base, sview("unsigned long long int", 0, -1)) else sview("usize", 0, -1) if sview_eq(base, sview("size_t", 0, -1)) else sview("isize", 0, -1) if sview_eq(base, sview("ssize_t", 0, -1)) else sview("f32", 0, -1) if sview_eq(base, sview("float", 0, -1)) else sview("f64", 0, -1) if sview_eq(base, sview("double", 0, -1)) else base
+
+    def append_elisa_type_name(out: mutable darray[u8]&, name: mutable sview) -> void:
+        return if name.len == 0
+        name <- safe_identifier(name)
+        first: u8 = string_view_index(name, 0).u8()
+        if first >= 97 and first <= 122:
+            out.push(first - 32)
+        elif (first < 65 or first > 90):
+            append_view(out, sview("C_", 0, -1))
+        else:
+            out.push(first)
+        start: i64 = 1 if first >= 65 and first <= 90 else 1 if first >= 97 and first <= 122 else 0
+        for index in start..<name.len |out, name|:
+            byte: i64 = string_view_index(name, index)
+            if (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or (byte >= 48 and byte <= 57) or byte == 95:
+                out.push(byte.u8())
+            else:
+                out.push(95)
+
+    def c_array_length(qual_type: sview) -> i64:
+        open_bracket: i64 = sview_find_byte(qual_type, 91)
+        close_bracket: i64 = sview_find_byte(qual_type, 93)
+        return 0 if open_bracket < 0 or close_bracket <= open_bracket
+        result: mutable i64 = 0
+        for index in (open_bracket + 1)..<close_bracket |qual_type, result|:
+            digit: i64 = string_view_index(qual_type, index) - 48
+            result <- result * 10 + digit if digit >= 0 and digit <= 9
+        return result
+
+    def c_type_has_nonconstant_array_bound(qual_type: sview) -> bool:
+        dimensions: i64 = c_array_dimension_count(qual_type)
+        for dimension in 0..<dimensions |qual_type|:
+            open_bracket: i64 = c_array_open_at(qual_type, dimension)
+            close_bracket: i64 = c_array_close_after(qual_type, open_bracket)
+            return true if open_bracket < 0 or close_bracket <= open_bracket
+            has_bound: mutable bool = false
+            decimal_bound: mutable bool = true
+            for index in (open_bracket + 1)..<close_bracket |qual_type, has_bound, decimal_bound|:
+                byte: i64 = string_view_index(qual_type, index)
+                continue if byte == 32 or byte == 9
+                has_bound <- true
+                decimal_bound <- false if byte < 48 or byte > 57
+            return true if has_bound and not decimal_bound
+        return false
+
+    def c_type_has_zero_array_bound(qual_type: sview) -> bool:
+        dimensions: i64 = c_array_dimension_count(qual_type)
+        for dimension in 0..<dimensions |qual_type|:
+            open_bracket: i64 = c_array_open_at(qual_type, dimension)
+            close_bracket: i64 = c_array_close_after(qual_type, open_bracket)
+            return false if open_bracket < 0 or close_bracket <= open_bracket
+            has_digit: mutable bool = false
+            has_nonzero_digit: mutable bool = false
+            for index in (open_bracket + 1)..<close_bracket |qual_type, has_digit, has_nonzero_digit|:
+                byte: i64 = string_view_index(qual_type, index)
+                if byte >= 48 and byte <= 57:
+                    has_digit <- true
+                    has_nonzero_digit <- true if byte != 48
+            return true if has_digit and not has_nonzero_digit
+        return false
+
+    # A Clang array spelling keeps all dimensions in source order:
+    # `int[4][2]` means an outer array of four two-element arrays. Elisa writes
+    # the element type first, so the equivalent type is
+    # `array[array[i32, 2], 4]`. Keep the dimension parsing here rather than
+    # making individual projects teach the emitter about multidimensional
+    # arrays.
+    def c_array_dimension_count(qual_type: sview) -> i64:
+        count: mutable i64 = 0
+        for index in 0..<qual_type.len |qual_type, count|:
+            count <- count + 1 if string_view_index(qual_type, index) == 91
+        return count
+
+    def c_array_open_at(qual_type: sview, wanted: i64) -> i64:
+        ordinal: mutable i64 = 0
+        for index in 0..<qual_type.len |qual_type, wanted, ordinal|:
+            if string_view_index(qual_type, index) == 91:
+                return index if ordinal == wanted
+                ordinal <- ordinal + 1
+        return -1
+
+    def c_array_close_after(qual_type: sview, open_bracket: i64) -> i64:
+        return -1 if open_bracket < 0
+        for index in (open_bracket + 1)..<qual_type.len |qual_type, open_bracket|:
+            return index if string_view_index(qual_type, index) == 93
+        return -1
+
+    def c_array_base_type(qual_type: sview) -> sview:
+        open_bracket: i64 = sview_find_byte(qual_type, 91)
+        return string_view_prefix(qual_type, open_bracket) if open_bracket >= 0 else qual_type
+
+    def append_c_array_element_type(out: mutable darray[u8]&, element_type: sview) -> void:
+        append_c_type(out, element_type)
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(element_type)
+
+    def append_c_array_type(out: mutable darray[u8]&, qual_type: sview, dimension: i64, dimensions: i64) -> void:
+        if dimension >= dimensions:
+            append_c_array_element_type(out, c_array_base_type(qual_type))
+            return
+        open_bracket: i64 = c_array_open_at(qual_type, dimension)
+        close_bracket: i64 = c_array_close_after(qual_type, open_bracket)
+        append_view(out, sview("array[", 0, -1))
+        append_c_array_type(out, qual_type, dimension + 1, dimensions)
+        append_view(out, sview(", ", 0, -1))
+        append_view_range(out, qual_type, open_bracket + 1, close_bracket)
+        append_view(out, sview("]", 0, -1))
+
+    def append_c_pointer_to_array_type(out: mutable darray[u8]&, qual_type: sview, dimension: i64, dimensions: i64) -> void:
+        pointer_open: i64 = c_pointer_to_array_open(qual_type)
+        pointer_base: sview = c_trim_spaces(string_view_prefix(qual_type, pointer_open))
+        if dimension >= dimensions:
+            # Once the pointer-to-array dimensions are consumed, the remaining
+            # type is the array's element (often itself a nullable pointer).
+            # Use the same element renderer as ordinary arrays so its pointer
+            # layers and nullability are not erased at this declarator boundary.
+            append_c_array_element_type(out, pointer_base)
+            return
+        open_bracket: i64 = c_array_open_at(qual_type, dimension)
+        close_bracket: i64 = c_array_close_after(qual_type, open_bracket)
+        append_view(out, sview("array[", 0, -1))
+        append_c_pointer_to_array_type(out, qual_type, dimension + 1, dimensions)
+        append_view(out, sview(", ", 0, -1))
+        append_view_range(out, qual_type, open_bracket + 1, close_bracket)
+        append_view(out, sview("]", 0, -1))
+
+    def c_type_is_incomplete_array(qual_type: sview) -> bool:
+        open_bracket: i64 = sview_find_byte(qual_type, 91)
+        close_bracket: i64 = sview_find_byte(qual_type, 93)
+        return false if open_bracket < 0 or close_bracket <= open_bracket
+        for index in (open_bracket + 1)..<close_bracket |qual_type|:
+            byte: i64 = string_view_index(qual_type, index)
+            return false if byte != 32 and byte != 9
+        return true
+
+    def c_hex_digit(byte: i64) -> i64:
+        return byte - 48 if byte >= 48 and byte <= 57
+        return byte - 65 + 10 if byte >= 65 and byte <= 70
+        return byte - 97 + 10 if byte >= 97 and byte <= 102
+        return -1
+
+    def append_c_string_array(out: mutable darray[u8]&, literal: sview, target_type: sview) -> void:
+        capacity: i64 = c_array_length(target_type)
+        append_view(out, sview("[", 0, -1))
+        source_index: mutable i64 = 1
+        emitted: mutable i64 = 0
+        source_end: i64 = literal.len - 1
+        while source_index < source_end and emitted < capacity |out, literal, source_index, emitted|:
+            value: mutable i64 = string_view_index(literal, source_index)
+            source_index <- source_index + 1
+            if value == 92 and source_index < source_end:
+                escaped: i64 = string_view_index(literal, source_index)
+                source_index <- source_index + 1
+                if escaped == 110:
+                    value <- 10
+                elif escaped == 114:
+                    value <- 13
+                elif escaped == 116:
+                    value <- 9
+                elif escaped == 98:
+                    value <- 8
+                elif escaped == 102:
+                    value <- 12
+                elif escaped == 118:
+                    value <- 11
+                elif escaped == 97:
+                    value <- 7
+                elif escaped == 120:
+                    value <- 0
+                    while source_index < source_end and c_hex_digit(string_view_index(literal, source_index)) >= 0 |literal, source_index, value|:
+                        value <- value * 16 + c_hex_digit(string_view_index(literal, source_index))
+                        source_index <- source_index + 1
+                elif escaped >= 48 and escaped <= 55:
+                    value <- escaped - 48
+                    digits: mutable i64 = 1
+                    while digits < 3 and source_index < source_end and string_view_index(literal, source_index) >= 48 and string_view_index(literal, source_index) <= 55 |literal, source_index, value, digits|:
+                        value <- value * 8 + string_view_index(literal, source_index) - 48
+                        source_index <- source_index + 1
+                        digits <- digits + 1
+                else:
+                    value <- escaped
+            append_view(out, sview(", ", 0, -1)) if emitted > 0
+            append_i64(out, value)
+            emitted <- emitted + 1
+        while emitted < capacity |out, emitted|:
+            append_view(out, sview(", ", 0, -1)) if emitted > 0
+            append_view(out, sview("0", 0, -1))
+            emitted <- emitted + 1
+        append_view(out, sview("]", 0, -1))
+
+    def append_hex_digit(out: mutable darray[u8]&, value: i64) -> void:
+        out.push((48 + value).u8()) if value < 10
+        out.push((55 + value).u8()) if value >= 10
+
+    # Clang's JSON value keeps C's octal and hexadecimal escapes verbatim. Elisa
+    # intentionally has no octal string escapes, so canonicalize byte escapes to
+    # `\xNN` while preserving the ordinary Elisa-compatible escapes.
+    def append_elisa_string_literal(out: mutable darray[u8]&, literal: sview) -> void:
+        return if literal.len == 0
+        out.push(34)
+        index: mutable i64 = 1
+        end: i64 = literal.len - 1
+        while index < end |out, literal, index, end|:
+            value: i64 = string_view_index(literal, index)
+            index <- index + 1
+            if value != 92:
+                out.push(92) if value == 34
+                out.push(value.u8())
+                continue
+            break if index >= end
+            escaped: i64 = string_view_index(literal, index)
+            index <- index + 1
+            byte: mutable i64 = -1
+            digits: mutable i64 = 0
+            if escaped >= 48 and escaped <= 55:
+                byte <- escaped - 48
+                digits <- 1
+                while digits < 3 and index < end and string_view_index(literal, index) >= 48 and string_view_index(literal, index) <= 55 |literal, index, end, byte, digits|:
+                    byte <- byte * 8 + string_view_index(literal, index) - 48
+                    index <- index + 1
+                    digits <- digits + 1
+            elif escaped == 120:
+                byte <- 0
+                digits <- 0
+                while digits < 2 and index < end and c_hex_digit(string_view_index(literal, index)) >= 0 |literal, index, end, byte, digits|:
+                    byte <- byte * 16 + c_hex_digit(string_view_index(literal, index))
+                    index <- index + 1
+                    digits <- digits + 1
+            if byte >= 0:
+                out.push(92)
+                out.push(120)
+                append_hex_digit(out, (byte / 16) % 16)
+                append_hex_digit(out, byte % 16)
+            else:
+                out.push(92)
+                out.push(escaped.u8())
+        out.push(34)
+    def append_c_function_result_contextual[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, return_type: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        append_view(out, sview("mutable ", 0, -1)) if not c_type_pointer_layers_composable(return_type) and sview_find_byte(return_type, 42) >= 0 and not c_type_is_const_pointer(return_type)
+        append_c_type_contextual(out, ctx, return_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(return_type)
+    def append_c_function_type_contextual[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, function_type: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        marker: i64 = c_function_pointer_marker(function_type)
+        params_start: i64 = c_function_pointer_params_start(function_type)
+        params_end: i64 = c_find_last_byte(function_type, 41)
+        return_type: sview = c_trim_spaces(string_view_prefix(function_type, marker))
+        append_view(out, sview("fn(", 0, -1))
+        parameter: mutable i64 = 0
+        if params_start >= 0 and params_end > params_start:
+            for _index in 0..<64 |out, ctx, function_type, params_start, params_end, parameter|:
+                current: sview = c_function_parameter_type(function_type, parameter)
+                break if current.len == 0
+                append_view(out, sview(", ", 0, -1)) if parameter > 0
+                if sview_eq(current, sview("...", 0, -1)):
+                    append_view(out, sview("...", 0, -1))
+                else:
+                    append_view(out, sview("mutable ", 0, -1)) if not c_type_pointer_layers_composable(current) and (sview_find_byte(current, 42) >= 0 or c_type_reference_count(current) > 0) and not c_type_is_function_pointer(current) and c_type_pointer_can_write(current)
+                    append_c_type_contextual(out, ctx, current) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(current)
+                parameter <- parameter + 1
+                break if c_function_parameter_type(function_type, parameter).len == 0
+        append_view(out, sview(") -> ", 0, -1))
+        append_c_function_result_contextual(out, ctx, return_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

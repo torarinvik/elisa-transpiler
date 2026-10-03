@@ -1,0 +1,71 @@
+extend CTranslator:
+    def typed_lower_compound_assignment_with_preludes[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], assignment: JsonValueHandle[r], prelude: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        lhs: i64 = typed_lower_comma_value(ctx, ast_child(assignment, 0), prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        rhs: i64 = typed_lower_comma_value(ctx, ast_child(assignment, 1), prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if lhs < 0 or rhs < 0:
+            return -1
+        raw_opcode: sview = ast_string(ast_field(assignment, sview("opcode", 0, -1)))
+        compound_opcode: sview = typed_binary_assignment_opcode(typed_surface_opcode(raw_opcode))
+        compound_id: i64 = typed_compound_assignment_value_id(raw_opcode)
+        if compound_opcode.len == 0 or compound_id < 0:
+            typed_record_unsupported(ctx, assignment, sview("compound assignment sequencing operator", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        value_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        update: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: compound_opcode, type_name: value_type, lhs: lhs, rhs: rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        assignment_value: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: value_type, lhs: lhs, rhs: update, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sequence, text: sview(",", 0, -1), type_name: value_type, lhs: assignment_value, rhs: update, third: -1, args_start: -1, args_count: 0, value: 6 + compound_id}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    # Lower a logical expression whose RHS needs statement-level sequencing.
+    # The prelude belongs only to the selected branch; materialize the C
+    # integer/bool result so the caller can use it as an ordinary value.
+    def typed_lower_comma_logical[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], logical: JsonValueHandle[r], prelude: mutable darray[i64]&, handled: mutable bool&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        handled <- false
+        return -1 if not sview_eq(ast_kind(logical), sview("BinaryOperator", 0, -1)) or ast_child_count(logical) < 2
+        opcode: sview = ast_string(ast_field(logical, sview("opcode", 0, -1)))
+        is_and: bool = sview_eq(opcode, sview("&&", 0, -1))
+        is_or: bool = sview_eq(opcode, sview("||", 0, -1))
+        return -1 if not is_and and not is_or
+        return -1 if not typed_ast_has_effectful_comma(ast_child(logical, 1))
+
+        handled <- true
+        left: i64 = typed_lower_comma_value(ctx, ast_child(logical, 0), prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        right_prelude: mutable darray[i64] = []
+        right: i64 = typed_lower_comma_value(ctx, ast_child(logical, 1), right_prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if left < 0 or right < 0:
+            return -1
+        value_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if right_prelude.count == 0:
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: typed_surface_opcode(opcode), type_name: value_type, lhs: left, rhs: right, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+        generated_name: mutable darray[u8] = []
+        append_view(generated_name, sview("__elisa_transpiler_logical_value_", 0, -1))
+        append_i64(generated_name, ctx.exprs.count.i64())
+        generated_name_storage: cstr = string_view_copy(bytes_view(generated_name)) can Memory.Allocate, Abort.Panic
+        temp_name: sview = sview(generated_name_storage, 0, -1)
+        prelude.push(typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Declaration, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: temp_name, type_name: value_type}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+
+        true_value: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: value_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        false_value: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: value_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        rhs_true_assignment: i64 = typed_make_conditional_assignment(ctx, temp_name, value_type, true_value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        rhs_false_assignment: i64 = typed_make_conditional_assignment(ctx, temp_name, value_type, false_value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        rhs_true: mutable darray[i64] = [rhs_true_assignment]
+        rhs_false: mutable darray[i64] = [rhs_false_assignment]
+        rhs_true_block: i64 = typed_make_block(ctx, rhs_true) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        rhs_false_block: i64 = typed_make_block(ctx, rhs_false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        rhs_truth: i64 = typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.If, expr: right, aux: rhs_true_block, aux2: rhs_false_block, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        right_prelude.push(rhs_truth)
+
+        left_true: mutable darray[i64] = []
+        left_false: mutable darray[i64] = []
+        if is_and:
+            for index in 0..<right_prelude.count |left_true, right_prelude|:
+                left_true.push(right_prelude[index])
+            left_false.push(typed_make_conditional_assignment(ctx, temp_name, value_type, false_value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+        else:
+            left_true.push(typed_make_conditional_assignment(ctx, temp_name, value_type, true_value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            for index in 0..<right_prelude.count |left_false, right_prelude|:
+                left_false.push(right_prelude[index])
+        left_true_stmt: i64 = typed_make_block(ctx, left_true) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        left_false_stmt: i64 = typed_make_block(ctx, left_false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        prelude.push(typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.If, expr: left, aux: left_true_stmt, aux2: left_false_stmt, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+        return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Name, text: temp_name, type_name: value_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

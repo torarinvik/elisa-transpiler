@@ -1,0 +1,4 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_duplicate_extern_definition/beta.cpp","command":"clang++ -std=c++17 -Wno-extern-initializer -c testdata/fixtures/project_duplicate_extern_definition/beta.cpp"},
+  {"directory":".","file":"testdata/fixtures/project_duplicate_extern_definition/alpha.cpp","command":"clang++ -std=c++17 -Wno-extern-initializer -c testdata/fixtures/project_duplicate_extern_definition/alpha.cpp"}
+]

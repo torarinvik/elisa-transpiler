@@ -1,0 +1,6 @@
+[
+  {"directory":".","file":"testdata/fixtures/project_external_objects/main.c","command":"clang -std=c11 -c testdata/fixtures/project_external_objects/main.c"},
+  {"directory":".","file":"testdata/fixtures/project_external_objects/implementation.c","command":"clang -std=c11 -c testdata/fixtures/project_external_objects/implementation.c"},
+  {"directory":".","file":"testdata/fixtures/project_external_objects/beta.c","command":"clang -std=c11 -c testdata/fixtures/project_external_objects/beta.c"},
+  {"directory":".","file":"testdata/fixtures/project_external_objects/alpha.c","command":"clang -std=c11 -c testdata/fixtures/project_external_objects/alpha.c"}
+]

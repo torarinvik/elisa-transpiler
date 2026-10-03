@@ -1,0 +1,23 @@
+extend CTranslator:
+    def typed_source_range[@r](node: JsonValueHandle[r], origin_name: sview) -> TypedSourceRange[r]:
+        empty: TypedSourceRange[r] = TypedSourceRange{file: sview("", 0, 0), included_from: sview("", 0, 0), start_offset: -1, end_offset: -1}
+        return empty if origin_name.len > 0 and not ast_range_has_origin(node, origin_name)
+        begin: sview = sview("begin", 0, -1)
+        end: sview = sview("end", 0, -1)
+        file: mutable sview = ast_range_origin_file(node, begin, origin_name)
+        end_file: sview = ast_range_origin_file(node, end, origin_name)
+        file <- end_file if file.len == 0
+        included_from: mutable sview = ast_range_origin_included_from(node, begin, origin_name)
+        included_from <- ast_range_origin_included_from(node, end, origin_name) if included_from.len == 0
+        start_offset: i64 = ast_range_origin_offset(node, begin, origin_name, false)
+        end_offset: i64 = ast_range_origin_offset(node, end, origin_name, true)
+        return TypedSourceRange{file: file, included_from: included_from, start_offset: start_offset, end_offset: end_offset}
+
+    def typed_ir_source_origin[@r](node: JsonValueHandle[r], synthesized_reason: sview) -> TypedIRSourceOrigin[r]:
+        return TypedIRSourceOrigin[r]{
+            node: node,
+            source: typed_source_range(node, sview("", 0, 0)),
+            spelling: typed_source_range(node, sview("spellingLoc", 0, -1)),
+            expansion: typed_source_range(node, sview("expansionLoc", 0, -1)),
+            synthesized_reason: synthesized_reason
+        }

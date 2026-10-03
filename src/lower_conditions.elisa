@@ -1,0 +1,538 @@
+extend CTranslator:
+    def typed_make_block[@r](ctx: mutable TypedContext[r]&, children: darray[i64]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        children_start: i64 = ctx.stmt_children.count.i64()
+        for index in 0..<children.count |ctx, children|:
+            ctx.stmt_children.push(children[index])
+        return typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: children_start, children_count: children.count.i64(), name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_make_c_declaration_group[@r](ctx: mutable TypedContext[r]&, children: darray[i64]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # Clang represents one C declaration statement such as
+        # `int first, second;` as several VarDecl children. Keep them grouped
+        # for IR traversal, but mark the wrapper as transparent: it introduces
+        # no C scope of its own.
+        children_start: i64 = ctx.stmt_children.count.i64()
+        for index in 0..<children.count |ctx, children|:
+            ctx.stmt_children.push(children[index])
+        return typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Block, expr: -1, aux: TYPED_STMT_AUX_C_DECLARATION_GROUP, aux2: -1, children_start: children_start, children_count: children.count.i64(), name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    struct TypedCondition:
+        expression: i64
+        assignment: i64
+        postfix: bool
+    def ast_strip_condition[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r] @r:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
+            return ast_strip_condition(ast_child(node, 0))
+        return node
+    def typed_condition_join_assignments[@r](ctx: mutable TypedContext[r]&, left: i64, right: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return right if left < 0
+        return left if right < 0
+        return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sequence, text: sview(",", 0, -1), type_name: sview("int", 0, -1), lhs: left, rhs: right, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_condition_expr_has_effect[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        return true if expression.kind == TypedExprKind.Call
+        return true if expression.kind == TypedExprKind.Binary and sview_eq(expression.text, sview("<-", 0, -1))
+        return true if expression.kind == TypedExprKind.Sequence and (expression.value >= 1 and expression.value <= 15)
+        if expression.kind == TypedExprKind.Binary or expression.kind == TypedExprKind.Sequence:
+            return typed_condition_expr_has_effect(ctx, expression.lhs) or typed_condition_expr_has_effect(ctx, expression.rhs)
+        if expression.kind == TypedExprKind.ArrayIndex:
+            return true if expression.value >= 0
+            return typed_condition_expr_has_effect(ctx, expression.lhs) or typed_condition_expr_has_effect(ctx, expression.rhs)
+        if expression.kind == TypedExprKind.Unary or expression.kind == TypedExprKind.Cast or expression.kind == TypedExprKind.Member:
+            return typed_condition_expr_has_effect(ctx, expression.lhs)
+        if expression.kind == TypedExprKind.Conditional:
+            return typed_condition_expr_has_effect(ctx, expression.lhs) or typed_condition_expr_has_effect(ctx, expression.rhs) or typed_condition_expr_has_effect(ctx, expression.third)
+        if expression.kind == TypedExprKind.Aggregate:
+            for offset in 0..<expression.args_count |ctx, expression|:
+                return true if typed_condition_expr_has_effect(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
+        return false
+    def typed_lower_condition_value[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> TypedCondition can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        stripped: JsonValueHandle[r] = ast_strip_condition(node)
+        kind: sview = ast_kind(stripped)
+        if sview_eq(kind, sview("UnaryOperator", 0, -1)) and ast_child_count(stripped) > 0:
+            opcode: sview = ast_string(ast_field(stripped, sview("opcode", 0, -1)))
+            if sview_eq(opcode, sview("--", 0, -1)) or sview_eq(opcode, sview("++", 0, -1)):
+                # Scalar inc/dec is emitted as a value-returning helper call.
+                # Keep that call in the condition expression instead of
+                # splitting it into a prelude assignment, which changes the
+                # observed value of postfix forms such as `cursor++ != old`.
+                lowered: i64 = typed_lower_expr(ctx, stripped) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if lowered >= 0 and typed_expr_is_increment_sequence(typed_expr_at(ctx, lowered)):
+                    return TypedCondition{expression: lowered, assignment: -1, postfix: false}
+                operand: i64 = typed_lower_expr(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if operand < 0:
+                    return TypedCondition{expression: -1, assignment: -1, postfix: false}
+                delta: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: ast_qual_type(stripped), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                arithmetic_opcode: sview = sview("+", 0, -1) if sview_eq(opcode, sview("++", 0, -1)) else sview("-", 0, -1)
+                updated: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: arithmetic_opcode, type_name: ast_qual_type(stripped), lhs: operand, rhs: delta, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: ast_qual_type(stripped), lhs: operand, rhs: updated, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return TypedCondition{expression: operand if ast_bool(ast_field(stripped, sview("isPostfix", 0, -1))) else updated, assignment: assignment, postfix: ast_bool(ast_field(stripped, sview("isPostfix", 0, -1)))}
+        if (sview_eq(kind, sview("BinaryOperator", 0, -1)) or sview_eq(kind, sview("CompoundAssignOperator", 0, -1))) and ast_child_count(stripped) > 1:
+            opcode: sview = ast_string(ast_field(stripped, sview("opcode", 0, -1)))
+            if sview_eq(kind, sview("BinaryOperator", 0, -1)) and (sview_eq(opcode, sview("&&", 0, -1)) or sview_eq(opcode, sview("||", 0, -1))):
+                # Logical operators are sequence points for control flow: the
+                # RHS must stay nested so it is evaluated only when required.
+                # Recursively combining assignment preludes here hoisted RHS
+                # writes out of C's short-circuit evaluation.
+                expression: i64 = typed_lower_expr(ctx, stripped) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return TypedCondition{expression: expression, assignment: -1, postfix: false}
+            if sview_eq(kind, sview("CompoundAssignOperator", 0, -1)):
+                # A compound assignment is itself a value in C. Keep it in
+                # the condition so loops execute it once per test rather than
+                # hoisting its write outside the test.
+                expression: i64 = typed_lower_expr(ctx, stripped) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return TypedCondition{expression: expression, assignment: -1, postfix: false}
+            if sview_eq(kind, sview("BinaryOperator", 0, -1)) and sview_eq(opcode, sview("=", 0, -1)):
+                assigned_lhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                assigned_rhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: ast_qual_type(stripped), lhs: assigned_lhs, rhs: assigned_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return TypedCondition{expression: assigned_rhs, assignment: assignment, postfix: false}
+            if sview_eq(kind, sview("CompoundAssignOperator", 0, -1)):
+                assigned_lhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                assigned_rhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                compound: sview = typed_binary_assignment_opcode(opcode)
+                if compound.len > 0:
+                    updated: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: compound, type_name: ast_qual_type(stripped), lhs: assigned_lhs, rhs: assigned_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: ast_qual_type(stripped), lhs: assigned_lhs, rhs: updated, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return TypedCondition{expression: updated, assignment: assignment, postfix: false}
+            left: TypedCondition = typed_lower_condition_value(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            right: TypedCondition = typed_lower_condition_value(ctx, ast_child(stripped, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if left.expression < 0 or right.expression < 0:
+                return TypedCondition{expression: -1, assignment: -1, postfix: false}
+            if sview_eq(opcode, sview(",", 0, -1)):
+                left_effect: i64 = left.assignment if left.assignment >= 0 else left.expression if typed_condition_expr_has_effect(ctx, left.expression) else -1
+                ordered_effects: i64 = typed_condition_join_assignments(ctx, left_effect, right.assignment) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return TypedCondition{expression: right.expression, assignment: ordered_effects, postfix: false}
+            assignment: i64 = typed_condition_join_assignments(ctx, left.assignment, right.assignment) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            expression: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: typed_surface_opcode(opcode), type_name: ast_qual_type(stripped), lhs: left.expression, rhs: right.expression, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return TypedCondition{expression: expression, assignment: assignment, postfix: false}
+        expression: i64 = typed_lower_expr(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return TypedCondition{expression: expression, assignment: -1, postfix: false}
+    def typed_lower_condition[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> TypedCondition can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return typed_lower_condition_value(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_find_label[@r](ctx: TypedContext[r]&, id: sview) -> JsonValueHandle[r]:
+        for index in 0..<ctx.labels.count |ctx, id|:
+            label: TypedLabel[r] = ctx.labels[index]
+            if sview_eq(label.id, id):
+                return label.node
+        return json_handle_null(ctx.root)
+    def typed_label_index[@r](ctx: TypedContext[r]&, id: sview) -> i64:
+        for index in 0..<ctx.labels.count |ctx, id|:
+            return index if sview_eq(ctx.labels[index].id, id)
+        return -1
+    def typed_switch_stmt_terminates[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+        return false if index < 0 or index >= ctx.stmts.count.i64()
+        statement: TypedStmt[r] = typed_stmt_at(ctx, index)
+        return true if statement.kind == TypedStmtKind.SwitchBreak or statement.kind == TypedStmtKind.Return or statement.kind == TypedStmtKind.Goto
+        if statement.kind == TypedStmtKind.Block:
+            return false if statement.children_count == 0
+            return typed_switch_stmt_terminates(ctx, ctx.stmt_children[(statement.children_start + statement.children_count - 1).usize()])
+        if statement.kind == TypedStmtKind.If:
+            return statement.aux2 >= 0 and typed_switch_stmt_terminates(ctx, statement.aux) and typed_switch_stmt_terminates(ctx, statement.aux2)
+        if statement.kind == TypedStmtKind.Label:
+            return typed_switch_stmt_terminates(ctx, statement.expr)
+        return false
+
+    def typed_parse_integer_literal(text: sview, result: mutable i64&) -> bool:
+        return false if text.len == 0
+        cursor: mutable i64 = 0
+        negative: mutable bool = false
+        if string_view_index(text, 0) == 45:
+            negative <- true
+            cursor <- 1
+        base: mutable i64 = 10
+        if cursor + 1 < text.len and string_view_index(text, cursor) == 48 and (string_view_index(text, cursor + 1) == 120 or string_view_index(text, cursor + 1) == 88):
+            base <- 16
+            cursor <- cursor + 2
+        elif cursor + 1 < text.len and string_view_index(text, cursor) == 48 and (string_view_index(text, cursor + 1) == 98 or string_view_index(text, cursor + 1) == 66):
+            base <- 2
+            cursor <- cursor + 2
+        elif cursor + 1 < text.len and string_view_index(text, cursor) == 48 and string_view_index(text, cursor + 1) >= 48 and string_view_index(text, cursor + 1) <= 57:
+            # C and C++ integer tokens beginning with zero use octal unless
+            # they have already selected a hexadecimal or binary prefix.
+            base <- 8
+        value: mutable u64 = 0
+        digits: mutable i64 = 0
+        while cursor < text.len:
+            byte: i64 = string_view_index(text, cursor)
+            digit: mutable i64 = byte - 48
+            if byte >= 97 and byte <= 102:
+                digit <- byte - 97 + 10
+            elif byte >= 65 and byte <= 70:
+                digit <- byte - 65 + 10
+            if digit < 0 or digit >= base:
+                break
+            # Retain the complete C uint64 bit-pattern domain. The typed IR
+            # stores scalar constants in i64, so the final same-width cast is
+            # intentionally a representation-preserving reinterpretation.
+            max_value: u64 = 18446744073709551615.u64()
+            unsigned_base: u64 = base.u64()
+            unsigned_digit: u64 = digit.u64()
+            max_digit: u64 = max_value % unsigned_base
+            return false if value > max_value / unsigned_base or (value == max_value / unsigned_base and unsigned_digit > max_digit)
+            value <- value * unsigned_base + unsigned_digit
+            digits <- digits + 1
+            cursor <- cursor + 1
+        return false if digits == 0
+        result[0] <- value.i64() if not negative
+        result[0] <- (0.u64() - value).i64() if negative
+        return true
+
+    def typed_i64_multiply_overflows(left: i64, right: i64) -> bool:
+        return false if left == 0 or right == 0
+        return right == -9223372036854775807 - 1 if left == -1
+        return left == -9223372036854775807 - 1 if right == -1
+        if left > 0:
+            return left > 9223372036854775807 / right if right > 0
+            return right < (-9223372036854775807 - 1) / left
+        if right > 0:
+            return left < (-9223372036854775807 - 1) / right
+        return left < 9223372036854775807 / right
+
+    def typed_integer_constant_signed_minimum(width: i64) -> i64:
+        return -9223372036854775807 - 1 if width == 64
+        return 0 - (1 << (width - 1))
+
+    def typed_integer_constant_in_type(abi: ClangTargetABI, value: i64, type_name: sview, result: mutable i64&) -> bool:
+        width: i64 = clang_target_type_integer_width(abi, type_name)
+        return false if width <= 0
+        if clang_target_type_is_unsigned(abi, type_name):
+            # A 64-bit unsigned constant is represented by its raw i64 bits;
+            # in particular, values >= 2^63 appear negative in the evaluator.
+            if width == 64:
+                result[0] <- value
+                return true
+            return false if width >= 63
+            modulus: i64 = 1 << width
+            normalized: mutable i64 = value % modulus
+            normalized <- normalized + modulus if normalized < 0
+            result[0] <- normalized
+            return true
+        if width == 64:
+            result[0] <- value
+            return true
+        return false if width >= 63
+        signed_limit: i64 = 1 << (width - 1)
+        return false if value < 0 - signed_limit or value >= signed_limit
+        result[0] <- value
+        return true
+    def typed_integer_constant_type[@r](ctx: TypedContext[r]&, index: i64) -> sview @r:
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        return typed_enum_storage_type(ctx, expression.type_name) if c_type_is_enum(expression.type_name) or (expression.kind == TypedExprKind.Name and expression.value == 2)
+        return expression.type_name
+
+    def typed_integer_constant_abi_source_type(abi_type: sview) -> sview:
+        return sview("int", 0, -1) if sview_eq(abi_type, sview("i32", 0, -1))
+        return sview("unsigned int", 0, -1) if sview_eq(abi_type, sview("u32", 0, -1))
+        return sview("long long int", 0, -1) if sview_eq(abi_type, sview("i64", 0, -1))
+        return sview("unsigned long long int", 0, -1) if sview_eq(abi_type, sview("u64", 0, -1))
+        return sview("", 0, 0)
+    def typed_eval_integer_constant[@r](ctx: TypedContext[r]&, index: i64, result: mutable i64&) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Sizeof:
+            record_layout_index: i64 = typed_record_layout_query_index(ctx, expression.type_name)
+            size_bytes: i64 = typed_clang_alignof_bytes(ctx, expression.type_name) if expression.value == 1 else typed_clang_sizeof_bytes(ctx, expression.type_name) if record_layout_index >= 0 else clang_target_type_size_bytes(ctx.target_abi, expression.type_name)
+            return false if size_bytes < 0
+            result[0] <- size_bytes
+            return true
+        if expression.kind == TypedExprKind.Integer:
+            return typed_parse_integer_literal(expression.text, result)
+        if expression.kind == TypedExprKind.Character:
+            result[0] <- expression.value
+            return true
+        if expression.kind == TypedExprKind.Name and expression.value == 2:
+            result[0] <- expression.third
+            return true
+        if expression.kind == TypedExprKind.Cast:
+            value: mutable i64 = 0
+            return false if not typed_eval_integer_constant(ctx, expression.lhs, value)
+            if c_type_is_integer(expression.type_name):
+                source_type: sview = typed_integer_constant_type(ctx, expression.lhs)
+                target_width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+                # Converting an out-of-range unsigned value to signed is
+                # implementation-defined in C. Keep that cast in the source
+                # so Clang's selected target semantics remain authoritative.
+                if target_width > 0 and target_width <= 64 and not clang_target_type_is_unsigned(ctx.target_abi, expression.type_name) and clang_target_type_is_unsigned(ctx.target_abi, source_type):
+                    if target_width == 64:
+                        return false if value < 0
+                    else:
+                        signed_max: i64 = (1 << (target_width - 1)) - 1
+                        return false if value.u64() > signed_max.u64()
+            return typed_integer_constant_in_type(ctx.target_abi, value, expression.type_name, result) if c_type_is_integer(expression.type_name)
+            return false
+        if expression.kind == TypedExprKind.Unary:
+            operand: mutable i64 = 0
+            return false if not typed_eval_integer_constant(ctx, expression.lhs, operand)
+            if sview_eq(expression.text, sview("not", 0, -1)):
+                result[0] <- 1 if operand == 0 else 0
+                return true
+            converted_operand: mutable i64 = 0
+            return false if not typed_integer_constant_in_type(ctx.target_abi, operand, expression.type_name, converted_operand)
+            operand <- converted_operand
+            if sview_eq(expression.text, sview("+", 0, -1)):
+                result[0] <- operand
+                return true
+            if sview_eq(expression.text, sview("-", 0, -1)):
+                width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+                if width == 64 and clang_target_type_is_unsigned(ctx.target_abi, expression.type_name):
+                    result[0] <- (0.u64() - operand.u64()).i64()
+                    return true
+                return false if width >= 63 and width != 64
+                return false if width == 64 and operand == -9223372036854775807 - 1
+                result[0] <- 0 - operand
+                return typed_integer_constant_in_type(ctx.target_abi, result[0], expression.type_name, result)
+            if sview_eq(expression.text, sview("~", 0, -1)):
+                result[0] <- ~operand
+                return typed_integer_constant_in_type(ctx.target_abi, result[0], expression.type_name, result)
+            return false
+        if expression.kind != TypedExprKind.Binary:
+            return false
+        left: mutable i64 = 0
+        return false if not typed_eval_integer_constant(ctx, expression.lhs, left)
+        is_shift: bool = sview_eq(expression.text, sview("<<", 0, -1)) or sview_eq(expression.text, sview(">>", 0, -1))
+        is_logical: bool = sview_eq(expression.text, sview("and", 0, -1)) or sview_eq(expression.text, sview("or", 0, -1))
+        if is_logical:
+            if sview_eq(expression.text, sview("and", 0, -1)) and left == 0:
+                result[0] <- 0
+                return true
+            if sview_eq(expression.text, sview("or", 0, -1)) and left != 0:
+                result[0] <- 1
+                return true
+            right: mutable i64 = 0
+            return false if not typed_eval_integer_constant(ctx, expression.rhs, right)
+            result[0] <- 1 if right != 0 else 0
+            return true
+        right: mutable i64 = 0
+        return false if not typed_eval_integer_constant(ctx, expression.rhs, right)
+        arithmetic_unsigned: mutable bool = false
+        if not is_shift and not is_logical:
+            left_type: sview = typed_integer_constant_type(ctx, expression.lhs)
+            right_type: sview = typed_integer_constant_type(ctx, expression.rhs)
+            if c_type_is_integer(left_type) and c_type_is_integer(right_type):
+                arithmetic_abi_type: sview = clang_target_usual_arithmetic_type(ctx.target_abi, left_type, right_type)
+                arithmetic_source_type: sview = typed_integer_constant_abi_source_type(arithmetic_abi_type)
+                return false if arithmetic_source_type.len == 0
+                arithmetic_unsigned <- clang_target_type_is_unsigned(ctx.target_abi, arithmetic_source_type)
+                converted_left: mutable i64 = 0
+                converted_right: mutable i64 = 0
+                return false if not typed_integer_constant_in_type(ctx.target_abi, left, arithmetic_source_type, converted_left) or not typed_integer_constant_in_type(ctx.target_abi, right, arithmetic_source_type, converted_right)
+                left <- converted_left
+                right <- converted_right
+        if sview_eq(expression.text, sview("+", 0, -1)):
+            width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+            if arithmetic_unsigned:
+                wrapped_sum: i64 = (left.u64() + right.u64()).i64()
+                return typed_integer_constant_in_type(ctx.target_abi, wrapped_sum, expression.type_name, result)
+            if width == 64:
+                return false if (right > 0 and left > 9223372036854775807 - right) or (right < 0 and left < (-9223372036854775807 - 1) - right)
+            return false if width >= 63 and width != 64
+            return typed_integer_constant_in_type(ctx.target_abi, left + right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("-", 0, -1)):
+            width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+            if arithmetic_unsigned:
+                wrapped_difference: i64 = (left.u64() - right.u64()).i64()
+                return typed_integer_constant_in_type(ctx.target_abi, wrapped_difference, expression.type_name, result)
+            if width == 64:
+                return false if (right < 0 and left > 9223372036854775807 + right) or (right > 0 and left < (-9223372036854775807 - 1) + right)
+            return false if width >= 63 and width != 64
+            return typed_integer_constant_in_type(ctx.target_abi, left - right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("*", 0, -1)):
+            width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+            if arithmetic_unsigned:
+                wrapped_product: i64 = (left.u64() * right.u64()).i64()
+                return typed_integer_constant_in_type(ctx.target_abi, wrapped_product, expression.type_name, result)
+            return false if typed_i64_multiply_overflows(left, right)
+            return false if width >= 63 and width != 64
+            return typed_integer_constant_in_type(ctx.target_abi, left * right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("/", 0, -1)):
+            return false if right == 0
+            width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+            if arithmetic_unsigned:
+                unsigned_quotient: i64 = (left.u64() / right.u64()).i64()
+                return typed_integer_constant_in_type(ctx.target_abi, unsigned_quotient, expression.type_name, result)
+            if width > 0:
+                return false if left == typed_integer_constant_signed_minimum(width) and right == -1
+            return false if width >= 63 and width != 64
+            return typed_integer_constant_in_type(ctx.target_abi, left / right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("%", 0, -1)):
+            return false if right == 0
+            width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+            if arithmetic_unsigned:
+                unsigned_remainder: i64 = (left.u64() % right.u64()).i64()
+                return typed_integer_constant_in_type(ctx.target_abi, unsigned_remainder, expression.type_name, result)
+            if width > 0:
+                return false if left == typed_integer_constant_signed_minimum(width) and right == -1
+            return false if width >= 63 and width != 64
+            return typed_integer_constant_in_type(ctx.target_abi, left % right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("<<", 0, -1)):
+            width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+            return false if width <= 0 or right < 0 or right >= width
+            converted_left: mutable i64 = 0
+            return false if not typed_integer_constant_in_type(ctx.target_abi, left, expression.type_name, converted_left)
+            left <- converted_left
+            if clang_target_type_is_unsigned(ctx.target_abi, expression.type_name):
+                wrapped_shift: i64 = (left.u64() << right.u64()).i64()
+                return typed_integer_constant_in_type(ctx.target_abi, wrapped_shift, expression.type_name, result)
+            else:
+                return false if left < 0
+                signed_max: i64 = 9223372036854775807 if width >= 63 else (1 << (width - 1)) - 1
+                return false if left > signed_max >> right
+            result[0] <- left << right
+        elif sview_eq(expression.text, sview(">>", 0, -1)):
+            width: i64 = clang_target_type_integer_width(ctx.target_abi, expression.type_name)
+            return false if width <= 0 or right < 0 or right >= width
+            converted_left: mutable i64 = 0
+            return false if not typed_integer_constant_in_type(ctx.target_abi, left, expression.type_name, converted_left)
+            left <- converted_left
+            # Right shift of a negative signed C value is implementation-
+            # defined; retain the expression instead of assuming Elisa's rule.
+            return false if left < 0 and not clang_target_type_is_unsigned(ctx.target_abi, expression.type_name)
+            if clang_target_type_is_unsigned(ctx.target_abi, expression.type_name):
+                shifted_unsigned: i64 = (left.u64() >> right.u64()).i64()
+                return typed_integer_constant_in_type(ctx.target_abi, shifted_unsigned, expression.type_name, result)
+            result[0] <- left >> right
+        elif sview_eq(expression.text, sview("&", 0, -1)):
+            return typed_integer_constant_in_type(ctx.target_abi, left & right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("|", 0, -1)):
+            return typed_integer_constant_in_type(ctx.target_abi, left | right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("^", 0, -1)):
+            return typed_integer_constant_in_type(ctx.target_abi, left ^ right, expression.type_name, result)
+        elif sview_eq(expression.text, sview("==", 0, -1)):
+            result[0] <- 1 if left == right else 0
+        elif sview_eq(expression.text, sview("!=", 0, -1)):
+            result[0] <- 1 if left != right else 0
+        elif sview_eq(expression.text, sview("<", 0, -1)):
+            if arithmetic_unsigned:
+                result[0] <- 1 if left.u64() < right.u64() else 0
+            else:
+                result[0] <- 1 if left < right else 0
+        elif sview_eq(expression.text, sview(">", 0, -1)):
+            if arithmetic_unsigned:
+                result[0] <- 1 if left.u64() > right.u64() else 0
+            else:
+                result[0] <- 1 if left > right else 0
+        elif sview_eq(expression.text, sview("<=", 0, -1)):
+            if arithmetic_unsigned:
+                result[0] <- 1 if left.u64() <= right.u64() else 0
+            else:
+                result[0] <- 1 if left <= right else 0
+        elif sview_eq(expression.text, sview(">=", 0, -1)):
+            if arithmetic_unsigned:
+                result[0] <- 1 if left.u64() >= right.u64() else 0
+            else:
+                result[0] <- 1 if left >= right else 0
+        elif sview_eq(expression.text, sview("and", 0, -1)):
+            result[0] <- 1 if left != 0 and right != 0 else 0
+        elif sview_eq(expression.text, sview("or", 0, -1)):
+            result[0] <- 1 if left != 0 or right != 0 else 0
+        else:
+            return false
+        return true
+    def typed_flush_switch_run[@r](ctx: mutable TypedContext[r]&, current_labels: mutable darray[JsonValueHandle[r]]&, current_body_nodes: mutable darray[JsonValueHandle[r]]&, current_is_default: bool, run_label_starts: mutable darray[i64]&, run_label_counts: mutable darray[i64]&, run_bodies: mutable darray[i64]&, run_defaults: mutable darray[bool]&, lowered_labels: mutable darray[i64]&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if current_labels.count == 0 and current_body_nodes.count == 0 and not current_is_default:
+            return true
+        ctx.switch_depth <- ctx.switch_depth + 1
+        ctx.break_scopes.push(2)
+        lowered_body_nodes: mutable darray[i64] = []
+        for body_index in 0..<current_body_nodes.count |ctx, current_body_nodes, lowered_body_nodes|:
+            lowered: i64 = typed_lower_stmt(ctx, current_body_nodes[body_index]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if lowered < 0:
+                ctx.switch_depth <- ctx.switch_depth - 1
+                _ = ctx.break_scopes.pop()
+                return false
+            lowered_body_nodes.push(lowered)
+        ctx.switch_depth <- ctx.switch_depth - 1
+        _ = ctx.break_scopes.pop()
+        lowered_body: i64 = typed_make_block(ctx, lowered_body_nodes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        run_label_starts.push(lowered_labels.count.i64())
+        run_label_counts.push(current_labels.count.i64())
+        run_bodies.push(lowered_body)
+        run_defaults.push(current_is_default)
+        for label_index in 0..<current_labels.count |ctx, current_labels, lowered_labels|:
+            label_value: i64 = typed_lower_expr(ctx, current_labels[label_index]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if label_value < 0:
+                return false
+            lowered_labels.push(label_value)
+        current_labels <- []
+        current_body_nodes <- []
+        return true
+    def typed_lower_switch[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        subject: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        body: JsonValueHandle[r] = ast_child(node, 1)
+        if subject < 0:
+            return -1
+        run_label_starts: mutable darray[i64] = []
+        run_label_counts: mutable darray[i64] = []
+        run_bodies: mutable darray[i64] = []
+        run_defaults: mutable darray[bool] = []
+        lowered_labels: mutable darray[i64] = []
+        current_labels: mutable darray[JsonValueHandle[r]] = []
+        current_body_nodes: mutable darray[JsonValueHandle[r]] = []
+        current_is_default: mutable bool = false
+        default_body: mutable i64 = -1
+
+        # Elisa has no C-style fall-through switch. Preserve the common C shape by
+        # grouping adjacent/nested labels and lowering each run to an if arm.
+        count: i64 = ast_child_count(body)
+        if count >= 0:
+            index: mutable i64 = 0
+            while index < count |ctx, body, current_labels, current_body_nodes, current_is_default, default_body, subject, index|:
+                child: JsonValueHandle[r] = ast_child(body, index)
+                kind: sview = ast_kind(child)
+                if sview_eq(kind, sview("CaseStmt", 0, -1)):
+                    if current_body_nodes.count > 0 or current_is_default:
+                        ok: bool = typed_flush_switch_run(ctx, current_labels, current_body_nodes, current_is_default, run_label_starts, run_label_counts, run_bodies, run_defaults, lowered_labels) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        if not ok:
+                            return -1
+                        current_is_default <- false
+                    label_cursor: mutable JsonValueHandle[r] = child
+                    while sview_eq(ast_kind(label_cursor), sview("CaseStmt", 0, -1)) |label_cursor, current_labels|:
+                        current_labels.push(ast_child(label_cursor, 0))
+                        label_cursor <- ast_child(label_cursor, 1)
+                    if not ast_is_empty(label_cursor):
+                        current_body_nodes.push(label_cursor)
+                elif sview_eq(kind, sview("DefaultStmt", 0, -1)):
+                    if current_body_nodes.count > 0 or current_labels.count > 0 or current_is_default:
+                        ok: bool = typed_flush_switch_run(ctx, current_labels, current_body_nodes, current_is_default, run_label_starts, run_label_counts, run_bodies, run_defaults, lowered_labels) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        if not ok:
+                            return -1
+                    current_labels <- []
+                    current_is_default <- true
+                    if ast_child_count(child) > 0:
+                        current_body_nodes.push(ast_child(child, 0))
+                else:
+                    if current_labels.count > 0 or current_is_default:
+                        current_body_nodes.push(child)
+                index <- index + 1
+            ok: bool = typed_flush_switch_run(ctx, current_labels, current_body_nodes, current_is_default, run_label_starts, run_label_counts, run_bodies, run_defaults, lowered_labels) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if not ok:
+                return -1
+        switch_start: i64 = ctx.switch_cases.count.i64()
+        run_index: mutable i64 = 0
+        while run_index < run_bodies.count.i64() |ctx, run_bodies, run_index, run_label_starts, run_label_counts, lowered_labels, run_defaults, switch_start|:
+            suffix_children: mutable darray[i64] = []
+            suffix_index: mutable i64 = run_index
+            while suffix_index < run_bodies.count.i64() |ctx, run_bodies, suffix_children, suffix_index|:
+                suffix_children.push(run_bodies[suffix_index.usize()])
+                break if typed_switch_stmt_terminates(ctx, run_bodies[suffix_index.usize()])
+                suffix_index <- suffix_index + 1
+            suffix_body: i64 = typed_make_block(ctx, suffix_children) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            label_offset: i64 = run_label_starts[run_index.usize()]
+            label_count: i64 = run_label_counts[run_index.usize()]
+            for label_index in 0..<label_count |ctx, lowered_labels, label_offset, suffix_body, switch_start|:
+                value_index: i64 = lowered_labels[(label_offset + label_index).usize()]
+                constant_value: mutable i64 = 0
+                is_constant: bool = typed_eval_integer_constant(ctx, value_index, constant_value)
+                ctx.switch_cases.push(TypedSwitchCase{value: value_index, body: suffix_body, is_default: false, is_constant: is_constant, constant_value: constant_value})
+            if run_defaults[run_index.usize()]:
+                ctx.switch_cases.push(TypedSwitchCase{value: -1, body: suffix_body, is_default: true, is_constant: false, constant_value: 0})
+            run_index <- run_index + 1
+        return typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Switch, expr: subject, aux: -1, aux2: -1, children_start: switch_start, children_count: ctx.switch_cases.count.i64() - switch_start, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_collect_labels[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if sview_eq(ast_kind(node), sview("LabelStmt", 0, -1)):
+            ctx.labels.push(TypedLabel[r]{id: ast_string(ast_field(node, sview("declId", 0, -1))), node: node})
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                typed_collect_labels(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

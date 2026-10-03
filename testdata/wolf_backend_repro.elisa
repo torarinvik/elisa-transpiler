@@ -1,0 +1,15 @@
+struct CP_itemtype:
+    active: mutable i16
+    string: mutable array[u8, 36]
+    routine: mutable (fn(i32) -> i32)?
+
+global mutable endStrings: array[array[u8, 80], 9] = zeroed
+global mutable MainMenu: array[CP_itemtype, 9] = zeroed
+
+def CP_NewGame(_: i32) -> i32:
+    return 0
+
+def init() -> void:
+    trusted Unsafe.StaleRef:
+        endStrings <- ["Dost thou wish to\nleave with such hasty\nabandon?", "Chickening out...\nalready?", "Press N for more carnage.\nPress Y to be a weenie.", "So, you think you can\nquit this easily, huh?", "Press N to save the world.\nPress Y to abandon it in\nits hour of need.", "Press N if you are brave.\nPress Y to cower in shame.", "Heroes, press N.\nWimps, press Y.", "You are at an intersection.\nA sign says, 'Press Y to quit.'\n>", "For guns and glory, press N.\nFor work and worry, press Y."]
+        MainMenu <- [CP_itemtype{active: 1, string: [78, 101, 119, 32, 71, 97, 109, 101], routine: CP_NewGame}, CP_itemtype{active: 0, string: [81, 117, 105, 116], routine: null}]

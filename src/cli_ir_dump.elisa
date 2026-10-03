@@ -1,0 +1,6 @@
+extend CTranslator:
+    def cli_emit_typed_ir_dump(dump: darray[u8]) -> void can[Console, Unsafe.PointerCast]:
+        return if dump.count == 0.usize()
+        view: sview = bytes_view(dump)
+        raw: void& = view.data.cast[void&] can Unsafe.PointerCast
+        _ = write(2, raw, view.len.usize()) can Console

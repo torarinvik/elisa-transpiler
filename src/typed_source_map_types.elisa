@@ -1,0 +1,37 @@
+extend CTranslator:
+    struct TypedSourceRange[@r]:
+        file: sview @r
+        included_from: sview @r
+        start_offset: i64
+        end_offset: i64
+
+    struct TypedOwnedSourceRange[@r]:
+        file: sview @r
+        included_from: sview @r
+        start_offset: i64
+        end_offset: i64
+
+    struct TypedSourceMapText[@r]:
+        value: sview @r
+
+    struct TypedIRSourceOrigin[@r]:
+        node: JsonValueHandle[r]
+        source: TypedSourceRange[r]
+        spelling: TypedSourceRange[r]
+        expansion: TypedSourceRange[r]
+        synthesized_reason: sview @r
+
+    struct TypedGeneratedSourceSpan[@r]:
+        generated_start: mutable i64
+        generated_end: mutable i64
+        source: TypedOwnedSourceRange[r]
+        spelling: TypedOwnedSourceRange[r]
+        expansion: TypedOwnedSourceRange[r]
+        synthesized_reason: sview @r
+
+    def typed_copy_view_to_region[@r](value: sview) -> sview @r can[Memory.Allocate, Abort.Panic]:
+        return sview("", 0, 0) if value.len == 0
+        copied: mutable darray[u8] @r = []
+        append_view(&copied, value)
+        copied_cstr: cstr = copied.as_cstr()
+        return sview(copied_cstr, 0, -1)

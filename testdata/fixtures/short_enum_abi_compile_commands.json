@@ -1,0 +1,15 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/short_enum_abi.c",
+    "arguments": [
+      "clang",
+      "-fshort-enums",
+      "-std=c11",
+      "-c",
+      "testdata/fixtures/short_enum_abi.c",
+      "-o",
+      "short_enum_abi.o"
+    ]
+  }
+]

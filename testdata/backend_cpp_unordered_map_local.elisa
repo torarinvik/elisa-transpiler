@@ -1,0 +1,10 @@
+include "../cpp_lib/unordered_map.elisa"
+
+def main() -> i32:
+    values: mutable cpp::unordered_map[i32, i32] = zeroed
+    if values.contains(7):
+        return 1
+    values[7].value <- 42
+    if not values.contains(7):
+        return 2
+    return 0 if values[7].value == 42 else 3

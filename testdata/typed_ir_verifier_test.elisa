@@ -1,0 +1,886 @@
+include "../../elisa-transpiler-worktrees/transpiler/elisacore_std/elisacore_runtime.elisa"
+include "../../elisa-transpiler-worktrees/transpiler/elisacore_std/elisacore_json.elisa"
+
+module CTranslator:
+    struct TypedIRVerifierTestModule:
+        _unused: u8
+
+include "../src/typed_source_map_types.elisa"
+include "../src/typed_ir.elisa"
+include "../src/clang_target_abi.elisa"
+include "../src/verify_ir.elisa"
+include "../src/typed_ir_dump.elisa"
+
+extend CTranslator:
+    def typed_dump_test_contains(bytes: darray[u8], needle: sview) -> bool:
+        return true if needle.len == 0
+        return false if bytes.count.i64() < needle.len
+        for start in 0..<(bytes.count.i64() - needle.len + 1) |bytes, needle|:
+            same: mutable bool = true
+            for offset in 0..<needle.len |bytes, needle, start, same|:
+                same <- false if bytes[(start + offset).usize()] != string_view_index(needle, offset).u8()
+            return true if same
+        return false
+
+    def typed_dump_test_equal(left: darray[u8], right: darray[u8]) -> bool:
+        return false if left.count != right.count
+        for index in 0..<left.count.i64() |left, right|:
+            return false if left[index.usize()] != right[index.usize()]
+        return true
+
+    def typed_abi_test_append(output: mutable darray[u8]&, text: sview) -> void can[Abort.Panic, Memory.Allocate]:
+        for index in 0..<text.len |output, text|:
+            output.push(string_view_index(text, index).u8())
+
+    def test_context[@r](root: JsonValueHandle[r]) -> TypedContext[r]:
+        return test_context_with_language(root, false)
+
+    def test_context_with_language[@r](root: JsonValueHandle[r], source_is_cxx: bool) -> TypedContext[r]:
+        return TypedContext{
+            exprs: [], expr_source_origins: [], expr_children: [], effect_expr_seen: [], effect_expr_pending: [], effect_expr_generation: 0,
+            stmts: [], stmt_source_origins: [], generated_source_spans: [], stmt_children: [], params: [], current_name_aliases: [],
+            type_aliases: [], current_declared_names: [], current_declared_scope_starts: [], current_nonnull_names: [], current_nonnull_exprs: [],
+            extern_params: [], globals: [], functions: [], user_function_names: [], user_function_signatures: [],
+            externs: [], extern_globals: [], fields: [], records: [], record_layouts: [], record_layout_field_offsets: [],
+            specialized_types: [], packed_record_names: [], layout_unsupported_record_names: [], enums: [],
+            enum_consts: [], labels: [], switch_cases: [], decl_infos: [], declaration_index: [], declaration_index_count: 0,
+            break_scopes: [], switch_depth: 0,
+            current_for_increment: -1, current_return_type: sview("", 0, 0), current_function_name: sview("", 0, 0), current_has_goto: false,
+            current_emit_has_goto: false, current_structured_break_label: -1,
+            current_emit_goto_name: sview("", 0, 0), current_switch_done_name: sview("", 0, 0),
+            current_switch_done_index: -1, current_function_body: -1, current_trusted_depth: 0,
+            needs_cpp_unordered_map: false, source_mapping_enabled: false, project_mode: false, initializer_name: sview("", 0, 0),
+            mode: TypedTranslationMode.Idiomatic, target_abi: clang_target_abi_unknown(), source_language_is_cxx: source_is_cxx, source: "typed_ir_verifier_test",
+            source_working_directory: sview("", 0, 0), canonical_source: sview("", 0, 0),
+            root: root,
+            diagnostics: []
+        }
+
+    def typed_ir_test_switch_context[@r](root: JsonValueHandle[r], mode: i64) -> TypedContext[r] can[Memory.Allocate, Abort.Panic]:
+        context: mutable TypedContext = test_context(root)
+        context.exprs.push(TypedExpr{
+            kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("i32", 0, -1),
+            lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0
+        }) can Memory.Allocate, Abort.Panic
+        context.stmts.push(TypedStmt{
+            kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+            children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+        }) can Memory.Allocate, Abort.Panic
+        case_count: i64 = 2 if mode == 0 or mode == 1 else 1
+        context.stmts.push(TypedStmt{
+            kind: TypedStmtKind.Switch, expr: 0, aux: -1, aux2: -1, children_start: 0,
+            children_count: case_count, name: sview("", 0, 0), type_name: sview("", 0, 0)
+        }) can Memory.Allocate, Abort.Panic
+        if mode == 0:
+            context.switch_cases.push(TypedSwitchCase{value: 0, body: 0, is_default: false, is_constant: true, constant_value: 0}) can Memory.Allocate, Abort.Panic
+            context.switch_cases.push(TypedSwitchCase{value: -1, body: 0, is_default: true, is_constant: false, constant_value: 0}) can Memory.Allocate, Abort.Panic
+        elif mode == 1:
+            context.switch_cases.push(TypedSwitchCase{value: -1, body: 0, is_default: true, is_constant: false, constant_value: 0}) can Memory.Allocate, Abort.Panic
+            context.switch_cases.push(TypedSwitchCase{value: -1, body: 0, is_default: true, is_constant: false, constant_value: 0}) can Memory.Allocate, Abort.Panic
+        elif mode == 2:
+            context.switch_cases.push(TypedSwitchCase{value: 0, body: 0, is_default: true, is_constant: false, constant_value: 0}) can Memory.Allocate, Abort.Panic
+        else:
+            context.switch_cases.push(TypedSwitchCase{value: -1, body: 0, is_default: false, is_constant: false, constant_value: 0}) can Memory.Allocate, Abort.Panic
+        context.functions.push(TypedFunction{
+            name: sview("switch_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+            params_start: 0, params_count: 0, body: 1, variadic: false, has_global_effect: false,
+            has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+        }) can Memory.Allocate, Abort.Panic
+        return context
+
+    def typed_ir_test_call_context[@r](root: JsonValueHandle[r], call_mode: i64, callee: i64, signature_count: i64, external_count: i64) -> TypedContext[r] can[Memory.Allocate, Abort.Panic]:
+        return typed_ir_test_call_context_with_language(root, call_mode, callee, signature_count, external_count, false) can Memory.Allocate, Abort.Panic
+
+    def typed_ir_test_call_context_with_language[@r](root: JsonValueHandle[r], call_mode: i64, callee: i64, signature_count: i64, external_count: i64, source_is_cxx: bool) -> TypedContext[r] can[Memory.Allocate, Abort.Panic]:
+        context: mutable TypedContext = test_context_with_language(root, source_is_cxx)
+        if callee >= 0:
+            context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Name, text: sview("callback", 0, -1), type_name: sview("i32 (*)(i32)", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0
+            }) can Memory.Allocate, Abort.Panic
+        call_index: i64 = context.exprs.count.i64()
+        context.exprs.push(TypedExpr{
+            kind: TypedExprKind.Call, text: sview("target", 0, -1), type_name: sview("i32", 0, -1),
+            lhs: callee, rhs: -1, third: -1, args_start: -1, args_count: 0, value: call_mode
+        }) can Memory.Allocate, Abort.Panic
+        context.stmts.push(TypedStmt{
+            kind: TypedStmtKind.Expression, expr: call_index, aux: -1, aux2: -1, children_start: -1,
+            children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+        }) can Memory.Allocate, Abort.Panic
+        context.functions.push(TypedFunction{
+            name: sview("call_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+            params_start: 0, params_count: 0, body: 0, variadic: false, has_global_effect: false,
+            has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+        }) can Memory.Allocate, Abort.Panic
+        for signature_index in 0..<signature_count |context|:
+            target_id: sview = sview("target-id-1", 0, -1) if signature_index == 1 else sview("target-id-0", 0, -1)
+            target_body: i64 = context.stmts.count.i64()
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            target_function_index: i64 = context.functions.count.i64()
+            context.functions.push(TypedFunction{
+                name: sview("target", 0, -1), declaration_id: target_id, internal_linkage: false, link_name: sview("", 0, 0),
+                return_type: sview("i32 (void)", 0, -1), params_start: 0, params_count: 0, body: target_body,
+                variadic: false, has_global_effect: false, has_unsafe_effect: false, has_goto: false,
+                label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.user_function_signatures.push(TypedUserFunctionSignature{
+                name: sview("target", 0, -1), type_name: sview("i32 (void)", 0, -1), result_type: sview("i32", 0, -1), declaration_id: target_id,
+                function_index: target_function_index, params_count: 0, variadic: false
+            }) can Memory.Allocate, Abort.Panic
+        for external_index in 0..<external_count |context|:
+            context.externs.push(TypedExtern{
+                name: sview("target", 0, -1), link_name: sview("target", 0, -1), declaration_id: sview("", 0, 0), return_type: sview("i32 (void)", 0, -1), result_type: sview("i32", 0, -1),
+                params_start: 0, params_count: 0, variadic: false
+            }) can Memory.Allocate, Abort.Panic
+        return context
+
+    def typed_ir_test_configure_user_arity[@r](context: mutable TypedContext[r]&, parameter_count: i64, variadic: bool) -> void can[Memory.Allocate, Abort.Panic]:
+        signature: TypedUserFunctionSignature = context.user_function_signatures[0]
+        function_index: i64 = signature.function_index
+        function: TypedFunction = context.functions[function_index.usize()]
+        updated_function: TypedFunction = TypedFunction{
+            name: function.name, declaration_id: function.declaration_id, internal_linkage: function.internal_linkage,
+            link_name: function.link_name, return_type: function.return_type, params_start: context.params.count.i64(),
+            params_count: parameter_count, body: function.body, variadic: variadic,
+            has_global_effect: function.has_global_effect, has_unsafe_effect: function.has_unsafe_effect,
+            has_goto: function.has_goto, label_count: function.label_count, comment: function.comment
+        }
+        for parameter_index in 0..<parameter_count |context|:
+            context.params.push(TypedParam{name: sview("p", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false}) can Memory.Allocate, Abort.Panic
+        context.functions[function_index.usize()] <- updated_function
+        context.user_function_signatures[0] <- TypedUserFunctionSignature{
+            name: signature.name, type_name: signature.type_name, result_type: signature.result_type, declaration_id: signature.declaration_id,
+            function_index: signature.function_index, params_count: parameter_count, variadic: variadic
+        }
+
+    def typed_ir_test_set_call_argument_count[@r](context: mutable TypedContext[r]&, argument_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        call_index: mutable i64 = -1
+        for index in 0..<context.exprs.count.i64() |context, call_index|:
+            if context.exprs[index.usize()].kind == TypedExprKind.Call:
+                call_index <- index
+                break
+        return if call_index < 0
+        args_start: i64 = context.expr_children.count.i64()
+        for _index in 0..<argument_count |context|:
+            argument_index: i64 = context.exprs.count.i64()
+            context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1
+            }) can Memory.Allocate, Abort.Panic
+            context.expr_children.push(argument_index) can Memory.Allocate, Abort.Panic
+        context.exprs[call_index.usize()].args_start <- args_start if argument_count > 0
+        context.exprs[call_index.usize()].args_start <- -1 if argument_count == 0
+        context.exprs[call_index.usize()].args_count <- argument_count
+
+    def typed_ir_test_set_indirect_signature[@r](context: mutable TypedContext[r]&, function_type: sview, argument_count: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        for index in 0..<context.exprs.count.i64() |context, function_type|:
+            if context.exprs[index.usize()].kind == TypedExprKind.Name:
+                context.exprs[index.usize()].type_name <- function_type
+                break
+        typed_ir_test_set_call_argument_count(context, argument_count) can Memory.Allocate, Abort.Panic
+
+    def typed_ir_test_control_context[@r](root: JsonValueHandle[r], mode: i64) -> TypedContext[r] can[Memory.Allocate, Abort.Panic]:
+        context: mutable TypedContext = test_context(root)
+        if mode == 0 or mode == 5:
+            context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Expression, expr: 0, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Continue, expr: -1, aux: 0 if mode == 0 else -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmt_children.push(1) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: 0,
+                children_count: 1, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.For, expr: 0, aux: 2, aux2: 0, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.functions.push(TypedFunction{
+                name: sview("for_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 3, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+        elif mode == 6:
+            context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Expression, expr: 0, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Continue, expr: -1, aux: 0, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.SwitchBreak, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmt_children.push(1) can Memory.Allocate, Abort.Panic
+            context.stmt_children.push(2) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: 0,
+                children_count: 2, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Switch, expr: 0, aux: -1, aux2: -1, children_start: 0,
+                children_count: 1, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.switch_cases.push(TypedSwitchCase{value: -1, body: 3, is_default: true, is_constant: false, constant_value: 0}) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.For, expr: 0, aux: 4, aux2: 0, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.functions.push(TypedFunction{
+                name: sview("for_switch_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 5, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+        elif mode == 7:
+            context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Expression, expr: 0, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Continue, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.While, expr: 0, aux: 1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.For, expr: 0, aux: 2, aux2: 0, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.functions.push(TypedFunction{
+                name: sview("for_while_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 3, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+        elif mode == 8:
+            context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.For, expr: 0, aux: 0, aux2: 0, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.functions.push(TypedFunction{
+                name: sview("invalid_for_increment", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 1, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, label_count: 0, has_goto: false, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+        elif mode == 4:
+            context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 1
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Break, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Switch, expr: 0, aux: -1, aux2: -1, children_start: 0,
+                children_count: 1, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.switch_cases.push(TypedSwitchCase{value: -1, body: 0, is_default: true, is_constant: false, constant_value: 0}) can Memory.Allocate, Abort.Panic
+            context.functions.push(TypedFunction{
+                name: sview("switch_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 1, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+        else:
+            control_kind: TypedStmtKind = TypedStmtKind.Break if mode == 1 else TypedStmtKind.Continue if mode == 2 else TypedStmtKind.SwitchBreak
+            context.stmts.push(TypedStmt{
+                kind: control_kind, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            context.functions.push(TypedFunction{
+                name: sview("control_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 0, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+        return context
+
+    def run_verifier_checks() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        region verifier_arena(65536):
+            parsed_null: JsonParseResult = json_parse_checked(&verifier_arena, sview("null", 0, -1))
+            root: JsonValueHandle = json_handle_from_result(parsed_null)
+            lp64_macros: mutable darray[u8] = []
+            typed_abi_test_append(&lp64_macros, sview("#define __CHAR_BIT__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 8\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
+            lp64_abi: ClangTargetABI = clang_target_abi_from_macros(lp64_macros)
+            return 25 if not lp64_abi.valid
+            return 26 if lp64_abi.long_bits != 64 or lp64_abi.pointer_bits != 64 or lp64_abi.size_type_bits != 64
+            return 36 if lp64_abi.char_unsigned
+
+            llp64_macros: mutable darray[u8] = []
+            typed_abi_test_append(&llp64_macros, sview("#define __CHAR_BIT__ 8\n#define __CHAR_UNSIGNED__ 1\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 4\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
+            llp64_abi: ClangTargetABI = clang_target_abi_from_macros(llp64_macros)
+            return 27 if not llp64_abi.valid
+            return 28 if llp64_abi.long_bits != 32 or llp64_abi.pointer_bits != 64 or llp64_abi.size_type_bits != 64
+            return 37 if not llp64_abi.char_unsigned
+            return 29 if clang_target_abi_from_macros([]).valid
+
+            pointer32_macros: mutable darray[u8] = []
+            typed_abi_test_append(&pointer32_macros, sview("#define __CHAR_BIT__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 4\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_POINTER__ 4\n#define __SIZE_TYPE__ unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
+            return 38 if clang_target_abi_from_macros(pointer32_macros).valid
+
+            valid_context: mutable TypedContext = test_context(root)
+            issue: mutable TypedIRIssue = typed_verify_ir(valid_context) can Memory.Allocate, Abort.Panic
+            return 1 if issue.kind.len != 0
+            valid_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Name, text: sview("node", 0, -1), type_name: sview("WideMode", 0, -1),
+                lhs: -1, rhs: -1, third: 4294967295, args_start: -1, args_count: 0, value: 2
+            }) can Memory.Allocate, Abort.Panic
+            valid_context.globals.push(TypedGlobal{
+                name: sview("root", 0, -1), type_name: sview("WideMode", 0, -1), comment: sview("", 0, 0),
+                declaration_id: sview("", 0, 0), initializer: 0, is_mutable: false, initializer_is_direct: true, identity_hash: 0, project_private: false
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_context) can Memory.Allocate, Abort.Panic
+            return 4 if issue.kind.len != 0
+            valid_context.user_function_signatures.push(TypedUserFunctionSignature{
+                name: sview("dumped", 0, -1), type_name: sview("i32 (i32, ...)", 0, -1), result_type: sview("i32", 0, -1), declaration_id: sview("dump-id", 0, -1),
+                function_index: -1, params_count: 2, variadic: true
+            }) can Memory.Allocate, Abort.Panic
+            valid_context.externs.push(TypedExtern{
+                name: sview("external_dump", 0, -1), link_name: sview("external_dump", 0, -1), declaration_id: sview("external-dump-id", 0, -1),
+                return_type: sview("f64 ()", 0, -1), result_type: sview("f64", 0, -1), params_start: 0, params_count: 0, variadic: false
+            }) can Memory.Allocate, Abort.Panic
+            first_dump: darray[u8] = typed_dump_ir(valid_context) can Memory.Allocate, Abort.Panic
+            second_dump: darray[u8] = typed_dump_ir(valid_context) can Memory.Allocate, Abort.Panic
+            return 5 if not typed_dump_test_equal(first_dump, second_dump)
+            return 6 if not typed_dump_test_contains(first_dump, sview("typed-ir-v13\n", 0, -1))
+            return 7 if not typed_dump_test_contains(first_dump, sview("text_hex=6e6f6465", 0, -1))
+            return 72 if not typed_dump_test_contains(first_dump, sview("params_count=2 variadic=true\n", 0, -1))
+            return 89 if not typed_dump_test_contains(first_dump, sview("result_type_hex=693332", 0, -1))
+            return 93 if not typed_dump_test_contains(first_dump, sview("result_type_hex=663634", 0, -1))
+
+            private_global_context: mutable TypedContext = test_context(root)
+            private_global_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Name, text: sview("hidden", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: 0, args_start: -1, args_count: 0, value: 3
+            }) can Memory.Allocate, Abort.Panic
+            private_global_context.globals.push(TypedGlobal{
+                name: sview("hidden", 0, -1), type_name: sview("i32", 0, -1), comment: sview("", 0, 0),
+                declaration_id: sview("clang-decl-1", 0, -1), initializer: -1, is_mutable: false,
+                initializer_is_direct: true, identity_hash: 17, project_private: true
+            }) can Memory.Allocate, Abort.Panic
+            private_global_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Expression, expr: 0, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            private_global_context.functions.push(TypedFunction{
+                name: sview("read_private", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0),
+                return_type: sview("void", 0, -1), params_start: 0, params_count: 0, body: 0,
+                variadic: false, has_global_effect: false, has_unsafe_effect: false, has_goto: false,
+                label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(private_global_context) can Memory.Allocate, Abort.Panic
+            return 52 if issue.kind.len != 0
+            private_global_context.exprs[0] <- TypedExpr{
+                kind: TypedExprKind.Name, text: sview("other", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: 0, args_start: -1, args_count: 0, value: 3
+            }
+            issue <- typed_verify_ir(private_global_context) can Memory.Allocate, Abort.Panic
+            return 53 if not sview_eq(issue.kind, sview("private-global-name", 0, -1))
+            private_global_context.exprs[0] <- TypedExpr{
+                kind: TypedExprKind.Name, text: sview("hidden", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: 0, args_start: -1, args_count: 0, value: 3
+            }
+            private_global_context.globals[0] <- TypedGlobal{
+                name: sview("hidden", 0, -1), type_name: sview("i32", 0, -1), comment: sview("", 0, 0),
+                declaration_id: sview("", 0, 0), initializer: -1, is_mutable: false,
+                initializer_is_direct: true, identity_hash: 17, project_private: true
+            }
+            issue <- typed_verify_ir(private_global_context) can Memory.Allocate, Abort.Panic
+            return 54 if not sview_eq(issue.kind, sview("private-global-declaration-identity", 0, -1))
+
+            valid_direct_call: mutable TypedContext = typed_ir_test_call_context(root, 0, -1, 0, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_direct_call) can Memory.Allocate, Abort.Panic
+            return 55 if issue.kind.len != 0
+            valid_indirect_call: mutable TypedContext = typed_ir_test_call_context(root, 1, 0, 0, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_call_argument_count(&valid_indirect_call, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_indirect_call) can Memory.Allocate, Abort.Panic
+            return 56 if issue.kind.len != 0
+            missing_indirect_callee: mutable TypedContext = typed_ir_test_call_context(root, 1, -1, 0, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(missing_indirect_callee) can Memory.Allocate, Abort.Panic
+            return 57 if not sview_eq(issue.kind, sview("call-callee-mode", 0, -1))
+            mismatched_direct_callee: mutable TypedContext = typed_ir_test_call_context(root, 0, 0, 0, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(mismatched_direct_callee) can Memory.Allocate, Abort.Panic
+            return 58 if not sview_eq(issue.kind, sview("call-callee-mode", 0, -1))
+            valid_user_signature: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE + 2, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_user_signature) can Memory.Allocate, Abort.Panic
+            return 59 if issue.kind.len != 0
+            same_spelling_overloads: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE + 4, -1, 2, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(same_spelling_overloads) can Memory.Allocate, Abort.Panic
+            return 75 if issue.kind.len != 0
+            return 76 if typed_call_selected_function_index(same_spelling_overloads, TYPED_CALL_SIGNATURE_BASE + 4) != 2
+            mismatched_signature_target: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            mismatched_function: TypedFunction = mismatched_signature_target.functions[1]
+            mismatched_signature_target.functions[1] <- TypedFunction{
+                name: mismatched_function.name, declaration_id: sview("different-declaration", 0, -1),
+                internal_linkage: mismatched_function.internal_linkage, link_name: mismatched_function.link_name,
+                return_type: mismatched_function.return_type, params_start: mismatched_function.params_start,
+                params_count: mismatched_function.params_count, body: mismatched_function.body,
+                variadic: mismatched_function.variadic, has_global_effect: mismatched_function.has_global_effect,
+                has_unsafe_effect: mismatched_function.has_unsafe_effect, has_goto: mismatched_function.has_goto,
+                label_count: mismatched_function.label_count, comment: mismatched_function.comment
+            }
+            return 77 if typed_call_selected_function_index(mismatched_signature_target, TYPED_CALL_SIGNATURE_BASE) >= 0
+            issue <- typed_verify_ir(mismatched_signature_target) can Memory.Allocate, Abort.Panic
+            return 78 if not sview_eq(issue.kind, sview("call-signature-target", 0, -1))
+            fixed_user_signature: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_configure_user_arity(&fixed_user_signature, 1, false) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_call_argument_count(&fixed_user_signature, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(fixed_user_signature) can Memory.Allocate, Abort.Panic
+            return 66 if issue.kind.len != 0
+            too_few_user_arguments: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_configure_user_arity(&too_few_user_arguments, 1, false) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(too_few_user_arguments) can Memory.Allocate, Abort.Panic
+            return 67 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            too_many_user_arguments: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_call_argument_count(&too_many_user_arguments, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(too_many_user_arguments) can Memory.Allocate, Abort.Panic
+            return 68 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            valid_variadic_user_call: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_configure_user_arity(&valid_variadic_user_call, 1, true) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_call_argument_count(&valid_variadic_user_call, 2) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_variadic_user_call) can Memory.Allocate, Abort.Panic
+            return 69 if issue.kind.len != 0
+            too_few_variadic_user_arguments: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_configure_user_arity(&too_few_variadic_user_arguments, 1, true) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(too_few_variadic_user_arguments) can Memory.Allocate, Abort.Panic
+            return 70 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            too_few_external_arguments: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_EXTERNAL_BASE, -1, 0, 1) can Memory.Allocate, Abort.Panic
+            too_few_external_arguments.externs[0].params_count <- 1
+            issue <- typed_verify_ir(too_few_external_arguments) can Memory.Allocate, Abort.Panic
+            return 71 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            valid_variadic_external_call: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_EXTERNAL_BASE, -1, 0, 1) can Memory.Allocate, Abort.Panic
+            valid_variadic_external_call.externs[0].params_count <- 1
+            valid_variadic_external_call.externs[0].variadic <- true
+            valid_variadic_external_call.extern_params.push(TypedParam{
+                name: sview("arg0", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false
+            }) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_call_argument_count(&valid_variadic_external_call, 2) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_variadic_external_call) can Memory.Allocate, Abort.Panic
+            return 73 if issue.kind.len != 0
+            too_few_variadic_external_arguments: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_EXTERNAL_BASE, -1, 0, 1) can Memory.Allocate, Abort.Panic
+            too_few_variadic_external_arguments.externs[0].params_count <- 1
+            too_few_variadic_external_arguments.externs[0].variadic <- true
+            issue <- typed_verify_ir(too_few_variadic_external_arguments) can Memory.Allocate, Abort.Panic
+            return 74 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            misaligned_user_signature: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE + 1, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(misaligned_user_signature) can Memory.Allocate, Abort.Panic
+            return 60 if not sview_eq(issue.kind, sview("call-signature-mode", 0, -1))
+            out_of_range_user_signature: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE + 4, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(out_of_range_user_signature) can Memory.Allocate, Abort.Panic
+            return 61 if not sview_eq(issue.kind, sview("call-signature-index", 0, -1))
+            valid_external_signature: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_EXTERNAL_BASE + 2, -1, 0, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_external_signature) can Memory.Allocate, Abort.Panic
+            return 62 if issue.kind.len != 0
+            misaligned_external_signature: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_EXTERNAL_BASE + 1, -1, 0, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(misaligned_external_signature) can Memory.Allocate, Abort.Panic
+            return 63 if not sview_eq(issue.kind, sview("call-external-signature-mode", 0, -1))
+            out_of_range_external_signature: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_EXTERNAL_BASE + 6, -1, 0, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(out_of_range_external_signature) can Memory.Allocate, Abort.Panic
+            return 64 if not sview_eq(issue.kind, sview("call-external-signature-index", 0, -1))
+            unknown_call_mode: mutable TypedContext = typed_ir_test_call_context(root, 3, -1, 0, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(unknown_call_mode) can Memory.Allocate, Abort.Panic
+            return 65 if not sview_eq(issue.kind, sview("call-mode", 0, -1))
+
+            nested_function_type_arity: TypedIRFunctionArity = typed_ir_function_pointer_arity(sview("i32 (*)(i32 (*)(i32, i32), const char *)", 0, -1), false)
+            return 79 if not nested_function_type_arity.recognized or not nested_function_type_arity.has_prototype or nested_function_type_arity.params_count != 2 or nested_function_type_arity.variadic
+            variadic_function_type_arity: TypedIRFunctionArity = typed_ir_function_pointer_arity(sview("i32 (*)(i32, ...)", 0, -1), false)
+            return 80 if not variadic_function_type_arity.recognized or not variadic_function_type_arity.has_prototype or variadic_function_type_arity.params_count != 1 or not variadic_function_type_arity.variadic
+            c_unspecified_function_type_arity: TypedIRFunctionArity = typed_ir_function_pointer_arity(sview("i32 (*)()", 0, -1), false)
+            return 81 if not c_unspecified_function_type_arity.recognized or c_unspecified_function_type_arity.has_prototype
+            cpp_empty_function_type_arity: TypedIRFunctionArity = typed_ir_function_pointer_arity(sview("i32 (*)()", 0, -1), true)
+            return 82 if not cpp_empty_function_type_arity.recognized or not cpp_empty_function_type_arity.has_prototype or cpp_empty_function_type_arity.params_count != 0
+
+            too_few_indirect_arguments: mutable TypedContext = typed_ir_test_call_context(root, 1, 0, 0, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(too_few_indirect_arguments) can Memory.Allocate, Abort.Panic
+            return 83 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            too_many_indirect_arguments: mutable TypedContext = typed_ir_test_call_context(root, 1, 0, 0, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_indirect_signature(&too_many_indirect_arguments, sview("i32 (*)(i32)", 0, -1), 2) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(too_many_indirect_arguments) can Memory.Allocate, Abort.Panic
+            return 84 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            valid_variadic_indirect_call: mutable TypedContext = typed_ir_test_call_context(root, 1, 0, 0, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_indirect_signature(&valid_variadic_indirect_call, sview("i32 (*)(i32, ...)", 0, -1), 2) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_variadic_indirect_call) can Memory.Allocate, Abort.Panic
+            return 85 if issue.kind.len != 0
+            too_few_variadic_indirect_arguments: mutable TypedContext = typed_ir_test_call_context(root, 1, 0, 0, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_indirect_signature(&too_few_variadic_indirect_arguments, sview("i32 (*)(i32, ...)", 0, -1), 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(too_few_variadic_indirect_arguments) can Memory.Allocate, Abort.Panic
+            return 86 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+            valid_c_unspecified_indirect_call: mutable TypedContext = typed_ir_test_call_context(root, 1, 0, 0, 0) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_indirect_signature(&valid_c_unspecified_indirect_call, sview("i32 (*)()", 0, -1), 3) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_c_unspecified_indirect_call) can Memory.Allocate, Abort.Panic
+            return 87 if issue.kind.len != 0
+            invalid_cpp_empty_indirect_call: mutable TypedContext = typed_ir_test_call_context_with_language(root, 1, 0, 0, 0, true) can Memory.Allocate, Abort.Panic
+            typed_ir_test_set_indirect_signature(&invalid_cpp_empty_indirect_call, sview("i32 (*)()", 0, -1), 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(invalid_cpp_empty_indirect_call) can Memory.Allocate, Abort.Panic
+            return 88 if not sview_eq(issue.kind, sview("call-argument-count", 0, -1))
+
+            mismatched_user_call_result: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            mismatched_user_call_result.exprs[0].type_name <- sview("i64", 0, -1)
+            issue <- typed_verify_ir(mismatched_user_call_result) can Memory.Allocate, Abort.Panic
+            return 90 if not sview_eq(issue.kind, sview("call-result-type", 0, -1))
+            mismatched_user_definition_type: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_SIGNATURE_BASE, -1, 1, 0) can Memory.Allocate, Abort.Panic
+            mismatched_user_definition_type.functions[1].return_type <- sview("i64 (void)", 0, -1)
+            issue <- typed_verify_ir(mismatched_user_definition_type) can Memory.Allocate, Abort.Panic
+            return 91 if not sview_eq(issue.kind, sview("call-signature-type", 0, -1))
+            mismatched_external_call_result: mutable TypedContext = typed_ir_test_call_context(root, TYPED_CALL_EXTERNAL_BASE + 2, -1, 0, 1) can Memory.Allocate, Abort.Panic
+            mismatched_external_call_result.exprs[0].type_name <- sview("i64", 0, -1)
+            issue <- typed_verify_ir(mismatched_external_call_result) can Memory.Allocate, Abort.Panic
+            return 92 if not sview_eq(issue.kind, sview("call-result-type", 0, -1))
+
+            unambiguous_alias: TypedTypeAlias = TypedTypeAlias{
+                name: sview("word", 0, -1), qualified_name: sview("first_scope::word", 0, -1), target: sview("u32", 0, -1),
+                canonical_decl_id: sview("canonical-word-a", 0, -1), ambiguous: false
+            }
+            return 20 if not typed_type_alias_expandable(unambiguous_alias)
+            return 21 if typed_type_alias_identity_conflicts(unambiguous_alias, sview("canonical-word-a", 0, -1), sview("u32", 0, -1))
+            return 22 if not typed_type_alias_identity_conflicts(unambiguous_alias, sview("canonical-word-b", 0, -1), sview("u64", 0, -1))
+            conflicting_alias: mutable TypedTypeAlias = unambiguous_alias
+            conflicting_alias.ambiguous <- true
+            return 23 if typed_type_alias_expandable(conflicting_alias)
+
+            malformed_expression_context: mutable TypedContext = test_context(root)
+            malformed_expression_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Binary, text: sview("+", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: 0, rhs: 2, third: -1, args_start: -1, args_count: 0, value: 0
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(malformed_expression_context) can Memory.Allocate, Abort.Panic
+            return 2 if not sview_eq(issue.kind, sview("binary-operands", 0, -1))
+
+            malformed_label_context: mutable TypedContext = test_context(root)
+            malformed_label_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            malformed_label_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Label, expr: 0, aux: 1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            malformed_label_context.functions.push(TypedFunction{
+                name: sview("test", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 1, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 1, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(malformed_label_context) can Memory.Allocate, Abort.Panic
+            return 3 if not sview_eq(issue.kind, sview("label-id", 0, -1))
+
+            shared_statement_context: mutable TypedContext = test_context(root)
+            shared_statement_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            shared_statement_context.functions.push(TypedFunction{
+                name: sview("first", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 0, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(shared_statement_context) can Memory.Allocate, Abort.Panic
+            return 8 if issue.kind.len != 0
+            shared_statement_context.functions.push(TypedFunction{
+                name: sview("second", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 0, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(shared_statement_context) can Memory.Allocate, Abort.Panic
+            return 9 if not sview_eq(issue.kind, sview("cross-function-statement-reference", 0, -1))
+
+            orphan_statement_context: mutable TypedContext = test_context(root)
+            orphan_statement_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_statement_context) can Memory.Allocate, Abort.Panic
+            return 10 if not sview_eq(issue.kind, sview("orphan-statement", 0, -1))
+
+            orphan_expression_context: mutable TypedContext = test_context(root)
+            orphan_expression_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Name, text: sview("detached", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_expression_context) can Memory.Allocate, Abort.Panic
+            return 11 if not sview_eq(issue.kind, sview("orphan-expression", 0, -1))
+
+            malformed_array_side_effect_context: mutable TypedContext = test_context(root)
+            malformed_array_side_effect_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Name, text: sview("items", 0, -1), type_name: sview("i32*", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0
+            }) can Memory.Allocate, Abort.Panic
+            malformed_array_side_effect_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("0", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0
+            }) can Memory.Allocate, Abort.Panic
+            malformed_array_side_effect_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.ArrayIndex, text: sview("", 0, 0), type_name: sview("i32", 0, -1),
+                lhs: 0, rhs: 1, third: 1, args_start: -1, args_count: 0, value: 3
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(malformed_array_side_effect_context) can Memory.Allocate, Abort.Panic
+            return 12 if not sview_eq(issue.kind, sview("array-index-operands", 0, -1))
+
+            orphan_parameter_context: mutable TypedContext = test_context(root)
+            orphan_parameter_context.params.push(TypedParam{
+                name: sview("unused", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_parameter_context) can Memory.Allocate, Abort.Panic
+            return 13 if not sview_eq(issue.kind, sview("orphan-function-parameter", 0, -1))
+
+            overlapping_parameter_context: mutable TypedContext = test_context(root)
+            overlapping_parameter_context.params.push(TypedParam{
+                name: sview("shared", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false
+            }) can Memory.Allocate, Abort.Panic
+            for index in 0..<2 |overlapping_parameter_context|:
+                overlapping_parameter_context.stmts.push(TypedStmt{
+                    kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                    children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+                }) can Memory.Allocate, Abort.Panic
+            overlapping_parameter_context.functions.push(TypedFunction{
+                name: sview("first", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 1, body: 0, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_parameter_context.functions.push(TypedFunction{
+                name: sview("second", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 1, body: 1, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(overlapping_parameter_context) can Memory.Allocate, Abort.Panic
+            return 14 if not sview_eq(issue.kind, sview("overlapping-function-parameter-range", 0, -1))
+
+            orphan_external_parameter_context: mutable TypedContext = test_context(root)
+            orphan_external_parameter_context.extern_params.push(TypedParam{
+                name: sview("unused", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_external_parameter_context) can Memory.Allocate, Abort.Panic
+            return 15 if not sview_eq(issue.kind, sview("orphan-external-parameter", 0, -1))
+
+            overlapping_external_parameter_context: mutable TypedContext = test_context(root)
+            overlapping_external_parameter_context.extern_params.push(TypedParam{
+                name: sview("shared", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false
+            }) can Memory.Allocate, Abort.Panic
+            for index in 0..<2 |overlapping_external_parameter_context|:
+                overlapping_external_parameter_context.externs.push(TypedExtern{
+                    name: sview("external", 0, -1), link_name: sview("external", 0, -1), declaration_id: sview("", 0, 0),
+                    return_type: sview("void", 0, -1), result_type: sview("void", 0, -1), params_start: 0, params_count: 1, variadic: false
+                }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(overlapping_external_parameter_context) can Memory.Allocate, Abort.Panic
+            return 16 if not sview_eq(issue.kind, sview("overlapping-external-parameter-range", 0, -1))
+
+            orphan_field_context: mutable TypedContext = test_context(root)
+            orphan_field_context.fields.push(TypedField{
+                name: sview("unused", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_field_context) can Memory.Allocate, Abort.Panic
+            return 17 if not sview_eq(issue.kind, sview("orphan-record-field", 0, -1))
+
+            overlapping_record_field_context: mutable TypedContext = test_context(root)
+            overlapping_record_field_context.fields.push(TypedField{
+                name: sview("shared", 0, -1), type_name: sview("i32", 0, -1), is_mutable: false
+            }) can Memory.Allocate, Abort.Panic
+            for index in 0..<2 |overlapping_record_field_context|:
+                overlapping_record_field_context.records.push(TypedRecord{
+                    name: sview("Record", 0, -1), decl_id: sview("", 0, 0), is_union: false, fields_start: 0, fields_count: 1,
+                    comment: sview("", 0, 0), source_line: 0, source_column: 0
+                }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(overlapping_record_field_context) can Memory.Allocate, Abort.Panic
+            return 18 if not sview_eq(issue.kind, sview("overlapping-record-field-range", 0, -1))
+
+            orphan_expression_child_context: mutable TypedContext = test_context(root)
+            orphan_expression_child_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Name, text: sview("value", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0
+            }) can Memory.Allocate, Abort.Panic
+            orphan_expression_child_context.expr_children.push(0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_expression_child_context) can Memory.Allocate, Abort.Panic
+            return 19 if not sview_eq(issue.kind, sview("orphan-expression-child", 0, -1))
+
+            overlapping_expression_slice_context: mutable TypedContext = test_context(root)
+            for index in 0..<2 |overlapping_expression_slice_context|:
+                overlapping_expression_slice_context.exprs.push(TypedExpr{
+                    kind: TypedExprKind.Aggregate, text: sview("", 0, 0), type_name: sview("i32", 0, -1),
+                    lhs: -1, rhs: -1, third: -1, args_start: 0, args_count: 1, value: 0
+                }) can Memory.Allocate, Abort.Panic
+            overlapping_expression_slice_context.expr_children.push(0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(overlapping_expression_slice_context) can Memory.Allocate, Abort.Panic
+            return 20 if not sview_eq(issue.kind, sview("overlapping-expression-argument-slice", 0, -1))
+
+            orphan_statement_child_context: mutable TypedContext = test_context(root)
+            orphan_statement_child_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            orphan_statement_child_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: 1,
+                children_count: 1, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            orphan_statement_child_context.stmt_children.push(0) can Memory.Allocate, Abort.Panic
+            orphan_statement_child_context.stmt_children.push(0) can Memory.Allocate, Abort.Panic
+            orphan_statement_child_context.functions.push(TypedFunction{
+                name: sview("block_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 1, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_statement_child_context) can Memory.Allocate, Abort.Panic
+            return 21 if not sview_eq(issue.kind, sview("orphan-statement-child", 0, -1))
+
+            overlapping_statement_slice_context: mutable TypedContext = test_context(root)
+            overlapping_statement_slice_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: 0,
+                children_count: 1, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: 0,
+                children_count: 1, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: 2,
+                children_count: 2, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.stmt_children.push(0) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.stmt_children.push(0) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.stmt_children.push(1) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.stmt_children.push(2) can Memory.Allocate, Abort.Panic
+            overlapping_statement_slice_context.functions.push(TypedFunction{
+                name: sview("block_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 3, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(overlapping_statement_slice_context) can Memory.Allocate, Abort.Panic
+            return 22 if not sview_eq(issue.kind, sview("overlapping-statement-child-slice", 0, -1))
+
+            orphan_switch_case_context: mutable TypedContext = test_context(root)
+            orphan_switch_case_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            orphan_switch_case_context.functions.push(TypedFunction{
+                name: sview("case_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 0, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            orphan_switch_case_context.switch_cases.push(TypedSwitchCase{
+                value: -1, body: 0, is_default: true, is_constant: false, constant_value: 0
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(orphan_switch_case_context) can Memory.Allocate, Abort.Panic
+            return 23 if not sview_eq(issue.kind, sview("orphan-switch-case", 0, -1))
+
+            overlapping_switch_slice_context: mutable TypedContext = test_context(root)
+            overlapping_switch_slice_context.exprs.push(TypedExpr{
+                kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("i32", 0, -1),
+                lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_switch_slice_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Null, expr: -1, aux: -1, aux2: -1, children_start: -1,
+                children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            for index in 0..<2 |overlapping_switch_slice_context|:
+                overlapping_switch_slice_context.stmts.push(TypedStmt{
+                    kind: TypedStmtKind.Switch, expr: 0, aux: -1, aux2: -1, children_start: 0,
+                    children_count: 1, name: sview("", 0, 0), type_name: sview("", 0, 0)
+                }) can Memory.Allocate, Abort.Panic
+            overlapping_switch_slice_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Block, expr: -1, aux: -1, aux2: -1, children_start: 0,
+                children_count: 2, name: sview("", 0, 0), type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_switch_slice_context.stmt_children.push(1) can Memory.Allocate, Abort.Panic
+            overlapping_switch_slice_context.stmt_children.push(2) can Memory.Allocate, Abort.Panic
+            overlapping_switch_slice_context.functions.push(TypedFunction{
+                name: sview("switch_root", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0), return_type: sview("void", 0, -1),
+                params_start: 0, params_count: 0, body: 3, variadic: false, has_global_effect: false,
+                has_unsafe_effect: false, has_goto: false, label_count: 0, comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            overlapping_switch_slice_context.switch_cases.push(TypedSwitchCase{
+                value: -1, body: 0, is_default: true, is_constant: false, constant_value: 0
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(overlapping_switch_slice_context) can Memory.Allocate, Abort.Panic
+            return 24 if not sview_eq(issue.kind, sview("overlapping-switch-case-slice", 0, -1))
+
+            valid_switch_context: mutable TypedContext = typed_ir_test_switch_context(root, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_switch_context) can Memory.Allocate, Abort.Panic
+            return 39 if issue.kind.len != 0
+            duplicate_default_context: mutable TypedContext = typed_ir_test_switch_context(root, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(duplicate_default_context) can Memory.Allocate, Abort.Panic
+            return 40 if not sview_eq(issue.kind, sview("switch-default-count", 0, -1))
+            malformed_default_context: mutable TypedContext = typed_ir_test_switch_context(root, 2) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(malformed_default_context) can Memory.Allocate, Abort.Panic
+            return 41 if not sview_eq(issue.kind, sview("switch-default-shape", 0, -1))
+            missing_case_value_context: mutable TypedContext = typed_ir_test_switch_context(root, 3) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(missing_case_value_context) can Memory.Allocate, Abort.Panic
+            return 42 if not sview_eq(issue.kind, sview("switch-case-value", 0, -1))
+
+            valid_continue_context: mutable TypedContext = typed_ir_test_control_context(root, 0) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(valid_continue_context) can Memory.Allocate, Abort.Panic
+            return 43 if issue.kind.len != 0
+            outside_break_context: mutable TypedContext = typed_ir_test_control_context(root, 1) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(outside_break_context) can Memory.Allocate, Abort.Panic
+            return 44 if not sview_eq(issue.kind, sview("break-outside-scope", 0, -1))
+            outside_continue_context: mutable TypedContext = typed_ir_test_control_context(root, 2) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(outside_continue_context) can Memory.Allocate, Abort.Panic
+            return 45 if not sview_eq(issue.kind, sview("continue-outside-loop", 0, -1))
+            outside_switch_break_context: mutable TypedContext = typed_ir_test_control_context(root, 3) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(outside_switch_break_context) can Memory.Allocate, Abort.Panic
+            return 46 if not sview_eq(issue.kind, sview("switch-break-outside-switch", 0, -1))
+            wrong_switch_break_kind_context: mutable TypedContext = typed_ir_test_control_context(root, 4) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(wrong_switch_break_kind_context) can Memory.Allocate, Abort.Panic
+            return 47 if not sview_eq(issue.kind, sview("break-scope-kind", 0, -1))
+            mismatched_continue_context: mutable TypedContext = typed_ir_test_control_context(root, 5) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(mismatched_continue_context) can Memory.Allocate, Abort.Panic
+            return 48 if not sview_eq(issue.kind, sview("continue-increment-context", 0, -1))
+            continue_through_switch_context: mutable TypedContext = typed_ir_test_control_context(root, 6) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(continue_through_switch_context) can Memory.Allocate, Abort.Panic
+            return 49 if issue.kind.len != 0
+            nested_while_continue_context: mutable TypedContext = typed_ir_test_control_context(root, 7) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(nested_while_continue_context) can Memory.Allocate, Abort.Panic
+            return 50 if issue.kind.len != 0
+            malformed_for_increment_context: mutable TypedContext = typed_ir_test_control_context(root, 8) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(malformed_for_increment_context) can Memory.Allocate, Abort.Panic
+            return 51 if not sview_eq(issue.kind, sview("for-increment-kind", 0, -1))
+
+            invalid_cpp_iterator_type_context: mutable TypedContext = test_context(root)
+            invalid_cpp_iterator_type_context.stmts.push(TypedStmt{
+                kind: TypedStmtKind.Declaration, expr: -1, aux: TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR,
+                aux2: -1, children_start: -1, children_count: 0, name: sview("iterator", 0, -1),
+                type_name: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            invalid_cpp_iterator_type_context.functions.push(TypedFunction{
+                name: sview("invalid_iterator_type", 0, -1), declaration_id: sview("", 0, 0), internal_linkage: false, link_name: sview("", 0, 0),
+                return_type: sview("void", 0, -1), params_start: 0, params_count: 0, body: 0, variadic: false,
+                has_global_effect: false, has_unsafe_effect: false, has_goto: false, label_count: 0,
+                comment: sview("", 0, 0)
+            }) can Memory.Allocate, Abort.Panic
+            issue <- typed_verify_ir(invalid_cpp_iterator_type_context) can Memory.Allocate, Abort.Panic
+            return 25 if not sview_eq(issue.kind, sview("unordered-map-iterator-type", 0, -1))
+            return 0
+
+def main() -> i32 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    return CTranslator::run_verifier_checks() can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

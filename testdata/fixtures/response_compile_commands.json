@@ -1,0 +1,10 @@
+[
+  {
+    "directory": "testdata/fixtures/response",
+    "file": "../compile_command_quoted.c",
+    "arguments": [
+      "clang",
+      "@sub/outer.rsp"
+    ]
+  }
+]

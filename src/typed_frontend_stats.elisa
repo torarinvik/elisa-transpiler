@@ -1,0 +1,30 @@
+extend CTranslator:
+    def typed_emit_frontend_phase_stats[@r](source: sview, phase: sview, detail: sview, arena_bytes: usize, output_bytes: usize, ctx: mutable TypedContext[r]&) -> void can[Memory.Allocate, Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("frontend-phase source=", 0, -1))
+        append_view(&output, source)
+        append_view(&output, sview(" phase=", 0, -1))
+        append_view(&output, phase)
+        if detail.len > 0:
+            append_view(&output, sview(" detail=", 0, -1))
+            append_view(&output, detail)
+        append_view(&output, sview(" parsed_arena_bytes=", 0, -1))
+        append_i64(&output, arena_bytes.i64())
+        append_view(&output, sview(" output_bytes=", 0, -1))
+        append_i64(&output, output_bytes.i64())
+        append_view(&output, sview(" declarations=", 0, -1))
+        append_i64(&output, ctx.declaration_index_count)
+        append_view(&output, sview(" records=", 0, -1))
+        append_i64(&output, ctx.records.count.i64())
+        append_view(&output, sview(" fields=", 0, -1))
+        append_i64(&output, ctx.fields.count.i64())
+        append_view(&output, sview(" globals=", 0, -1))
+        append_i64(&output, ctx.globals.count.i64())
+        append_view(&output, sview(" functions=", 0, -1))
+        append_i64(&output, ctx.functions.count.i64())
+        append_view(&output, sview(" expressions=", 0, -1))
+        append_i64(&output, ctx.exprs.count.i64())
+        append_view(&output, sview(" statements=", 0, -1))
+        append_i64(&output, ctx.stmts.count.i64())
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Memory.Allocate, Console, Unsafe.PointerCast

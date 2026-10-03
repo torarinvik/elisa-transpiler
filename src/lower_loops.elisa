@@ -1,0 +1,106 @@
+extend CTranslator:
+    def typed_loop_access_type_has_observable_qualifier(type_name: sview) -> bool:
+        last_pointer: mutable i64 = -1
+        for index in 0..<type_name.len |type_name, last_pointer|:
+            last_pointer <- index if string_view_index(type_name, index) == 42
+        object_layer: sview = string_view_suffix(type_name, last_pointer + 1) if last_pointer >= 0 else type_name
+        return typed_type_spelling_has_word(object_layer, sview("volatile", 0, -1)) or typed_type_spelling_has_word(object_layer, sview("_Atomic", 0, -1))
+
+    def typed_ast_subtree_has_atomic_type[@r](node: JsonValueHandle[r]) -> bool:
+        abi_type: sview = ast_abi_qual_type(node)
+        return true if typed_type_spelling_has_word(abi_type, sview("_Atomic", 0, -1)) or typed_type_spelling_has_word(abi_type, sview("atomic", 0, -1))
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node|:
+                return true if typed_ast_subtree_has_atomic_type(ast_child(node, index))
+        return false
+
+    def typed_ast_expression_has_observable_loop_test_access[@r](node: JsonValueHandle[r]) -> bool:
+        kind: sview = ast_kind(node)
+        return true if sview_eq(kind, sview("AtomicExpr", 0, -1))
+        if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) and sview_eq(ast_cast_kind(node), sview("LValueToRValue", 0, -1)) and ast_child_count(node) > 0:
+            return true if typed_loop_access_type_has_observable_qualifier(ast_abi_qual_type(ast_child(node, 0)))
+        if sview_eq(kind, sview("CXXMemberCallExpr", 0, -1)):
+            return true if typed_ast_subtree_has_atomic_type(node)
+        if sview_eq(kind, sview("CallExpr", 0, -1)) and ast_child_count(node) > 0:
+            callee: sview = typed_callee_name(ast_child(node, 0))
+            return true if sview_starts_with(callee, sview("__atomic_", 0, -1)) or sview_starts_with(callee, sview("__c11_atomic_", 0, -1))
+            return true if sview_starts_with(callee, sview("atomic_", 0, -1)) and typed_ast_subtree_has_atomic_type(node)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node|:
+                return true if typed_ast_expression_has_observable_loop_test_access(ast_child(node, index))
+        return false
+
+    def typed_loop_test_has_observable_access[@r](node: JsonValueHandle[r]) -> bool:
+        return typed_ast_expression_has_observable_loop_test_access(node)
+
+    def typed_loop_true_expression[@r](ctx: mutable TypedContext[r]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Integer, text: sview("1", 0, -1), type_name: sview("int", 0, -1), lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_loop_condition_guard[@r](ctx: mutable TypedContext[r]&, condition: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        not_condition: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Unary, text: sview("not", 0, -1), type_name: sview("_Bool", 0, -1), lhs: condition, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        break_stmt: i64 = typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Break, expr: -1, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.If, expr: not_condition, aux: break_stmt, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_lower_do_statement[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        condition_node: JsonValueHandle[r] = ast_child(node, 1)
+        if typed_loop_test_has_observable_access(condition_node):
+            typed_record_unsupported(ctx, condition_node, sview("volatile or atomic loop-test access", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        saved_increment: i64 = ctx.current_for_increment
+        ctx.current_for_increment <- -1
+        ctx.break_scopes.push(1)
+        body: mutable i64 = typed_lower_stmt(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        _ = ctx.break_scopes.pop()
+        ctx.current_for_increment <- saved_increment
+
+        condition_prelude: mutable darray[i64] = []
+        condition: mutable i64 = -1
+        if typed_ast_has_effectful_comma(condition_node):
+            condition <- typed_lower_comma_value(ctx, condition_node, condition_prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        else:
+            condition <- typed_lower_expr(ctx, condition_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if condition < 0 or body < 0:
+            return -1
+        condition_statement: mutable i64 = -1
+        if condition_prelude.count > 0:
+            condition_statement <- typed_make_block(ctx, condition_prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        ctx.current_has_goto <- true if typed_lowered_stmt_contains_continue(ctx, body)
+        return typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.DoWhile, expr: condition, aux: body, aux2: condition_statement, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_lower_for_statement[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        init: mutable i64 = -1
+        if not ast_is_empty(ast_child(node, 0)):
+            init <- typed_lower_stmt(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+        condition_prelude: mutable darray[i64] = []
+        condition: mutable i64 = -1
+        condition_node: JsonValueHandle[r] = ast_child(node, 2)
+        if not ast_is_empty(condition_node) and typed_loop_test_has_observable_access(condition_node):
+            typed_record_unsupported(ctx, condition_node, sview("volatile or atomic loop-test access", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        if ast_is_empty(condition_node):
+            condition <- typed_loop_true_expression(ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif typed_ast_has_effectful_comma(condition_node):
+            condition <- typed_lower_comma_value(ctx, condition_node, condition_prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        else:
+            condition <- typed_lower_expr(ctx, condition_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+        increment: mutable i64 = -1
+        if not ast_is_empty(ast_child(node, 3)):
+            increment_expression: i64 = typed_lower_expr(ctx, ast_child(node, 3)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            increment <- typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Expression, expr: increment_expression, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) if increment_expression >= 0
+
+        saved_increment: i64 = ctx.current_for_increment
+        ctx.current_for_increment <- increment
+        ctx.break_scopes.push(1)
+        body: mutable i64 = typed_lower_stmt(ctx, ast_child(node, 4)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        _ = ctx.break_scopes.pop()
+        ctx.current_for_increment <- saved_increment
+        if condition < 0 or body < 0 or (not ast_is_empty(ast_child(node, 3)) and increment < 0):
+            return -1
+
+        if condition_prelude.count > 0:
+            condition_prelude.push(typed_loop_condition_guard(ctx, condition) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            condition_prelude.push(body)
+            body <- typed_make_block(ctx, condition_prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            condition <- typed_loop_true_expression(ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.For, expr: condition, aux: body, aux2: increment, children_start: init, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

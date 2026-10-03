@@ -1,0 +1,3 @@
+[
+  {"directory":".","file":"testdata/fixtures/anonymous_record_array.c","command":"clang -std=c11 -c testdata/fixtures/anonymous_record_array.c"}
+]

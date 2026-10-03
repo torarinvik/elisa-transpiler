@@ -1,0 +1,103 @@
+extend CTranslator:
+    def typed_emit_truth[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if typed_expr_is_boolean(ctx, index):
+            typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return
+        # `typed_emit_expr` already supplies parentheses for compound values;
+        # avoid adding another pair around simple scalar truth tests.
+        typed_emit_expr(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview(" != ", 0, -1))
+        if typed_expr_is_pointer(ctx, index):
+            append_view(out, sview("null", 0, -1))
+        else:
+            abi_type: sview = clang_target_type_abi_base(ctx.target_abi, typed_expr_at(ctx, index).type_name)
+            append_view(out, sview("(0.0).f32()", 0, -1)) if sview_eq(abi_type, sview("f32", 0, -1))
+            append_view(out, sview("0.0", 0, -1)) if sview_eq(abi_type, sview("f64", 0, -1))
+            append_view(out, sview("0", 0, -1)) if not sview_eq(abi_type, sview("f32", 0, -1)) and not sview_eq(abi_type, sview("f64", 0, -1))
+    def typed_condition_precedence[@r](ctx: TypedContext[r]&, index: i64) -> i64:
+        return 0 if index < 0 or index >= ctx.exprs.count.i64()
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        if expression.kind == TypedExprKind.Binary:
+            return 1 if sview_eq(expression.text, sview("or", 0, -1)) else 2 if sview_eq(expression.text, sview("and", 0, -1)) else 3 if typed_expr_is_boolean(ctx, index) else 4
+        return 4 if expression.kind == TypedExprKind.Unary and sview_eq(expression.text, sview("not", 0, -1)) else 4
+    def typed_emit_condition_expression[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, index: i64, parent_precedence: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        constant: mutable i64 = 0
+        if typed_readability_rewrites_enabled(ctx) and typed_eval_integer_constant(ctx, index, constant):
+            typed_rewrite_constant_conditions <- typed_rewrite_constant_conditions + 1
+            if typed_rewrite_explanations_enabled:
+                cli_emit_rewrite_event_expr(ctx, index, sview("constant-condition", 0, -1), sview("applied", 0, -1), sview("proof", 0, -1), sview("target-abi-integer-constant", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview("true", 0, -1)) if constant != 0 else append_view(out, sview("false", 0, -1))
+            return
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        precedence: i64 = typed_condition_precedence(ctx, index)
+        wrapped: bool = precedence < parent_precedence
+        append_view(out, sview("(", 0, -1)) if wrapped
+        simplified_boolean_compare: mutable bool = false
+        if expression.kind == TypedExprKind.Binary and (sview_eq(expression.text, sview("==", 0, -1)) or sview_eq(expression.text, sview("!=", 0, -1))):
+            right_constant: mutable i64 = 0
+            left_constant: mutable i64 = 0
+            right_is_zero: bool = typed_eval_integer_constant(ctx, expression.rhs, right_constant) and right_constant == 0
+            left_is_zero: bool = typed_eval_integer_constant(ctx, expression.lhs, left_constant) and left_constant == 0
+            if typed_readability_rewrites_enabled(ctx) and typed_expr_is_boolean(ctx, expression.lhs) and right_is_zero:
+                typed_rewrite_boolean_predicates <- typed_rewrite_boolean_predicates + 1
+                if typed_rewrite_explanations_enabled:
+                    cli_emit_rewrite_event_expr(ctx, index, sview("boolean-zero-predicate", 0, -1), sview("applied", 0, -1), sview("proof", 0, -1), sview("boolean-operand-compared-with-zero", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("not (", 0, -1)) if sview_eq(expression.text, sview("==", 0, -1)) else append_view(out, sview("(", 0, -1))
+                typed_emit_condition_expression(out, ctx, expression.lhs, 0) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview(")", 0, -1))
+                simplified_boolean_compare <- true
+            elif typed_readability_rewrites_enabled(ctx) and typed_expr_is_boolean(ctx, expression.rhs) and left_is_zero:
+                typed_rewrite_boolean_predicates <- typed_rewrite_boolean_predicates + 1
+                if typed_rewrite_explanations_enabled:
+                    cli_emit_rewrite_event_expr(ctx, index, sview("boolean-zero-predicate", 0, -1), sview("applied", 0, -1), sview("proof", 0, -1), sview("boolean-operand-compared-with-zero", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview("not (", 0, -1)) if sview_eq(expression.text, sview("==", 0, -1)) else append_view(out, sview("(", 0, -1))
+                typed_emit_condition_expression(out, ctx, expression.rhs, 0) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                append_view(out, sview(")", 0, -1))
+                simplified_boolean_compare <- true
+            elif typed_readability_rewrites_enabled(ctx) and (right_is_zero or left_is_zero) and not (typed_expr_is_boolean(ctx, expression.lhs) or typed_expr_is_boolean(ctx, expression.rhs)):
+                if typed_rewrite_explanations_enabled:
+                    cli_emit_rewrite_event_expr(ctx, index, sview("boolean-zero-predicate", 0, -1), sview("declined", 0, -1), sview("reason", 0, -1), sview("operand-not-boolean", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if not simplified_boolean_compare and expression.kind == TypedExprKind.Binary and (sview_eq(expression.text, sview("and", 0, -1)) or sview_eq(expression.text, sview("or", 0, -1))):
+            typed_emit_condition_expression(out, ctx, expression.lhs, precedence) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview(" ", 0, -1))
+            append_view(out, expression.text)
+            append_view(out, sview(" ", 0, -1))
+            typed_emit_condition_expression(out, ctx, expression.rhs, precedence + 1) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif not simplified_boolean_compare and expression.kind == TypedExprKind.Unary and sview_eq(expression.text, sview("not", 0, -1)):
+            append_view(out, sview("not ", 0, -1))
+            typed_emit_condition_expression(out, ctx, expression.lhs, precedence) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif not simplified_boolean_compare and expression.kind == TypedExprKind.Binary and typed_expr_is_boolean(ctx, index):
+            typed_emit_binary_value(out, ctx, expression.lhs, expression.rhs, expression.text) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview(" ", 0, -1))
+            append_view(out, expression.text)
+            append_view(out, sview(" ", 0, -1))
+            typed_emit_binary_value(out, ctx, expression.rhs, expression.lhs, expression.text) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif not simplified_boolean_compare:
+            typed_emit_truth(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        append_view(out, sview(")", 0, -1)) if wrapped
+    def typed_emit_condition[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        # Constant conditions are common after macro expansion and enum
+        # lowering. Emit the final boolean directly instead of retaining a C
+        # comparison tree that adds casts and obscures unreachable branches.
+        constant: mutable i64 = 0
+        if typed_readability_rewrites_enabled(ctx) and typed_eval_integer_constant(ctx, index, constant):
+            typed_rewrite_constant_conditions <- typed_rewrite_constant_conditions + 1
+            if typed_rewrite_explanations_enabled:
+                cli_emit_rewrite_event_expr(ctx, index, sview("constant-condition", 0, -1), sview("applied", 0, -1), sview("proof", 0, -1), sview("target-abi-integer-constant", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview("true", 0, -1)) if constant != 0 else append_view(out, sview("false", 0, -1))
+            return
+        # Keep a simple pointer/null test in its native reference form. Besides
+        # being much clearer than an address cast, this lets Elisa prove the
+        # non-null branch and removes repeated `elisa_nonnull` wrappers from
+        # the body of the test.
+        if typed_condition_nonnull_expr(ctx, index, true) >= 0 or typed_condition_nonnull_expr(ctx, index, false) >= 0:
+            expression: TypedExpr[r] = typed_expr_at(ctx, index)
+            typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            append_view(out, sview(" ", 0, -1))
+            append_view(out, expression.text)
+            append_view(out, sview(" ", 0, -1))
+            typed_emit_expr(out, ctx, expression.rhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        elif typed_expr_is_boolean(ctx, index):
+            typed_emit_condition_expression(out, ctx, index, 0) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        else:
+            typed_emit_truth(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

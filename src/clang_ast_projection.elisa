@@ -1,0 +1,558 @@
+extend CTranslator:
+    # Bump this when the semantic projection shape or meaning changes. Version
+    # 2 also retains expression ranges so lowering diagnostics keep source
+    # coordinates instead of degrading to the unknown 0:0 sentinel.
+    const AST_COMPACT_PROJECTION_VERSION: i64 = 2
+
+    def ast_json_inner_span(text: sview) -> i64:
+        cursor: mutable i64 = ast_json_skip_space(text, 0)
+        return -1 if cursor >= text.len or string_view_index(text, cursor) != 123
+        cursor <- ast_json_skip_space(text, cursor + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1)):
+                return value_start
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return -1
+
+    def ast_json_append_string(out: mutable darray[u8]&, value: sview) -> void:
+        hex_digits: sview = sview("0123456789abcdef", 0, -1)
+        out.push(34.u8())
+        for index in 0..<value.len |out, value, hex_digits|:
+            byte: i64 = string_view_index(value, index)
+            if byte == 34 or byte == 92:
+                out.push(92.u8())
+                out.push(byte.u8())
+            elif byte == 8:
+                append_view(out, sview("\\b", 0, -1))
+            elif byte == 9:
+                append_view(out, sview("\\t", 0, -1))
+            elif byte == 10:
+                append_view(out, sview("\\n", 0, -1))
+            elif byte == 12:
+                append_view(out, sview("\\f", 0, -1))
+            elif byte == 13:
+                append_view(out, sview("\\r", 0, -1))
+            elif byte < 32:
+                append_view(out, sview("\\u00", 0, -1))
+                out.push(string_view_index(hex_digits, byte / 16).u8())
+                out.push(string_view_index(hex_digits, byte % 16).u8())
+            else:
+                out.push(byte.u8())
+        out.push(34.u8())
+
+    def ast_json_project_value(text: sview, start: i64, source: sview, canonical_source: sview, working_directory: sview, dependency_ids: AstDependencySet, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return start if start >= text.len
+        first: i64 = string_view_index(text, start)
+        if first == 34:
+            stop: i64 = ast_json_skip_string(text, start)
+            append_view(out, string_view_slice(text, start, stop))
+            return stop
+        if first == 91:
+            append_view(out, sview("[", 0, -1))
+            cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+            first_item: mutable bool = true
+            while cursor < text.len and string_view_index(text, cursor) != 93:
+                append_view(out, sview(",", 0, -1)) if not first_item
+                item_stop: i64 = ast_json_project_value(text, cursor, source, canonical_source, working_directory, dependency_ids, out) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                first_item <- false
+                cursor <- ast_json_skip_space(text, item_stop)
+                cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+                cursor <- ast_json_skip_space(text, cursor)
+            append_view(out, sview("]", 0, -1)) if cursor < text.len
+            return cursor + 1 if cursor < text.len else cursor
+        if first == 123:
+            kind: sview = ast_json_project_object_kind(text, start)
+            keep_locations: bool = ast_json_project_is_declaration_kind(kind) or ast_json_project_is_expression_kind(kind)
+            is_type_dependency: bool = ast_json_project_is_type_declaration_kind(kind) and ast_dependency_set_contains(dependency_ids, ast_json_decl_id(text, start))
+            append_view(out, sview("{", 0, -1))
+            cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+            first_member: mutable bool = true
+            while cursor < text.len and string_view_index(text, cursor) != 125:
+                key_start: i64 = cursor
+                key_stop: i64 = ast_json_skip_string(text, key_start)
+                key: sview = string_view_slice(text, key_start + 1, key_stop - 1)
+                cursor <- ast_json_skip_space(text, key_stop + 1)
+                value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+                value_start <- ast_json_skip_space(text, value_start)
+                value_stop: i64 = ast_json_skip_value(text, value_start)
+                keep: mutable bool = not sview_eq(key, sview("definitionData", 0, -1))
+                if (sview_eq(key, sview("loc", 0, -1)) or sview_eq(key, sview("range", 0, -1))) and not keep_locations:
+                    keep <- ast_json_value_has_macro_origin(text, value_start, value_stop)
+                if keep:
+                    append_view(out, sview(",", 0, -1)) if not first_member
+                    append_view(out, string_view_slice(text, key_start, key_stop))
+                    append_view(out, sview(":", 0, -1))
+                    if ast_json_key_is(text, key_start, key_stop, sview("file", 0, -1)) and string_view_index(text, value_start) == 34:
+                        source_path: bool = ast_json_path_is_main_source(text, value_start, value_stop, source, canonical_source, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                        if source_path:
+                            ast_json_append_string(out, source)
+                        else:
+                            ast_json_project_value(text, value_start, source, canonical_source, working_directory, dependency_ids, out) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                    else:
+                        ast_json_project_value(text, value_start, source, canonical_source, working_directory, dependency_ids, out) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                    first_member <- false
+                cursor <- ast_json_skip_space(text, value_stop)
+                cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+                cursor <- ast_json_skip_space(text, cursor)
+            if is_type_dependency:
+                append_view(out, sview(",", 0, -1)) if not first_member
+                append_view(out, sview("\"elisaDependency\":true", 0, -1))
+            append_view(out, sview("}", 0, -1)) if cursor < text.len
+            return cursor + 1 if cursor < text.len else cursor
+        stop: i64 = ast_json_skip_value(text, start)
+        append_view(out, string_view_slice(text, start, stop))
+        return stop
+
+    # A typedef can be the source-visible spelling of an otherwise external
+    # record specialization. Collect only RecordType IDs beneath aliases that
+    # belong to the source translation unit; this lets projection retain the
+    # concrete layout without pulling in unrelated template specializations.
+    def ast_json_collect_type_alias_record_ids(text: sview, start: i64, ids: mutable AstDependencySet&, source_alias_ids: AstDependencySet, inside_alias: bool) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return start if start >= text.len
+        first: i64 = string_view_index(text, start)
+        if first == 91:
+            cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+            while cursor < text.len and string_view_index(text, cursor) != 93:
+                cursor <- ast_json_collect_type_alias_record_ids(text, cursor, ids, source_alias_ids, inside_alias) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                cursor <- ast_json_skip_space(text, cursor)
+                cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+                cursor <- ast_json_skip_space(text, cursor)
+            return cursor + 1 if cursor < text.len
+            return cursor
+        return ast_json_skip_value(text, start) if first != 123
+        kind: sview = ast_json_object_kind(text, start)
+        is_type_alias: bool = sview_eq(kind, sview("TypedefDecl", 0, -1)) or sview_eq(kind, sview("TypeAliasDecl", 0, -1))
+        is_source_alias: bool = is_type_alias and ast_dependency_set_contains(source_alias_ids, ast_json_decl_id(text, start))
+        is_alias: bool = inside_alias or is_source_alias
+        if is_alias and sview_eq(kind, sview("RecordType", 0, -1)):
+            record_id: sview = ast_json_object_member_decl_id(text, start, sview("decl", 0, -1))
+            ast_dependency_set_add(ids, record_id) can Memory.Allocate, Abort.Panic if record_id.len > 0
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_stop: i64 = ast_json_skip_string(text, cursor)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            value_stop: mutable i64 = value_start
+            if string_view_index(text, value_start) == 123 or string_view_index(text, value_start) == 91:
+                value_stop <- ast_json_collect_type_alias_record_ids(text, value_start, ids, source_alias_ids, is_alias) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            else:
+                value_stop <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, value_stop)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return cursor + 1 if cursor < text.len
+        return cursor
+
+    def ast_json_template_argument_value(text: sview, start: i64) -> sview:
+        stop: i64 = ast_json_skip_value(text, start)
+        length: i64 = stop - start
+        return string_view_slice(text, start, stop) if (length == 4 and sview_eq(string_view_slice(text, start, stop), sview("true", 0, -1))) or (length == 5 and sview_eq(string_view_slice(text, start, stop), sview("false", 0, -1)))
+        return sview("", 0, 0) if length == 0
+        cursor: mutable i64 = start
+        cursor <- cursor + 1 if string_view_index(text, cursor) == 45
+        return sview("", 0, 0) if cursor == stop
+        while cursor < stop:
+            digit: i64 = string_view_index(text, cursor)
+            return sview("", 0, 0) if digit < 48 or digit > 57
+            cursor <- cursor + 1
+        return string_view_slice(text, start, stop)
+
+    def ast_json_template_parameter_type(text: sview, start: i64) -> sview:
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("type", 0, -1)) and string_view_index(text, value_start) == 123:
+                type_cursor: mutable i64 = ast_json_skip_space(text, value_start + 1)
+                while type_cursor < text.len and string_view_index(text, type_cursor) != 125:
+                    type_key_start: i64 = type_cursor
+                    type_key_stop: i64 = ast_json_skip_string(text, type_key_start)
+                    type_cursor <- ast_json_skip_space(text, type_key_stop + 1)
+                    type_value_start: mutable i64 = type_cursor + 1 if type_cursor < text.len and string_view_index(text, type_cursor) == 58 else type_cursor
+                    type_value_start <- ast_json_skip_space(text, type_value_start)
+                    if ast_json_key_is(text, type_key_start, type_key_stop, sview("qualType", 0, -1)) and string_view_index(text, type_value_start) == 34:
+                        type_value_stop: i64 = ast_json_skip_string(text, type_value_start)
+                        return string_view_slice(text, type_value_start + 1, type_value_stop - 1)
+                    type_cursor <- ast_json_skip_value(text, type_value_start)
+                    type_cursor <- ast_json_skip_space(text, type_cursor)
+                    type_cursor <- type_cursor + 1 if type_cursor < text.len and string_view_index(text, type_cursor) == 44
+                    type_cursor <- ast_json_skip_space(text, type_cursor)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)
+
+    def ast_json_template_integer_spelling(value: sview) -> sview:
+        return sview("", 0, 0) if value.len == 0
+        cursor: mutable i64 = 0
+        cursor <- 1 if string_view_index(value, 0) == 45
+        return sview("", 0, 0) if cursor == value.len
+        while cursor < value.len:
+            digit: i64 = string_view_index(value, cursor)
+            return sview("", 0, 0) if digit < 48 or digit > 57
+            cursor <- cursor + 1
+        return value
+
+    def ast_json_template_default_expression_value(text: sview, start: i64) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("value", 0, -1)):
+                if string_view_index(text, value_start) == 34:
+                    value_stop: i64 = ast_json_skip_string(text, value_start)
+                    return ast_json_template_integer_spelling(string_view_slice(text, value_start + 1, value_stop - 1))
+                return ast_json_template_argument_value(text, value_start)
+            cursor <- ast_json_skip_space(text, ast_json_skip_value(text, value_start))
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        return sview("", 0, 0)
+
+    def ast_json_template_parameter_default_spelling(text: sview, start: i64, is_value_parameter: bool) -> sview:
+        wrapper: sview = string_view_suffix(text, start)
+        inner_start: i64 = ast_json_inner_span(wrapper)
+        return sview("", 0, 0) if inner_start < 0 or string_view_index(wrapper, inner_start) != 91
+        cursor: mutable i64 = ast_json_skip_space(wrapper, inner_start + 1)
+        return sview("", 0, 0) if cursor >= wrapper.len or string_view_index(wrapper, cursor) != 123
+        return sview("", 0, 0) if not sview_eq(ast_json_object_kind(wrapper, cursor), sview("TemplateArgument", 0, -1))
+        return ast_json_template_parameter_type(wrapper, cursor) if not is_value_parameter
+        argument_wrapper: sview = string_view_suffix(wrapper, cursor)
+        argument_inner: i64 = ast_json_inner_span(argument_wrapper)
+        return sview("", 0, 0) if argument_inner < 0 or string_view_index(argument_wrapper, argument_inner) != 91
+        expression_start: i64 = ast_json_skip_space(argument_wrapper, argument_inner + 1)
+        return ast_json_template_default_expression_value(argument_wrapper, expression_start)
+
+    def ast_json_collect_template_parameter_types(text: sview, start: i64, out: mutable darray[sview]&, defaults: mutable darray[sview]&) -> void:
+        wrapper: sview = string_view_suffix(text, start)
+        inner_start: i64 = ast_json_inner_span(wrapper)
+        return if inner_start < 0 or string_view_index(wrapper, inner_start) != 91
+        cursor: mutable i64 = ast_json_skip_space(wrapper, inner_start + 1)
+        while cursor < wrapper.len and string_view_index(wrapper, cursor) != 93:
+            return if string_view_index(wrapper, cursor) != 123
+            kind: sview = ast_json_object_kind(wrapper, cursor)
+            is_type_parameter: bool = sview_eq(kind, sview("TemplateTypeParmDecl", 0, -1)) or sview_eq(kind, sview("TemplateTemplateParmDecl", 0, -1))
+            is_value_parameter: bool = sview_eq(kind, sview("NonTypeTemplateParmDecl", 0, -1))
+            return if not is_type_parameter and not is_value_parameter
+            parameter_type: sview = ast_json_template_parameter_type(wrapper, cursor) if is_value_parameter else sview("", 0, 0)
+            out.push(parameter_type)
+            defaults.push(ast_json_template_parameter_default_spelling(wrapper, cursor, is_value_parameter))
+            cursor <- ast_json_skip_space(wrapper, ast_json_skip_value(wrapper, cursor))
+            cursor <- cursor + 1 if cursor < wrapper.len and string_view_index(wrapper, cursor) == 44
+            cursor <- ast_json_skip_space(wrapper, cursor)
+
+    def ast_json_template_argument_spelling(text: sview, start: i64, parameter_type: sview) -> sview:
+        return sview("", 0, 0) if start >= text.len or string_view_index(text, start) != 123
+        cursor: mutable i64 = ast_json_skip_space(text, start + 1)
+        type_spelling: mutable sview = sview("", 0, 0)
+        value_spelling: mutable sview = sview("", 0, 0)
+        while cursor < text.len and string_view_index(text, cursor) != 125:
+            key_start: i64 = cursor
+            key_stop: i64 = ast_json_skip_string(text, key_start)
+            cursor <- ast_json_skip_space(text, key_stop + 1)
+            value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
+            value_start <- ast_json_skip_space(text, value_start)
+            if ast_json_key_is(text, key_start, key_stop, sview("type", 0, -1)) and string_view_index(text, value_start) == 123:
+                type_cursor: mutable i64 = ast_json_skip_space(text, value_start + 1)
+                while type_cursor < text.len and string_view_index(text, type_cursor) != 125:
+                    type_key_start: i64 = type_cursor
+                    type_key_stop: i64 = ast_json_skip_string(text, type_key_start)
+                    type_cursor <- ast_json_skip_space(text, type_key_stop + 1)
+                    type_value_start: mutable i64 = type_cursor + 1 if type_cursor < text.len and string_view_index(text, type_cursor) == 58 else type_cursor
+                    type_value_start <- ast_json_skip_space(text, type_value_start)
+                    if ast_json_key_is(text, type_key_start, type_key_stop, sview("qualType", 0, -1)) and string_view_index(text, type_value_start) == 34:
+                        type_value_stop: i64 = ast_json_skip_string(text, type_value_start)
+                        type_spelling <- string_view_slice(text, type_value_start + 1, type_value_stop - 1)
+                    type_cursor <- ast_json_skip_value(text, type_value_start)
+                    type_cursor <- ast_json_skip_space(text, type_cursor)
+                    type_cursor <- type_cursor + 1 if type_cursor < text.len and string_view_index(text, type_cursor) == 44
+                    type_cursor <- ast_json_skip_space(text, type_cursor)
+            elif ast_json_key_is(text, key_start, key_stop, sview("value", 0, -1)):
+                value_spelling <- ast_json_template_argument_value(text, value_start)
+            cursor <- ast_json_skip_value(text, value_start)
+            cursor <- ast_json_skip_space(text, cursor)
+            cursor <- cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 44
+            cursor <- ast_json_skip_space(text, cursor)
+        effective_type: sview = type_spelling if type_spelling.len > 0 else parameter_type
+        if value_spelling.len > 0 and sview_eq(effective_type, sview("bool", 0, -1)):
+            return sview("false", 0, -1) if sview_eq(value_spelling, sview("0", 0, -1))
+            return sview("true", 0, -1) if sview_eq(value_spelling, sview("1", 0, -1))
+            return value_spelling if sview_eq(value_spelling, sview("true", 0, -1)) or sview_eq(value_spelling, sview("false", 0, -1))
+            return sview("", 0, 0)
+        return value_spelling if value_spelling.len > 0 and not sview_eq(value_spelling, sview("true", 0, -1)) and not sview_eq(value_spelling, sview("false", 0, -1))
+        return type_spelling if type_spelling.len > 0 else parameter_type
+
+    def ast_json_template_specialization_type(text: sview, start: i64, qualified_prefix: sview, parameter_types: darray[sview], out: mutable darray[u8]&, arguments: mutable darray[sview]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        out.count <- 0.usize()
+        arguments.count <- 0.usize()
+        name: sview = ast_json_decl_name(text, start)
+        return false if name.len == 0
+        wrapper: sview = string_view_suffix(text, start)
+        inner_start: i64 = ast_json_inner_span(wrapper)
+        return false if inner_start < 0 or string_view_index(wrapper, inner_start) != 91
+        append_view(out, qualified_prefix)
+        append_view(out, name)
+        append_view(out, sview("<", 0, -1))
+        cursor: mutable i64 = ast_json_skip_space(wrapper, inner_start + 1)
+        argument_count: mutable i64 = 0
+        while cursor < wrapper.len and string_view_index(wrapper, cursor) != 93:
+            child_stop: i64 = ast_json_skip_value(wrapper, cursor)
+            if string_view_index(wrapper, cursor) == 123 and sview_eq(ast_json_object_kind(wrapper, cursor), sview("TemplateArgument", 0, -1)):
+                parameter_type: sview = parameter_types[argument_count.usize()] if argument_count.usize() < parameter_types.count else sview("", 0, 0)
+                argument_spelling: sview = ast_json_template_argument_spelling(wrapper, cursor, parameter_type)
+                return false if argument_spelling.len == 0
+                append_view(out, sview(", ", 0, -1)) if argument_count > 0
+                append_view(out, argument_spelling)
+                arguments.push(argument_spelling)
+                argument_count <- argument_count + 1
+            cursor <- ast_json_skip_space(wrapper, child_stop)
+            cursor <- cursor + 1 if cursor < wrapper.len and string_view_index(wrapper, cursor) == 44
+            cursor <- ast_json_skip_space(wrapper, cursor)
+        return false if argument_count == 0
+        append_view(out, sview(">", 0, -1))
+        return true
+
+    def ast_json_source_type_uses_specialization(source_types: darray[sview], specialization_type: sview) -> bool:
+        return false if specialization_type.len == 0
+        for source_type in source_types |specialization_type|:
+            cursor: mutable i64 = 0
+            while cursor + specialization_type.len <= source_type.len:
+                matches: mutable bool = true
+                for offset in 0..<specialization_type.len |source_type, specialization_type, cursor, matches|:
+                    matches <- false if string_view_index(source_type, cursor + offset) != string_view_index(specialization_type, offset)
+                if matches:
+                    before: i64 = string_view_index(source_type, cursor - 1) if cursor > 0 else 0
+                    after_index: i64 = cursor + specialization_type.len
+                    after: i64 = string_view_index(source_type, after_index) if after_index < source_type.len else 0
+                    before_identifier: bool = (before >= 48 and before <= 57) or (before >= 65 and before <= 90) or (before >= 97 and before <= 122) or before == 95 or before == 58
+                    after_identifier: bool = (after >= 48 and after <= 57) or (after >= 65 and after <= 90) or (after >= 97 and after <= 122) or after == 95 or after == 58
+                    return true if not before_identifier and not after_identifier
+                cursor <- cursor + 1
+        return false
+
+    def ast_json_source_type_uses_template_specialization(source_types: darray[sview], qualified_prefix: sview, name: sview, arguments: darray[sview], defaults: darray[sview], aliases: mutable darray[sview]&) -> bool can[Memory.Allocate]:
+        prefix_count: mutable usize = arguments.count
+        matched: mutable bool = false
+        while prefix_count <= arguments.count:
+            may_omit: mutable bool = true
+            for argument_index in prefix_count..<arguments.count |defaults, may_omit|:
+                may_omit <- false if argument_index >= defaults.count or not sview_eq(defaults[argument_index], arguments[argument_index])
+            if may_omit:
+                candidate: mutable darray[u8] = []
+                append_view(&candidate, qualified_prefix)
+                append_view(&candidate, name)
+                append_view(&candidate, sview("<", 0, -1))
+                for argument_index in 0..<prefix_count |arguments, candidate|:
+                    append_view(&candidate, sview(", ", 0, -1)) if argument_index > 0.usize()
+                    append_view(&candidate, arguments[argument_index])
+                append_view(&candidate, sview(">", 0, -1))
+                candidate_matches: bool = ast_json_source_type_uses_specialization(source_types, bytes_view(candidate))
+                if candidate_matches:
+                    matched <- true
+                    aliases.push(bytes_view(candidate)) if prefix_count < arguments.count
+            return matched if prefix_count == 0.usize()
+            prefix_count <- prefix_count - 1.usize()
+        return matched
+
+    def ast_json_source_type_uses_template_name(source_types: darray[sview], qualified_prefix: sview, name: sview) -> bool can[Memory.Allocate]:
+        candidate: mutable darray[u8] = []
+        append_view(&candidate, qualified_prefix)
+        append_view(&candidate, name)
+        wanted: sview = bytes_view(candidate)
+        return false if wanted.len == 0
+        for source_type in source_types |wanted|:
+            cursor: mutable i64 = 0
+            while cursor + wanted.len < source_type.len:
+                matches: mutable bool = true
+                for offset in 0..<wanted.len |source_type, wanted, cursor, matches|:
+                    matches <- false if string_view_index(source_type, cursor + offset) != string_view_index(wanted, offset)
+                after: i64 = string_view_index(source_type, cursor + wanted.len)
+                before: i64 = string_view_index(source_type, cursor - 1) if cursor > 0 else 0
+                before_identifier: bool = (before >= 48 and before <= 57) or (before >= 65 and before <= 90) or (before >= 97 and before <= 122) or before == 95 or before == 58
+                return true if matches and after == 60 and not before_identifier
+                cursor <- cursor + 1
+        return false
+
+    def ast_json_project_direct_template_specialization(text: sview, start: i64, source: sview, canonical_source: sview, working_directory: sview, dependency_ids: AstDependencySet, specialization_type: darray[u8], aliases: darray[sview], out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        projected: mutable darray[u8] = []
+        ast_json_project_value(text, start, source, canonical_source, working_directory, dependency_ids, &projected) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return if projected.count == 0.usize() or projected[projected.count - 1.usize()] != 125.u8()
+        projected.count <- projected.count - 1.usize()
+        append_view(out, bytes_view(projected))
+        append_view(out, sview(",\"elisaTemplateType\":", 0, -1))
+        ast_json_append_string(out, bytes_view(specialization_type))
+        append_view(out, sview(",\"elisaTemplateSourceAliases\":[", 0, -1))
+        for alias_index in 0..<aliases.count |aliases, out|:
+            append_view(out, sview(",", 0, -1)) if alias_index > 0.usize()
+            ast_json_append_string(out, aliases[alias_index])
+        append_view(out, sview("]", 0, -1))
+        append_view(out, sview(",\"elisaTemplateName\":\"ElisaTemplate_", 0, -1))
+        append_i64(out, (hash_sview(bytes_view(specialization_type)) & 0x7fffffffffffffff).i64())
+        append_view(out, sview("\"}", 0, -1))
+
+    def ast_json_project_needed_template_specializations(text: sview, start: i64, qualified_prefix: sview, source: sview, canonical_source: sview, working_directory: sview, dependency_ids: AstDependencySet, alias_record_ids: AstDependencySet, source_template_types: darray[sview], first: mutable bool&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        # A used specialization is nested in its ClassTemplateDecl, but keeping
+        # the whole template wrapper also retains its primary pattern and every
+        # sibling specialization. Promote only the ID-reached specializations
+        # into the compact translation-unit list; the typed passes resolve them
+        # by declaration ID without needing that unrelated template subtree.
+        stop: i64 = ast_json_skip_value(text, start)
+        wrapper: sview = string_view_slice(text, start, stop)
+        inner_start: i64 = ast_json_inner_span(wrapper)
+        return if inner_start < 0 or string_view_index(wrapper, inner_start) != 91
+        template_parameter_types: mutable darray[sview] = []
+        template_parameter_defaults: mutable darray[sview] = []
+        ast_json_collect_template_parameter_types(wrapper, 0, &template_parameter_types, &template_parameter_defaults)
+        cursor: mutable i64 = ast_json_skip_space(wrapper, inner_start + 1)
+        while cursor < wrapper.len and string_view_index(wrapper, cursor) != 93:
+            child_stop: i64 = ast_json_skip_value(wrapper, cursor)
+            if string_view_index(wrapper, cursor) == 123:
+                kind: sview = ast_json_object_kind(wrapper, cursor)
+                is_specialization: bool = sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1)) or sview_eq(kind, sview("ClassTemplatePartialSpecializationDecl", 0, -1))
+                identifier: sview = ast_json_decl_id(wrapper, cursor)
+                alias_reached: bool = is_specialization and ast_dependency_set_contains(dependency_ids, identifier) and ast_dependency_set_contains(alias_record_ids, identifier)
+                direct_type: mutable darray[u8] = []
+                direct_arguments: mutable darray[sview] = []
+                direct_aliases: mutable darray[sview] = []
+                direct_reached: mutable bool = false
+                if sview_eq(kind, sview("ClassTemplateSpecializationDecl", 0, -1)) and ast_json_template_specialization_type(wrapper, cursor, qualified_prefix, template_parameter_types, &direct_type, &direct_arguments) can Memory.Allocate, Abort.Panic:
+                    direct_reached <- ast_json_source_type_uses_template_specialization(source_template_types, qualified_prefix, ast_json_decl_name(wrapper, cursor), direct_arguments, template_parameter_defaults, &direct_aliases) can Memory.Allocate
+                if alias_reached or direct_reached:
+                    append_view(out, sview(",", 0, -1)) if not first[0]
+                    if direct_reached and not alias_reached:
+                        ast_json_project_direct_template_specialization(text, start + cursor, source, canonical_source, working_directory, dependency_ids, direct_type, direct_aliases, out) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                    else:
+                        ast_json_project_value(text, start + cursor, source, canonical_source, working_directory, dependency_ids, out) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                    first <- false
+            cursor <- ast_json_skip_space(wrapper, child_stop)
+            cursor <- cursor + 1 if cursor < wrapper.len and string_view_index(wrapper, cursor) == 44
+            cursor <- ast_json_skip_space(wrapper, cursor)
+
+    def ast_json_project_namespace_template_specializations(text: sview, start: i64, qualified_prefix: sview, source: sview, canonical_source: sview, working_directory: sview, dependency_ids: AstDependencySet, alias_record_ids: AstDependencySet, source_template_types: darray[sview], first: mutable bool&, out: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return if not sview_eq(ast_json_object_kind(text, start), sview("NamespaceDecl", 0, -1))
+        namespace_name: sview = ast_json_decl_name(text, start)
+        return if namespace_name.len == 0
+        namespace_prefix: mutable darray[u8] = []
+        append_view(&namespace_prefix, qualified_prefix)
+        append_view(&namespace_prefix, namespace_name)
+        append_view(&namespace_prefix, sview("::", 0, -1))
+        wrapper: sview = string_view_suffix(text, start)
+        inner_start: i64 = ast_json_inner_span(wrapper)
+        return if inner_start < 0 or string_view_index(wrapper, inner_start) != 91
+        cursor: mutable i64 = ast_json_skip_space(wrapper, inner_start + 1)
+        while cursor < wrapper.len and string_view_index(wrapper, cursor) != 93:
+            child_stop: i64 = ast_json_skip_value(wrapper, cursor)
+            if string_view_index(wrapper, cursor) == 123:
+                kind: sview = ast_json_object_kind(wrapper, cursor)
+                child_start: i64 = start + cursor
+                if sview_eq(kind, sview("NamespaceDecl", 0, -1)):
+                    ast_json_project_namespace_template_specializations(text, child_start, bytes_view(namespace_prefix), source, canonical_source, working_directory, dependency_ids, alias_record_ids, source_template_types, first, out) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                elif sview_eq(kind, sview("ClassTemplateDecl", 0, -1)) and ast_json_source_type_uses_template_name(source_template_types, bytes_view(namespace_prefix), ast_json_decl_name(text, child_start)) can Memory.Allocate:
+                    ast_json_project_needed_template_specializations(text, child_start, bytes_view(namespace_prefix), source, canonical_source, working_directory, dependency_ids, alias_record_ids, source_template_types, first, out) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            cursor <- ast_json_skip_space(wrapper, child_stop)
+            cursor <- cursor + 1 if cursor < wrapper.len and string_view_index(wrapper, cursor) == 44
+            cursor <- ast_json_skip_space(wrapper, cursor)
+
+    def ast_compact_json_into(text: sview, source: cstr, working_directory: sview, compact: mutable darray[u8]&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        inner_start: i64 = ast_json_inner_span(text)
+        source_view: sview = sview(source, 0, -1)
+        canonical_source_path: mutable darray[u8] = []
+        canonical_source_found: bool = ast_json_resolve_path(source_view, working_directory, &canonical_source_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        canonical_source: sview = bytes_view(canonical_source_path) if canonical_source_found else sview("", 0, 0)
+        compact.count <- 0.usize()
+        ast_path_match_cache_reset() can Memory.Allocate, Abort.Panic
+        if inner_start < 0 or string_view_index(text, inner_start) != 91:
+            append_view(compact, text)
+            return
+        source_type_names: mutable darray[sview] = []
+        source_enum_names: mutable darray[sview] = []
+        source_dependency_ids: mutable AstDependencySet = AstDependencySet{slots: [], count: 0.usize()}
+        alias_record_ids: mutable AstDependencySet = AstDependencySet{slots: [], count: 0.usize()}
+        dependency_graph: mutable AstDependencyGraph = AstDependencyGraph{nodes: [], edges: [], node_count: 0.usize(), source_type_alias_ids: AstDependencySet{slots: [], count: 0.usize()}, source_template_types: []}
+        dependency_type_index: mutable AstDependencyTypeIndex = AstDependencyTypeIndex{slots: [], count: 0.usize(), alias_names: [], alias_count: 0.usize(), alias_overflow: false}
+        # The dependency pass already walks every top-level AST value. Keep
+        # its starts and source-state facts so projection does not rescan each
+        # top-level object just to recover the same offsets and location
+        # metadata. The arrays are bounded by the number of translation-unit
+        # children and are tiny compared with the mapped Clang JSON.
+        top_level_starts: mutable darray[i64] = []
+        top_level_source_states: mutable darray[i64] = []
+        ast_dependency_type_index_scan(text, inner_start, &dependency_type_index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        type_cursor: mutable i64 = ast_json_skip_space(text, inner_start + 1)
+        source_context: mutable i64 = 0
+        while type_cursor < text.len and string_view_index(text, type_cursor) != 93:
+            inherited_source: bool = (source_context & 1) != 0
+            inherited_external: bool = (source_context & 4) != 0
+            inherited_project_include: bool = (source_context & 8) != 0
+            node_source_state: i64 = ast_json_node_source_state(text, type_cursor, source_view, canonical_source, working_directory, inherited_source, inherited_external, inherited_project_include, true) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            source_context <- node_source_state if node_source_state != 0
+            type_stop: i64 = ast_json_collect_source_and_dependency_facts(text, type_cursor, source_view, canonical_source, working_directory, source_type_names, source_enum_names, &source_dependency_ids, &dependency_graph, dependency_type_index, inherited_source, false, inherited_external, inherited_project_include, node_source_state, sview("", 0, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            top_level_starts.push(type_cursor)
+            top_level_source_states.push(node_source_state)
+            type_cursor <- ast_json_skip_space(text, type_stop)
+            type_cursor <- type_cursor + 1 if type_cursor < text.len and string_view_index(text, type_cursor) == 44
+            type_cursor <- ast_json_skip_space(text, type_cursor)
+        ast_dependency_graph_close(dependency_graph, &source_dependency_ids) can Memory.Allocate, Abort.Panic
+        _ = ast_json_collect_type_alias_record_ids(text, inner_start, &alias_record_ids, dependency_graph.source_type_alias_ids, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        append_view(compact, sview("{\"kind\":\"TranslationUnitDecl\",\"elisaProjectionVersion\":", 0, -1))
+        append_i64(compact, AST_COMPACT_PROJECTION_VERSION)
+        append_view(compact, sview(",\"inner\":[", 0, -1))
+        first: mutable bool = true
+        top_level_index: mutable usize = 0.usize()
+        while top_level_index < top_level_starts.count:
+            item_start: i64 = top_level_starts[top_level_index]
+            item_source_state: i64 = top_level_source_states[top_level_index]
+            item_is_source: bool = (item_source_state & 1) != 0
+            item_is_external: bool = (item_source_state & 4) != 0
+            item_is_project_include: bool = (item_source_state & 8) != 0
+            # A direct local range/path match already proves that this
+            # top-level node belongs to the translated unit. The older
+            # fallback then rescanned the complete node through used-function,
+            # named-record, enum and dependency walkers before reaching the
+            # same conclusion. Keep those structural fallbacks for inherited
+            # or ambiguous nodes, but avoid the repeated subtree walks for the
+            # common source-owned case (especially important for header-heavy
+            # C++ ASTs).
+            item_is_direct_source: bool = (item_source_state & 2) != 0
+            item_kind: sview = ast_json_object_kind(text, item_start)
+            if sview_eq(item_kind, sview("ClassTemplateDecl", 0, -1)):
+                # Project only source-used concrete specializations for both
+                # local and header-defined templates. Keeping a primary
+                # template pattern as a value-level declaration loses its
+                # instantiated layout and leaks dependent template fields into
+                # semantic analysis.
+                ast_json_project_needed_template_specializations(text, item_start, sview("", 0, 0), source_view, canonical_source, working_directory, source_dependency_ids, alias_record_ids, dependency_graph.source_template_types, &first, compact) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+            elif sview_eq(item_kind, sview("NamespaceDecl", 0, -1)):
+                ast_json_project_namespace_template_specializations(text, item_start, sview("", 0, 0), source_view, canonical_source, working_directory, source_dependency_ids, alias_record_ids, dependency_graph.source_template_types, &first, compact) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                if item_is_direct_source or ast_json_node_is_user(text, item_start, source, canonical_source, working_directory, source_type_names, source_enum_names, source_dependency_ids, item_is_source, item_is_external, item_is_project_include) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast:
+                    append_view(compact, sview(",", 0, -1)) if not first
+                    ast_json_project_value(text, item_start, source_view, canonical_source, working_directory, source_dependency_ids, compact) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                    first <- false
+            elif item_is_direct_source or ast_json_node_is_user(text, item_start, source, canonical_source, working_directory, source_type_names, source_enum_names, source_dependency_ids, item_is_source, item_is_external, item_is_project_include) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast:
+                append_view(compact, sview(",", 0, -1)) if not first
+                ast_json_project_value(text, item_start, source_view, canonical_source, working_directory, source_dependency_ids, compact) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                first <- false
+            top_level_index <- top_level_index + 1.usize()
+        append_view(compact, sview("]}", 0, -1))
+        ast_path_match_cache_count <- 0.usize()
+
+    def ast_compact_json(ast: darray[u8], source: cstr) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        compact: mutable darray[u8] = []
+        ast_compact_json_into(bytes_view(ast), source, sview("", 0, 0), &compact) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return compact
