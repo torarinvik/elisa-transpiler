@@ -110,6 +110,82 @@ class BoundedProcessTests(unittest.TestCase):
         with mock.patch.object(run_bounded_process.subprocess, "run", return_value=single):
             self.assertEqual(run_bounded_process.process_group_footprint_bytes([11]), 456)
 
+    def test_parses_host_free_memory_percentage(self) -> None:
+        self.assertEqual(
+            run_bounded_process.parse_system_memory_free_percent(
+                "System-wide memory free percentage: 53%\n"
+            ),
+            53,
+        )
+        for output in (
+            "System-wide memory free percentage: unavailable\n",
+            "System-wide memory free percentage: 101%\n",
+        ):
+            with self.subTest(output=output), self.assertRaises(run_bounded_process.MonitorError):
+                run_bounded_process.parse_system_memory_free_percent(output)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
+    def test_host_memory_floor_refuses_launch_below_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_memory_pressure = Path(temporary) / "memory_pressure"
+            fake_memory_pressure.write_text(
+                "#!/bin/sh\nprintf 'System-wide memory free percentage: 20%%\\n'\n"
+            )
+            fake_memory_pressure.chmod(0o755)
+            sentinel = Path(temporary) / "child-started"
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment.get('PATH', '')}"
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER), "--max-rss-kb", "262144",
+                    "--timeout-seconds", "5", "--min-system-free-percent", "40", "--",
+                    sys.executable, "-c", f"open({str(sentinel)!r}, 'w').close()",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 125, result.stderr)
+            self.assertIn("refusing to start command", result.stderr)
+            self.assertFalse(sentinel.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
+    def test_host_memory_floor_terminates_owned_group(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            counter = Path(temporary) / "memory-pressure-count"
+            fake_memory_pressure = Path(temporary) / "memory_pressure"
+            fake_memory_pressure.write_text(
+                "#!/bin/sh\n"
+                f"count_file={str(counter)!r}\n"
+                "count=0\n"
+                "if [ -f \"$count_file\" ]; then count=$(cat \"$count_file\"); fi\n"
+                "count=$((count + 1))\n"
+                "printf '%s' \"$count\" > \"$count_file\"\n"
+                "if [ \"$count\" -eq 1 ]; then free=80; else free=39; fi\n"
+                "printf 'System-wide memory free percentage: %s%%\\n' \"$free\"\n"
+            )
+            fake_memory_pressure.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment.get('PATH', '')}"
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER), "--max-rss-kb", "262144",
+                    "--timeout-seconds", "5", "--poll-seconds", "0.02",
+                    "--min-system-free-percent", "40", "--system-memory-poll-seconds", "0.05", "--",
+                    sys.executable, "-c", "import time; time.sleep(30)",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 125, result.stderr)
+            self.assertIn("host system memory free percentage 39%", result.stderr)
+            self.assertIn("terminated owned process group", result.stderr)
+
     @unittest.skipUnless(sys.platform == "darwin", "macOS physical-footprint monitoring")
     def test_physical_footprint_limit_kills_owned_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -139,6 +215,15 @@ class BoundedProcessTests(unittest.TestCase):
         result = self.invoke("--max-rss-kb", "0", "--timeout-seconds", "5", "--", sys.executable, "-c", "raise SystemExit(99)")
         self.assertEqual(result.returncode, 2)
         self.assertIn("positive integer", result.stderr)
+
+    def test_rejects_invalid_host_memory_floor(self) -> None:
+        result = self.invoke(
+            "--max-rss-kb", "262144", "--timeout-seconds", "5",
+            "--min-system-free-percent", "100", "--", sys.executable,
+            "-c", "raise SystemExit(99)",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("1 through 99", result.stderr)
 
 
 if __name__ == "__main__":

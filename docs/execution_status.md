@@ -5,6 +5,30 @@ feature is not complete merely because a handler exists or translation exits
 successfully; generated Elisa must also be compiled, linked, and exercised
 where applicable.
 
+## Host-wide build safety gate — implementation in progress — 2026-10-05
+
+`scripts/run_bounded_process.py` now optionally checks macOS's
+`memory_pressure` free-memory percentage before starting a command and samples
+it during execution. A low preflight reading refuses launch; a later breach
+terminates only the owned process group. `scripts/setup_local_compilers.sh`
+applies this gate to Stage0 builds, Stage1 seeds and runtime builds, using a
+default 41% minimum free percentage (`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`
+overrides the threshold), while retaining each operation's process-group RSS
+and deadline limits. Unsupported or malformed host-memory readings fail
+closed when the option is enabled.
+
+The bounded-runner suite passes all 10 tests on macOS, including simulated
+preflight refusal and a simulated falling host-memory reading that terminates
+the owned child. The real sampler also passed a harmless `/usr/bin/true` smoke
+at 37% reported free memory. Stage1 freshness-guard regressions, shell syntax,
+Python compilation, source line limits and `git diff --check` pass. At that
+37% sample, a separate Stage1 seed held the host-wide seed lock; consequently
+no compiler build, worktree refresh or translator rebuild was started. The
+gate's unit tests validate enforcement, but no compiler build has yet been
+run through the newly wrapped setup path. A follow-up live check at 41% free
+memory confirmed the configured 41% floor refuses launch (including the exact
+at-the-threshold case) before starting even a harmless child.
+
 ## Translation-result region ownership — implementation in progress, partially compiler-verified — 2026-10-03
 
 The result-lifetime recovery now makes `TypedTranslation` and generated source

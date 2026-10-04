@@ -53,18 +53,34 @@ stage0_bin=${ELISAC_LOCAL_BIN:-$stage0_worktree/compiler/bin/elisac-local}
 stage1_bin=${ELISA_STAGE1_BIN:-$stage1_worktree/bin/elisac-stage1}
 stage1_runtime=${ELISA_STAGE1_RUNTIME:-$stage1_worktree/build/runtime/elisacore_runtime.o}
 
+run_bounded() {
+    max_rss_kb=$1
+    timeout_seconds=$2
+    shift 2
+    if [ "$(uname -s)" = Darwin ]; then
+        minimum_free_percent=${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-41}
+        set -- python3 "$root_dir/scripts/run_bounded_process.py" \
+            --max-rss-kb "$max_rss_kb" --timeout-seconds "$timeout_seconds" \
+            --min-system-free-percent "$minimum_free_percent" -- "$@"
+    else
+        set -- python3 "$root_dir/scripts/run_bounded_process.py" \
+            --max-rss-kb "$max_rss_kb" --timeout-seconds "$timeout_seconds" -- "$@"
+    fi
+    "$@"
+}
+
 echo "building local stage0 compiler: $stage0_bin" >&2
 (
     cd "$stage0_worktree/compiler"
-    go build -o "$stage0_bin" ./src
+    run_bounded 1572864 600 go build -o "$stage0_bin" ./src
 )
 
 if [ ! -x "$stage1_bin" ]; then
     echo "seeding local stage1 compiler: $stage1_bin" >&2
     (
         cd "$stage1_worktree"
-        ELISACORE_BIN="$stage0_bin" ELISA_STAGE1_BIN="$stage1_bin" \
-            bash scripts/elisac_stage1.sh --seed
+        export ELISACORE_BIN="$stage0_bin" ELISA_STAGE1_BIN="$stage1_bin"
+        run_bounded 6291456 900 bash scripts/elisac_stage1.sh --seed
     )
 fi
 
@@ -72,8 +88,8 @@ if [ ! -f "$stage1_runtime" ]; then
     echo "building local stage1 runtime: $stage1_runtime" >&2
     (
         cd "$stage1_worktree"
-        ELISACORE_BIN="$stage0_bin" ELISA_RUNTIME_OBJ="$stage1_runtime" \
-            bash scripts/build_runtime_object.sh
+        export ELISACORE_BIN="$stage0_bin" ELISA_RUNTIME_OBJ="$stage1_runtime"
+        run_bounded 2097152 300 bash scripts/build_runtime_object.sh
     )
 fi
 

@@ -6,6 +6,40 @@ uncommitted work before this snapshot. No pre-existing files were reset or
 removed. After capturing the snapshot, only this new inventory document was
 staged and committed; all other dirty paths remained untouched.
 
+## Re-audit — 2026-10-05
+
+Read-only compiler-source and process-safety re-audit; no compiler build,
+worktree creation, checkout or source refresh was started.
+
+- Translator: branch `main`, HEAD
+  `2b098cde3bcae7b01938f5d739d944ed3e2ce96d`. At audit time the only tracked
+  modifications were the bounded-process host-memory gate, its setup
+  integration and regression tests, plus the Stage1 freshness-guard test
+  adaptation. Ignored `build/`, upstream fixtures and `src/.compiler_std`
+  remain preserved; the standard-library link still targets the intended
+  translator-local Stage1 worktree path.
+- Stage0 source checkout: `../Go projects/Elisa-core`, clean `main` at
+  `6a0628cc48a7e019ed023c835b379fb55522ff1e`.
+- Stage1 source checkout: `../Elisa-compiler`, clean `main` at
+  `8e08cd3397b1680c61bfb76b70e1a76541522e3d`. Its source-fresh Stage1
+  executable SHA-256 is
+  `f7d4dc3c2a2a126da19723abdcd806bf99f08a71cc8bf15a35c2f508e2e19b9d`,
+  matching runtime SHA-256 is
+  `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, and
+  provenance sidecar SHA-256 is
+  `d69a501ba4dfdae54c5ea9975a9faf477641789e171aee8d0980c02b06adc375`.
+  The Stage1 source-freshness guard reported this product current for the
+  source checkout. These main-checkout artifacts have not yet been copied
+  into the translator's private compiler worktree.
+- The translator-local Stage0 and Stage1 worktree directories are absent;
+  their configured branches are not yet checked out. A separate Stage1 seed
+  was active under `/private/tmp/luna-g75-return-repro-20261005` and held
+  `${TMPDIR}/elisac-stage1-global-seed.lock`. The host sampler reported 37%
+  free memory during the harmless runner smoke test. The new setup guard's
+  default 41% floor therefore correctly makes this an unsafe compiler-build
+  window. Wait for the lock and recheck host headroom before creating/building
+  the translator-local compiler pair.
+
 ## Re-audit — 2026-10-03
 
 This read-only re-audit supersedes the compiler revisions and artifact-freshness

@@ -25,6 +25,7 @@ RSS_HEADROOM_MAX_KB = 65536
 RSS_HEADROOM_FRACTION_DIVISOR = 8
 FOOTPRINT_SAMPLE_SECONDS = 0.1
 FOOTPRINT_HEADROOM_FRACTION_DIVISOR = 4
+SYSTEM_MEMORY_SAMPLE_SECONDS = 1.0
 
 
 class MonitorError(RuntimeError):
@@ -123,6 +124,36 @@ def process_group_breakdown(group_id: int) -> str:
     return "; ".join(members) if members else "no live members found"
 
 
+def parse_system_memory_free_percent(output: str) -> int:
+    match = re.search(r"^System-wide memory free percentage:\s*(\d+)\s*%\s*$", output, re.MULTILINE)
+    if not match:
+        raise MonitorError("memory_pressure output did not include system-wide free percentage")
+    percentage = int(match.group(1))
+    if percentage > 100:
+        raise MonitorError(f"memory_pressure reported invalid free percentage {percentage}%")
+    return percentage
+
+
+def system_memory_free_percent() -> int:
+    """Return the host-wide free-memory estimate reported by macOS."""
+    if sys.platform != "darwin":
+        raise MonitorError("host-wide memory-floor monitoring is supported only on macOS")
+    try:
+        result = subprocess.run(
+            ["memory_pressure"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise MonitorError("memory_pressure sampling exceeded 5 seconds") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"memory_pressure exited {result.returncode}"
+        raise MonitorError(detail)
+    return parse_system_memory_free_percent(result.stdout)
+
+
 def terminate_group(group_id: int, process: subprocess.Popen[bytes], grace_seconds: float = 1.0) -> None:
     """Terminate and reap the owned group, escalating only that group if needed."""
     try:
@@ -187,19 +218,54 @@ def positive_int(text: str) -> int:
     return value
 
 
+def percentage(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be an integer from 1 through 99") from error
+    if value < 1 or value > 99:
+        raise argparse.ArgumentTypeError("must be an integer from 1 through 99")
+    return value
+
+
 def rss_termination_threshold(max_rss_kb: int) -> int:
     """Reserve headroom for RSS growth between process-tree samples."""
     reserve_kb = min(RSS_HEADROOM_MAX_KB, max_rss_kb // RSS_HEADROOM_FRACTION_DIVISOR)
     return max_rss_kb - reserve_kb
 
 
-def run(command: Sequence[str], max_rss_kb: int, timeout_seconds: float, poll_seconds: float) -> int:
+def run(
+    command: Sequence[str],
+    max_rss_kb: int,
+    timeout_seconds: float,
+    poll_seconds: float,
+    min_system_free_percent: int | None = None,
+    system_memory_poll_seconds: float = SYSTEM_MEMORY_SAMPLE_SECONDS,
+) -> int:
     if os.name != "posix":
         print("run_bounded_process: POSIX process groups are required", file=sys.stderr)
         return 2
     if not command or not command[0]:
         print("run_bounded_process: missing command", file=sys.stderr)
         return 2
+
+    minimum_system_free_percent = 100
+    last_system_memory_sample = 0.0
+    if min_system_free_percent is not None:
+        try:
+            minimum_system_free_percent = system_memory_free_percent()
+        except MonitorError as error:
+            print(f"run_bounded_process: cannot verify host memory before launch: {error}", file=sys.stderr)
+            return 2
+        if minimum_system_free_percent <= min_system_free_percent:
+            print(
+                "run_bounded_process: refusing to start command: host system memory free "
+                f"percentage is {minimum_system_free_percent}%, must stay above "
+                f"{min_system_free_percent}%",
+                file=sys.stderr,
+            )
+            return 125
+        last_system_memory_sample = time.monotonic()
 
     try:
         process = subprocess.Popen(command, start_new_session=True)
@@ -240,6 +306,20 @@ def run(command: Sequence[str], max_rss_kb: int, timeout_seconds: float, poll_se
                         f"{footprint_threshold_kb} KiB (configured cap {max_rss_kb} KiB)"
                     )
                     break
+            if (
+                min_system_free_percent is not None
+                and group_live
+                and now - last_system_memory_sample >= system_memory_poll_seconds
+            ):
+                free_percent = system_memory_free_percent()
+                minimum_system_free_percent = min(minimum_system_free_percent, free_percent)
+                last_system_memory_sample = time.monotonic()
+                if free_percent <= min_system_free_percent:
+                    limit_reason = (
+                        f"host system memory free percentage {free_percent}% reached safety floor "
+                        f"{min_system_free_percent}%"
+                    )
+                    break
             if time.monotonic() >= deadline and group_live:
                 limit_reason = f"deadline exceeded ({timeout_seconds:g}s)"
                 break
@@ -247,7 +327,15 @@ def run(command: Sequence[str], max_rss_kb: int, timeout_seconds: float, poll_se
             return_code = process.poll()
             if return_code is not None and not group_live:
                 footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
-                print(f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB{footprint_report}", file=sys.stderr)
+                system_memory_report = (
+                    f"; minimum host free memory {minimum_system_free_percent}%"
+                    if min_system_free_percent is not None else ""
+                )
+                print(
+                    f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
+                    f"{footprint_report}{system_memory_report}",
+                    file=sys.stderr,
+                )
                 return return_code if return_code >= 0 else 128 - return_code
             time.sleep(poll_seconds)
     except MonitorError as error:
@@ -261,7 +349,15 @@ def run(command: Sequence[str], max_rss_kb: int, timeout_seconds: float, poll_se
             group_live = True
         if not group_live and process.poll() is not None:
             footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
-            print(f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB{footprint_report}", file=sys.stderr)
+            system_memory_report = (
+                f"; minimum host free memory {minimum_system_free_percent}%"
+                if min_system_free_percent is not None else ""
+            )
+            print(
+                f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
+                f"{footprint_report}{system_memory_report}",
+                file=sys.stderr,
+            )
             return_code = process.wait()
             return return_code if return_code >= 0 else 128 - return_code
         limit_reason = f"could not monitor owned process group: {error}"
@@ -272,9 +368,13 @@ def run(command: Sequence[str], max_rss_kb: int, timeout_seconds: float, poll_se
     process_details = process_group_breakdown(group_id)
     terminate_group(group_id, process)
     footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
+    system_memory_report = (
+        f"; minimum host free memory {minimum_system_free_percent}%"
+        if min_system_free_percent is not None else ""
+    )
     print(
         f"run_bounded_process: {limit_reason}; terminated owned process group "
-        f"{group_id} (peak RSS {peak_rss_kb} KiB{footprint_report})\n"
+        f"{group_id} (peak RSS {peak_rss_kb} KiB{footprint_report}{system_memory_report})\n"
         f"run_bounded_process: process-group members at limit: {process_details}",
         file=sys.stderr,
     )
@@ -286,12 +386,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-rss-kb", type=positive_int, required=True)
     parser.add_argument("--timeout-seconds", type=positive_float, required=True)
     parser.add_argument("--poll-seconds", type=positive_float, default=0.1)
+    parser.add_argument("--min-system-free-percent", type=percentage)
+    parser.add_argument("--system-memory-poll-seconds", type=positive_float, default=SYSTEM_MEMORY_SAMPLE_SECONDS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args(argv)
     command = arguments.command
     if command and command[0] == "--":
         command = command[1:]
-    return run(command, arguments.max_rss_kb, arguments.timeout_seconds, arguments.poll_seconds)
+    return run(
+        command,
+        arguments.max_rss_kb,
+        arguments.timeout_seconds,
+        arguments.poll_seconds,
+        arguments.min_system_free_percent,
+        arguments.system_memory_poll_seconds,
+    )
 
 
 if __name__ == "__main__":

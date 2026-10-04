@@ -18,8 +18,24 @@ mkdir -p "$test_root/compiler/bin" "$test_root/compiler/scripts" \
 cp "$freshness_guard" "$test_root/compiler/scripts/assert_stage1_fresh.sh"
 cp "$(command -v sh)" "$test_root/compiler/bin/elisac-stage1"
 chmod +x "$test_root/compiler/bin/elisac-stage1"
-touch -t 200001010000 "$test_root/compiler/bin/elisac-stage1"
-touch -t 200001020000 "$test_root/compiler/src/newer_source.elisa"
+
+if [ -f "$stage1_worktree/scripts/stage1_provenance.py" ]; then
+    cp "$stage1_worktree/scripts/stage1_provenance.py" \
+        "$test_root/compiler/scripts/stage1_provenance.py"
+    for recipe in elisac_stage1.sh elisac_stage1_seed.sh \
+        build_runtime_object.sh write_profiler_hook_fallbacks.sh; do
+        touch "$test_root/compiler/scripts/$recipe"
+    done
+    touch "$test_root/compiler/src/baseline.elisa"
+    python3 "$test_root/compiler/scripts/stage1_provenance.py" record \
+        "$test_root/compiler" "$test_root/compiler/bin/elisac-stage1" >/dev/null
+    touch "$test_root/compiler/src/changed_after_record.elisa"
+    stale_pattern='stage1 product is stale'
+else
+    touch -t 200001010000 "$test_root/compiler/bin/elisac-stage1"
+    touch -t 200001020000 "$test_root/compiler/src/newer_source.elisa"
+    stale_pattern='stage1 product binary is stale'
+fi
 
 set +e
 stale_output=$(bash "$test_root/compiler/scripts/assert_stage1_fresh.sh" \
@@ -27,13 +43,19 @@ stale_output=$(bash "$test_root/compiler/scripts/assert_stage1_fresh.sh" \
 stale_status=$?
 set -e
 if [ "$stale_status" -ne 2 ] || ! printf '%s\n' "$stale_output" \
-    | grep -q 'stage1 product binary is stale'; then
+    | grep -q "$stale_pattern"; then
     echo "Stage1 freshness guard did not reject a stale in-worktree product" >&2
     printf '%s\n' "$stale_output" >&2
     exit 1
 fi
 
-touch -t 200001030000 "$test_root/compiler/bin/elisac-stage1"
+if [ -f "$test_root/compiler/scripts/stage1_provenance.py" ]; then
+    python3 "$test_root/compiler/scripts/stage1_provenance.py" record \
+        "$test_root/compiler" "$test_root/compiler/bin/elisac-stage1" >/dev/null
+    touch "$test_root/compiler/bin/elisac-stage1"
+else
+    touch -t 200001030000 "$test_root/compiler/bin/elisac-stage1"
+fi
 bash "$test_root/compiler/scripts/assert_stage1_fresh.sh" \
     "$test_root/compiler/bin/elisac-stage1"
 echo "Stage1 freshness-guard regressions passed"
