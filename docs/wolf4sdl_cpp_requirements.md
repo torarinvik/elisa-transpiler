@@ -30,8 +30,8 @@ units:
 
 | Object | Type | Observed operations | Translation implications |
 | --- | --- | --- | --- |
-| `Keyboard` (`id_in.cpp`, declared `id_in.h`) | `std::unordered_map<ScanCode, boolean>` | `operator[]` for reads and writes; `clear()`; accessed through `IN_KeyDown` and `IN_ClearKey` macros | Bracket access must be an assignable lvalue and preserve C++ default insertion/value initialization. The enum/integer key must use the standard hash/equality behavior. Macro expansion must resolve to the same map object. |
-| `ScanNames` (`wl_menu.cpp`) | `std::unordered_map<ScanCode, const char *>` | default construction; many `operator[]` assignments; `find()`, `end()`, iterator comparison and dereference | In addition to bracket insertion, the adapter needs a source-compatible iterator/end surface and must preserve the pointer-to-constant-character value type. |
+| `Keyboard` (`id_in.cpp`, declared `id_in.h`) | `std::unordered_map<ScanCode, boolean>` where `ScanCode` aliases `int` and `boolean` aliases `int8_t` | `operator[]` for reads and writes; `clear()`; accessed through `IN_KeyDown` and `IN_ClearKey` macros | Bracket access must be an assignable lvalue and preserve C++ default insertion/value initialization for the exact signed 8-bit mapped type. The key uses integer hash/equality. Macro expansion and cross-translation-unit declarations must resolve to the same map object. |
+| `ScanNames` (`wl_menu.cpp`) | `std::unordered_map<ScanCode, const char *>` | default construction; many `operator[]` assignments; `find()`, `end()`, iterator comparison and dereference | In addition to bracket insertion, the adapter needs a source-compatible iterator/end surface and must preserve the nullable pointer-to-constant-character mapped type. |
 
 `wl_def.h` includes `<unordered_map>`; `id_in.h` declares the external
 `Keyboard` object; `id_in.cpp` defines/clears it and performs bracket
@@ -41,6 +41,14 @@ ordinary standard-library requirements. The translator must
 select any adapter from Clang's resolved canonical template identity and emit
 the generic `cpp` adapter; it must not special-case these Wolf4SDL names,
 files, or call sites.
+
+Existing generic regressions already cover integer and enum keys, scalar and
+nullable `const char *` mapped values, bracket insertion, map growth, clear,
+and `find`/`end`/iterator access in separate focused fixtures. They do not yet
+combine Wolf's exact `int`/`int8_t` typedef specialization with the
+cross-translation-unit global plus macro access pattern, nor do they exercise
+`find`/iterator reads on the pointer-valued specialization. Those are the
+smallest useful adapter-level additions before attempting the full project.
 
 ## C++-looking but C-style scope
 
@@ -61,10 +69,10 @@ and uncommon functions still need a compilation-database-backed Clang audit.
    node kinds, canonical type families, declaration/linkage families, macro
    origins, calls/operators and global initialization. Retain per-unit counts
    and identify rare constructs as well as aggregate totals.
-3. Add isolated generic C++ fixtures for both map shapes: enum-key/bool values
-   with bracket read/write/default insertion and `clear`, and integer-key/
-   `const char *` values with bracket assignment plus `find`/`end`/iterator
-   comparison/dereference. Compile, link and execute native and translated
+3. Extend the existing isolated generic C++ fixtures to cover both exact Wolf
+   map specializations, including `Keyboard`-like signed 8-bit mapped values
+   across translation units and macro-expanded reads/writes, plus pointer-map
+   `find`/`end`/iterator reads. Compile, link and execute native and translated
    fixtures for parity before claiming this adapter surface complete.
 4. Translate and compile the real units incrementally, using the exact Clang
    commands and reporting translator, Elisa compiler, SDL ABI/link and runtime
