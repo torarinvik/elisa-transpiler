@@ -92,6 +92,31 @@ if [ "$bounded_status" -ne 23 ] || ! rg -q 'child-stderr' "$bounded_stderr" \
     exit 1
 fi
 
+for bounded_driver_wrapper in \
+    test_elisa_bounded \
+    test_translator_bounded \
+    test_clangxx_bounded \
+    clang; do
+    bounded_wrapper_body=$(sed -n "/^${bounded_driver_wrapper}() {/,/^}/p" scripts/test.sh)
+    if [ -z "$bounded_wrapper_body" ] || \
+        ! printf '%s\n' "$bounded_wrapper_body" | rg -Fq 'test_run_bounded_process'; then
+        printf 'test driver tool wrapper is not process-bounded: %s\n' \
+            "$bounded_driver_wrapper" >&2
+        exit 1
+    fi
+done
+if ! rg -Fq 'elisa_bin=test_elisa_bounded' scripts/test.sh; then
+    echo "sourced test suites are not routed through the bounded Elisa wrapper" >&2
+    exit 1
+fi
+for bounded_suite in core_fixtures project_generation control_flow upstream_smoke; do
+    if ! rg -Fq ". \"\$root_dir/scripts/test_suites/${bounded_suite}.sh\"" scripts/test.sh; then
+        printf 'test suite is not sourced through the bounded driver: %s\n' \
+            "$bounded_suite" >&2
+        exit 1
+    fi
+done
+
 for bounded_probe in \
     scripts/test_clang_timeout.py \
     scripts/test_ast_depth.py \

@@ -180,6 +180,12 @@ latest snapshot another compiler process was active and host free memory was
 53%, below the test driver's 60% floor, so the memory-sensitive end-to-end
 suites remain pending.
 
+The 2026-10-05 harness regression now also inspects the canonical driver
+wiring: Elisa, translator, Clang and Clang++ wrappers must call the bounded
+runner, the sourced suites must use the bounded Elisa wrapper, and all four
+suite files must be sourced by `test.sh`. `sh scripts/test_test_support.sh`
+passes these assertions without launching a compiler.
+
 Validation on 2026-10-05: `scripts/test_run_bounded_process.py` passes 12 tests,
 including environment-default propagation, preflight refusal when the sampler
 fails, threshold refusal and termination after a simulated live memory drop.
