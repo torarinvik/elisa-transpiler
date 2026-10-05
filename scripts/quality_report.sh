@@ -81,6 +81,8 @@ if ! awk -v expected_exprs="$expected_ir_exprs" -v expected_statements="$expecte
     exit 2
 fi
 
+ir_function_metrics=$(python3 scripts/quality_ir_metrics.py "$quality_ir_path")
+
 ir_expr_kind_count() {
     kind=$1
     value=$(rg -c "^expr .* kind=${kind} " "$quality_ir_path" 2>/dev/null || true)
@@ -205,6 +207,7 @@ printf 'ir_cast_nodes_per_1000_ir_exprs: %s\n' "$ir_cast_nodes_per_1000_exprs"
 printf 'ir_sequence_nodes_per_1000_ir_exprs: %s\n' "$ir_sequence_nodes_per_1000_exprs"
 printf 'ir_control_nodes_per_function: %s\n' "$ir_control_nodes_per_function"
 printf 'ir_loop_nodes_per_function: %s\n' "$ir_loop_nodes_per_function"
+printf '%s\n' "$ir_function_metrics"
 if [ -n "$coverage_summary" ]; then
     if [ -n "$coverage_manifest" ]; then
         python3 scripts/quality_coverage.py "$coverage_summary" "$coverage_manifest"

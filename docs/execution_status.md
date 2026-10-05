@@ -3549,6 +3549,21 @@ readability-rule counter. This keeps the new structural measurements independent
 of source names, comments and string contents; the cJSON quality regression
 checks that the IR metrics are populated and that rewrite counters are numeric.
 
+## Per-function structural quality context — 2026-10-05
+
+Added `scripts/quality_ir_metrics.py` to traverse typed-ir-v13 function bodies
+and report reachable expression, statement and decision-node distributions per
+function (mean, nearest-rank p90 and max), together with expression nodes per
+`1 + decision nodes`. Decision nodes include branch/loop statements, switch
+arms, conditional expressions and short-circuit logical operators. Array-index
+side-effect expressions are followed through their dedicated IR edge. The
+analyzer validates record counts, IDs and graph references and refuses to emit
+metrics for malformed input. `quality_report.sh` places these structural
+readability-context measurements alongside the optional acceptance outcome
+and unsupported-coverage metrics. Synthetic graph tests and the offline
+quality-report integration tests pass; this slice did not invoke or validate
+the Elisa compiler and does not claim formal cyclomatic complexity.
+
 ## Generic `va_arg` lowering — 2026-09-16
 
 Clang models `va_arg(ap, T)` as a dedicated `VAArgExpr`, not as an ordinary

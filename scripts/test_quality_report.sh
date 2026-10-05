@@ -25,8 +25,9 @@ printf '%s\n' \
     'if [ "${QUALITY_EMPTY_IR:-0}" = 1 ]; then' \
     '    printf "counts exprs=0 stmts=0 switch_cases=0 functions=0 globals=0\\n" >&2' \
     'else' \
-    '    printf "counts exprs=10 stmts=4 switch_cases=0 functions=1 globals=0\\n" >&2' \
-    '    printf "stmt 0 kind=Goto expr=-1\\nstmt 1 kind=Label name=done\\nstmt 2 kind=If expr=-1\\nstmt 3 kind=For expr=-1\\nexpr 0 kind=Cast lhs=-1\\nexpr 1 kind=Cast lhs=-1\\nexpr 2 kind=Sequence lhs=-1\\nexpr 3 kind=Literal lhs=-1\\nexpr 4 kind=Literal lhs=-1\\nexpr 5 kind=Literal lhs=-1\\nexpr 6 kind=Literal lhs=-1\\nexpr 7 kind=Literal lhs=-1\\nexpr 8 kind=Literal lhs=-1\\nexpr 9 kind=Literal lhs=-1\\n" >&2' \
+    '    printf "counts exprs=10 stmts=4 switch_cases=0 functions=1 globals=0 labels=1\\n" >&2' \
+    '    printf "function 0 body=-1\\n" >&2' \
+    '    printf "stmt 0 kind=Goto expr=-1 aux=0\\nstmt 1 kind=Label expr=3 aux=0 name=done\\nstmt 2 kind=If expr=7 aux=1 aux2=-1\\nstmt 3 kind=For expr=8 children_start=-1 aux=1 aux2=-1\\nexpr 0 kind=Cast lhs=3\\nexpr 1 kind=Cast lhs=4\\nexpr 2 kind=Sequence lhs=5 rhs=6\\nexpr 3 kind=Integer lhs=-1\\nexpr 4 kind=Integer lhs=-1\\nexpr 5 kind=Integer lhs=-1\\nexpr 6 kind=Integer lhs=-1\\nexpr 7 kind=Integer lhs=-1\\nexpr 8 kind=Integer lhs=-1\\nexpr 9 kind=Integer lhs=-1\\n" >&2' \
     'fi' \
     'printf "rewrite-stats redundant_casts=2 identity_binaries=0 integer_folds=0 constant_conditions=0 boolean_predicates=0 conditional_prunes=0\\n" >&2' \
     > "$fake_translator"
@@ -48,6 +49,8 @@ rg -q '^ir_loop_nodes: 1$' "$report_file"
 rg -q '^ir_cast_nodes_per_1000_ir_exprs: 200\.000$' "$report_file"
 rg -q '^ir_sequence_nodes_per_1000_ir_exprs: 100\.000$' "$report_file"
 rg -q '^ir_control_nodes_per_function: 2\.000$' "$report_file"
+rg -q '^ir_functions_with_bodies: 0$' "$report_file"
+rg -q '^ir_expr_nodes_per_function_mean: n/a$' "$report_file"
 rg -q '^rendered_text_pressure_metrics: heuristic' "$report_file"
 rg -q '^acceptance_selected_cases: 2$' "$report_file"
 rg -q '^acceptance_results_complete: true$' "$report_file"
@@ -65,6 +68,7 @@ rg -q '^rendered_lines_per_ir_function: n/a$' "$report_file"
 rg -q '^ir_goto_label_nodes_per_100_ir_functions: n/a$' "$report_file"
 rg -q '^ir_cast_nodes_per_1000_ir_exprs: n/a$' "$report_file"
 rg -q '^ir_control_nodes_per_function: n/a$' "$report_file"
+rg -q '^ir_functions_with_bodies: 0$' "$report_file"
 
 if QUALITY_BAD_IR_HEADER=1 ELISA_TRANSLATOR_BIN="$fake_translator" \
     sh "$root_dir/scripts/quality_report.sh" "$source_file" "$output_file" \
@@ -111,5 +115,7 @@ if python3 "$root_dir/scripts/quality_coverage.py" "$coverage_file" > /dev/null 
     echo "quality coverage accepted an unknown outcome" >&2
     exit 1
 fi
+
+python3 "$root_dir/scripts/test_quality_ir_metrics.py"
 
 echo "quality-report tests passed (IR-normalized pressure and acceptance coverage)"
