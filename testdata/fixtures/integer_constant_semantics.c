@@ -58,6 +58,63 @@ static unsigned long long u64_bitwise_not(void)
     return ~0ULL;
 }
 
+static unsigned long long u64_unary_negation(void)
+{
+    return -1ULL;
+}
+
+static unsigned long long u64_bitwise_and_high(void)
+{
+    return 0xffffffffffffffffULL & 0x8000000000000000ULL;
+}
+
+static unsigned long long u64_bitwise_or_high(void)
+{
+    return 0x8000000000000000ULL | 1ULL;
+}
+
+static unsigned long long u64_bitwise_xor_high(void)
+{
+    return 0xffffffffffffffffULL ^ 0x8000000000000000ULL;
+}
+
+static unsigned long long u64_divide_high_values(void)
+{
+    return 0xffffffffffffffffULL / 0x8000000000000000ULL;
+}
+
+static unsigned long long u64_remainder_high_values(void)
+{
+    return 0xffffffffffffffffULL % 0x8000000000000000ULL;
+}
+
+static unsigned long long u64_cast_u32_value(void)
+{
+    return (unsigned long long)0x80000000U;
+}
+
+static unsigned char u64_to_u8_target_conversion(void)
+{
+    return (unsigned char)0x8000000000000001ULL;
+}
+
+static unsigned short u64_to_u16_target_conversion(void)
+{
+    return (unsigned short)0x8000000000000001ULL;
+}
+
+static unsigned int u64_to_u32_target_conversion(void)
+{
+    return (unsigned int)0xffffffffffffffffULL;
+}
+
+static int u64_high_order_relations(void)
+{
+    return 0x8000000000000000ULL <= 0xffffffffffffffffULL &&
+           0xffffffffffffffffULL >= 0x8000000000000000ULL &&
+           0xffffffffffffffffULL != 0x7fffffffffffffffULL;
+}
+
 static int u64_high_values_compare_unsigned(void)
 {
     return 0xffffffffffffffffULL > 1ULL &&
@@ -73,6 +130,11 @@ static unsigned long long u64_cast_negative(void)
 static long long i64_multiply_without_overflow(void)
 {
     return 3037000499LL * 3037000499LL;
+}
+
+static long long i64_minimum_value(void)
+{
+    return -9223372036854775807LL - 1LL;
 }
 
 static long long i64_divide_negative(void)
@@ -165,9 +227,21 @@ int main(void)
                    u64_divide() == 0x7fffffffffffffffULL &&
                    u64_remainder() == 1ULL &&
                    u64_bitwise_not() == 0xffffffffffffffffULL &&
+                   u64_unary_negation() == 0xffffffffffffffffULL &&
+                   u64_bitwise_and_high() == 0x8000000000000000ULL &&
+                   u64_bitwise_or_high() == 0x8000000000000001ULL &&
+                   u64_bitwise_xor_high() == 0x7fffffffffffffffULL &&
+                   u64_divide_high_values() == 1ULL &&
+                   u64_remainder_high_values() == 0x7fffffffffffffffULL &&
+                   u64_cast_u32_value() == 0x80000000ULL &&
+                   u64_to_u8_target_conversion() == 1u &&
+                   u64_to_u16_target_conversion() == 1u &&
+                   u64_to_u32_target_conversion() == 0xffffffffu &&
+                   u64_high_order_relations() &&
                    u64_high_values_compare_unsigned() &&
                    u64_cast_negative() == 0xffffffffffffffffULL &&
                    i64_multiply_without_overflow() == 9223372030926249001LL &&
+                   i64_minimum_value() == (-9223372036854775807LL - 1LL) &&
                    i64_divide_negative() == -3074457345618258602LL &&
                    i64_remainder_negative() == -1LL &&
                    u64_to_i64_target_conversion() == -1LL &&

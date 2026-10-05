@@ -236,8 +236,19 @@ process groups. Each is limited to 2 GiB aggregate resident memory and a
 `ELISA_TRANSLATOR_BUILD_MAX_RSS_KB` and
 `ELISA_TRANSLATOR_BUILD_TIMEOUT_SECONDS`. The test driver reports the measured
 process-group peak and terminates only the group it launched if a limit is
-exceeded. This is a build-process bound, not a cap on the whole test suite or
-on the operating system's total memory use.
+exceeded. Direct translator, Elisa compiler, Clang and Clang++ invocations in
+the sourced suites are also run with per-tool process-group RSS and deadline
+limits. Compiler-bearing Python integration probes run as bounded process
+groups, covering the harness and its nested compiler processes together. These
+limits are configurable with `ELISA_TEST_TRANSLATOR_*`, `ELISA_TEST_ELISA_*`,
+`ELISA_TEST_NATIVE_*`, and `ELISA_TEST_PYTHON_PROBE_*` settings. On macOS the
+canonical test driver defaults to requiring more than 60% host free memory
+before launching each bounded stage and stops its owned group if memory falls
+to that floor; override the floor with `ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`.
+Successful per-command telemetry stays off captured compiler output so
+diagnostics and typed-IR fixtures remain deterministic; failures and limit
+breaches retain resource details. These are process-group bounds, not a cap on
+the operating system's total memory use.
 
 Focused checks are available with `--suite fixtures`, `--suite projects`,
 `--suite control-flow`, or `--suite upstream`. Add `--reuse-build` to reuse

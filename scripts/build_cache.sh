@@ -27,3 +27,16 @@ translator_build_cache_write() {
         return 1
     fi
 }
+
+# Bind compatibility metadata to the translator build cache. A compiler-pair
+# or validation-status change must make an old translator build ineligible for
+# reuse, even when its Elisa sources are unchanged.
+translator_build_cache_inputs_fingerprint() {
+    [ "$#" -eq 2 ] || return 2
+    translator_cache_source_fingerprint=$1
+    translator_cache_compatibility_manifest=$2
+    [ -f "$translator_cache_compatibility_manifest" ] || return 1
+    translator_cache_compatibility_hash=$(hash_file "$translator_cache_compatibility_manifest") || return 1
+    printf 'source_fingerprint=%s\ncompatibility_manifest_sha256=%s\n' \
+        "$translator_cache_source_fingerprint" "$translator_cache_compatibility_hash" | hash_stream
+}

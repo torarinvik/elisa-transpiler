@@ -5,7 +5,7 @@ root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root_dir"
 
 if [ "$(uname -s)" = Darwin ]; then
-    ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT=${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-41}
+    ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT=${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-60}
     export ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT
 fi
 
@@ -59,8 +59,10 @@ esac
 
 sh scripts/check_source_line_limits.sh
 sh scripts/test_build_cache.sh
+sh scripts/test_quality_report.sh
 sh scripts/test_test_support.sh
 python3 scripts/test_fixture_manifest.py
+python3 scripts/test_compiler_compatibility.py
 python3 scripts/test_run_bounded_process.py
 sh scripts/test_ensure_local_stdlib_link.sh
 
@@ -224,11 +226,21 @@ translator_run_bounded() {
     fi
 }
 
+# Integration probes launch Clang, the translator, and sometimes the selected
+# Elisa compiler as ordinary subprocesses. Bound the entire probe process group
+# so its Python parent and every inherited child share one RSS/footprint budget.
+test_python_probe_bounded() {
+    test_run_bounded_process \
+        "${ELISA_TEST_PYTHON_PROBE_MAX_RSS_KB:-4194304}" \
+        "${ELISA_TEST_PYTHON_PROBE_TIMEOUT_SECONDS:-600}" \
+        python3 "$@"
+}
+
 compute_translator_inputs_fingerprint() {
     clang_path=$(command -v clang || true)
     [ -n "$clang_path" ] || { echo "clang is required to build the translator" >&2; return 2; }
     std_root=$stage1_stdlib
-    {
+    source_fingerprint=$({
         printf '%s\n' "platform=$(uname -s)/$(uname -m)" \
             'elisa_flags=-emit obj -O0' \
             'link_flags=clang -Wl,-dead_strip -lm' \
@@ -254,7 +266,9 @@ compute_translator_inputs_fingerprint() {
             printf 'source=%s\n' "$source_file"
             hash_file "$source_file"
         done
-    } | hash_stream
+    } | hash_stream)
+    translator_build_cache_inputs_fingerprint \
+        "$source_fingerprint" "$root_dir/docs/compiler_compatibility.json"
 }
 
 translator_path=build/elisa-c-transpiler
@@ -300,16 +314,19 @@ else
         "$translator_inputs_fingerprint" "$translator_binary_fingerprint"
 fi
 
-sh scripts/test_clang_failure.sh
-python3 scripts/test_clang_timeout.py "$translator_path"
-python3 scripts/test_ast_depth.py "$translator_path"
-python3 scripts/test_metamorphic.py "$translator_path"
-python3 scripts/test_decl_dependency_closure.py "$translator_path"
-python3 scripts/test_inline_dependency_closure.py "$translator_path" "$elisa_bin" "$elisa_runtime"
-python3 scripts/test_template_specialization_closure.py "$translator_path" "$elisa_bin" "$elisa_runtime"
-python3 scripts/test_transitive_decl_closure.py "$translator_path" "$elisa_bin"
-python3 scripts/test_unqualified_cpp_layout.py "$translator_path" "$elisa_bin"
-python3 scripts/test_missing_decl_dependency.py "$translator_path"
+test_run_bounded_process \
+    "${ELISA_TEST_PYTHON_PROBE_MAX_RSS_KB:-4194304}" \
+    "${ELISA_TEST_PYTHON_PROBE_TIMEOUT_SECONDS:-600}" \
+    sh scripts/test_clang_failure.sh
+test_python_probe_bounded scripts/test_clang_timeout.py "$translator_path"
+test_python_probe_bounded scripts/test_ast_depth.py "$translator_path"
+test_python_probe_bounded scripts/test_metamorphic.py "$translator_path"
+test_python_probe_bounded scripts/test_decl_dependency_closure.py "$translator_path"
+test_python_probe_bounded scripts/test_inline_dependency_closure.py "$translator_path" "$elisa_bin" "$elisa_runtime"
+test_python_probe_bounded scripts/test_template_specialization_closure.py "$translator_path" "$elisa_bin" "$elisa_runtime"
+test_python_probe_bounded scripts/test_transitive_decl_closure.py "$translator_path" "$elisa_bin"
+test_python_probe_bounded scripts/test_unqualified_cpp_layout.py "$translator_path" "$elisa_bin"
+test_python_probe_bounded scripts/test_missing_decl_dependency.py "$translator_path"
 
 case "$test_suite" in
     all|fixtures)
@@ -361,9 +378,41 @@ esac
 # stage0 path has an empty runtime override and therefore keeps its historical
 # profile-hook behavior.
 elisa_host_clang=$(command -v clang)
+elisa_host_clangxx=$(command -v clang++ || true)
+
+test_elisa_compiler_path=$elisa_bin
+test_translator_compiler_path=${ELISA_TRANSLATOR_BIN:-$translator_path}
+test_elisa_bounded() {
+    test_run_bounded_process \
+        "${ELISA_TEST_ELISA_MAX_RSS_KB:-4194304}" \
+        "${ELISA_TEST_ELISA_TIMEOUT_SECONDS:-300}" \
+        "$test_elisa_compiler_path" "$@"
+}
+
+test_translator_bounded() {
+    test_run_bounded_process \
+        "${ELISA_TEST_TRANSLATOR_MAX_RSS_KB:-2097152}" \
+        "${ELISA_TEST_TRANSLATOR_TIMEOUT_SECONDS:-300}" \
+        "$test_translator_compiler_path" "$@"
+}
+
+test_clangxx_bounded() {
+    if [ -z "$elisa_host_clangxx" ]; then
+        echo "clang++ is required by the selected translator test suite" >&2
+        return 127
+    fi
+    test_run_bounded_process \
+        "${ELISA_TEST_NATIVE_MAX_RSS_KB:-1572864}" \
+        "${ELISA_TEST_NATIVE_TIMEOUT_SECONDS:-180}" \
+        "$elisa_host_clangxx" "$@"
+}
+
 clang() {
     if [ -z "${elisa_runtime:-}" ]; then
-        "$elisa_host_clang" "$@"
+        test_run_bounded_process \
+            "${ELISA_TEST_NATIVE_MAX_RSS_KB:-1572864}" \
+            "${ELISA_TEST_NATIVE_TIMEOUT_SECONDS:-180}" \
+            "$elisa_host_clang" "$@"
         return
     fi
     elisa_generated_link=0
@@ -373,20 +422,31 @@ clang() {
         [ "$elisa_arg" = "$elisa_runtime" ] && elisa_runtime_present=1
     done
     if [ "$elisa_generated_link" -eq 1 ] && [ "$elisa_runtime_present" -eq 0 ]; then
-        "$elisa_host_clang" "$@" "$elisa_runtime"
+        test_run_bounded_process \
+            "${ELISA_TEST_NATIVE_MAX_RSS_KB:-1572864}" \
+            "${ELISA_TEST_NATIVE_TIMEOUT_SECONDS:-180}" \
+            "$elisa_host_clang" "$@" "$elisa_runtime"
     else
-        "$elisa_host_clang" "$@"
+        test_run_bounded_process \
+            "${ELISA_TEST_NATIVE_MAX_RSS_KB:-1572864}" \
+            "${ELISA_TEST_NATIVE_TIMEOUT_SECONDS:-180}" \
+            "$elisa_host_clang" "$@"
     fi
 }
+
+# The sourced regression scripts call `"$elisa_bin"` directly. After all
+# path validation, fingerprinting, translator setup and Python probes are done,
+# route those compiler invocations through the bounded wrapper.
+elisa_bin=test_elisa_bounded
 
 # These suites are sourced so they share the freshly built translator and the
 # resolved local compiler/toolchain paths above.
 optional_fn_supported=0
 case "$test_suite" in
     all|fixtures|upstream)
-        ./build/elisa-c-transpiler testdata/fixtures/nullable_function_field.c \
+        test_translator_bounded testdata/fixtures/nullable_function_field.c \
             > build/nullable_function_field.generated.elisa
-        if "$elisa_bin" -emit obj -O0 -o build/nullable_function_field.generated.o \
+        if test_elisa_bounded -emit obj -O0 -o build/nullable_function_field.generated.o \
             build/nullable_function_field.generated.elisa >/dev/null \
             2>build/nullable_function_field.probe.err; then
             optional_fn_supported=1

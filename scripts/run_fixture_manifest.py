@@ -24,6 +24,14 @@ OUTCOMES = ("passed", "failed", "timed_out", "crashed", "resource_limited", "mon
 PROCESS_POLL_SECONDS = 0.02
 DEFAULT_STAGE_OUTPUT_BYTES = 64 * 1024 * 1024
 SYSTEM_MEMORY_SAMPLE_SECONDS = 1.0
+FEATURE_FAMILIES = frozenset({
+    "abi", "arrays", "basic_translation", "control_flow", "cpp_c_subset",
+    "cpp_overloads", "effects", "enums", "evaluation_order", "expressions",
+    "floating_point", "function_pointers", "idiomatic_rewrites",
+    "initialization", "integer_semantics", "namespaces", "nullability",
+    "operators", "pointers", "qualifiers", "records", "recursion",
+    "runtime_parity", "typedefs", "variadics",
+})
 
 
 class ManifestError(Exception):
@@ -314,12 +322,13 @@ def stage_failure_outcome(stage_result, stage_name, stderr):
     return "failed"
 
 
-def run_case(case, arguments):
+def run_case(case, arguments, feature_families=None):
     name = case["name"]
+    feature_families = list(feature_families or [])
     if case.get("skip_reason"):
         if not case.get("optional", False):
             raise ManifestError("case %s has skip_reason but is not marked optional" % name)
-        result = {"name": name, "status": "skipped", "skip_reason": case["skip_reason"], "stages": []}
+        result = {"name": name, "feature_families": feature_families, "status": "skipped", "skip_reason": case["skip_reason"], "stages": []}
         atomic_json(arguments.output_dir / name / "result.json", result)
         print("SKIP %s: %s" % (name, result["skip_reason"]))
         return result
@@ -348,7 +357,7 @@ def run_case(case, arguments):
     }
     stages = []
     checks = []
-    result = {"name": name, "source": str(source), "status": "failed", "stages": stages, "checks": checks}
+    result = {"name": name, "source": str(source), "feature_families": feature_families, "status": "failed", "stages": stages, "checks": checks}
 
     def execute(stage_name, command_array):
         argv = substitute_argv(command_array, values, name + "." + stage_name)
@@ -555,6 +564,19 @@ def load_manifest(path):
     names = [case["name"] for case in cases]
     if len(set(names)) != len(names):
         raise ManifestError("every manifest case needs a unique non-empty name")
+    family_map = manifest.get("feature_families", {})
+    if not isinstance(family_map, dict):
+        raise ManifestError("manifest feature_families must be an object")
+    if "feature_families" in manifest and set(family_map) != set(names):
+        raise ManifestError("feature_families must classify every case exactly once")
+    for case_name, families in family_map.items():
+        if not isinstance(families, list) or not families or any(not isinstance(family, str) for family in families):
+            raise ManifestError("feature_families.%s must be a non-empty array of family names" % case_name)
+        if len(set(families)) != len(families):
+            raise ManifestError("feature_families.%s contains duplicate family names" % case_name)
+        unknown_families = set(families) - FEATURE_FAMILIES
+        if unknown_families:
+            raise ManifestError("feature_families.%s has unknown family: %s" % (case_name, ", ".join(sorted(unknown_families))))
     return manifest
 
 
@@ -617,7 +639,8 @@ def main():
             raise ManifestError("--default-timeout-seconds must be finite and positive")
         if arguments.max_rss_kb is not None and os.name != "posix":
             raise ManifestError("--max-rss-kb requires POSIX process groups")
-        results = [run_case(cases_by_name[name], arguments) for name in selected]
+        feature_families = manifest.get("feature_families", {})
+        results = [run_case(cases_by_name[name], arguments, feature_families.get(name, [])) for name in selected]
     except ManifestError as error:
         print("fixture manifest error: %s" % error, file=sys.stderr)
         return 2

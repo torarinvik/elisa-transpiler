@@ -77,18 +77,21 @@ extend CTranslator:
         return false
 
     def append_i64(out: mutable darray[u8]&, value: i64) -> void:
-        magnitude: mutable i64 = value
-        if magnitude < 0:
+        negative: bool = value < 0
+        magnitude: mutable u64 = value.u64()
+        if negative:
             out.push(45)
-            magnitude <- 0 - magnitude
+            # Negate in the unsigned domain so INT64_MIN, whose positive
+            # magnitude is not representable as i64, formats without overflow.
+            magnitude <- 0.u64() - magnitude
         if magnitude == 0:
             out.push(48)
             return
         digits: mutable i64[24] = zeroed
         count: mutable i64 = 0
         while magnitude > 0 |magnitude, digits, count|:
-            digits[count] <- magnitude % 10
-            magnitude <- magnitude / 10
+            digits[count] <- (magnitude % 10.u64()).i64()
+            magnitude <- magnitude / 10.u64()
             count <- count + 1
         for index in 0..<count |out, digits, count|:
             out.push((digits[count - index - 1] + 48).u8())

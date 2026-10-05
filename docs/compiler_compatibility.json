@@ -1,0 +1,53 @@
+{
+  "schema": "elisa-transpiler-compiler-compatibility-v1",
+  "recorded_at": "2026-10-05",
+  "target": "arm64-apple-darwin27.0.0",
+  "compiler_pair": {
+    "stage0": {
+      "repository": "Elisa-core",
+      "worktree": "../elisa-transpiler-worktrees/stage0-latest",
+      "source_revision": "11858f2e6347b63cb4e9bf674f299471d2f3404f",
+      "source_worktree_clean": true,
+      "source_freshness_verified": false,
+      "executable": {
+        "path": "compiler/bin/elisac-local",
+        "sha256": "15254cdbf96c981b0c0cc31a65b95357761801aee2db08884e5a05b76c9c89a3",
+        "artifact_source_revision": "6a0628cc48a7e019ed023c835b379fb55522ff1e"
+      }
+    },
+    "stage1": {
+      "repository": "Elisa-compiler",
+      "worktree": "../elisa-transpiler-worktrees/transpiler",
+      "source_revision": "2691a64c7522c94eee0d5b0b930d1995c7376a3c",
+      "source_worktree_clean": true,
+      "source_freshness_verified": false,
+      "artifact_build_recipe_sha256": "e0967a96814e4810869032da1a65cc190868ea4c9e65ca5cf52da989cdd04a16",
+      "executable": {
+        "path": "bin/elisac-stage1",
+        "sha256": "f7d4dc3c2a2a126da19723abdcd806bf99f08a71cc8bf15a35c2f508e2e19b9d",
+        "artifact_source_revision": "8e08cd3397b1680c61bfb76b70e1a76541522e3d"
+      },
+      "runtime": {
+        "path": "build/runtime/elisacore_runtime.o",
+        "sha256": "b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897",
+        "artifact_source_revision": "8e08cd3397b1680c61bfb76b70e1a76541522e3d"
+      },
+      "artifact_source_tree_sha256": "9d770f8f11c09e19f4ad49801f1a5b473dede17c25fed4f9e1cb06ac1de29f5e",
+      "bootstrap_reproduced_from_stage0": false
+    }
+  },
+  "translator_validation": {
+    "status": "pending",
+    "current_translator_sources_verified": false,
+    "compiler_products_current": false,
+    "compiler_product_state": "Stage0 source is at 11858f2e while its executable is from 6a0628cc; Stage1 source is at 2691a64c while its executable and runtime are from 8e08cd33.",
+    "reason": "The current translator worktree contains uncommitted changes, including the signed-64-bit integer formatter fix. It has not yet been rebuilt and its fixture behavior has not been rerun against this compiler pair.",
+    "required_checks": [
+      "Rebuild Stage0 and Stage1 from the current isolated source revisions and update artifact provenance only after successful bounded builds.",
+      "Build the translator from the current source with the pinned local compiler and matching runtime.",
+      "Run focused integer-constant and core fixtures, then the serial acceptance manifest.",
+      "Record build hashes, test results, and any skips or failures in docs/execution_status.md."
+    ]
+  },
+  "update_policy": "Update compiler revisions and artifact hashes only from the isolated compiler worktrees. Mark translator validation verified only after the current translator source fingerprint, fresh build, and required tests are recorded; never infer behavior compatibility from compiler freshness alone."
+}

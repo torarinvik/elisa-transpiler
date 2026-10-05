@@ -60,9 +60,9 @@ def run_arguments(output_dir, timeout=None, max_rss_kb=None):
 
 
 class FixtureManifestRunnerTests(unittest.TestCase):
-    def run_case_quietly(self, case, output_dir):
+    def run_case_quietly(self, case, output_dir, feature_families=None):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return RUNNER.run_case(case, run_arguments(output_dir))
+            return RUNNER.run_case(case, run_arguments(output_dir), feature_families)
 
     def test_captures_both_streams_and_accepts_nonzero_exit(self):
         with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
@@ -204,9 +204,24 @@ class FixtureManifestRunnerTests(unittest.TestCase):
     def test_optional_skip_is_reported(self):
         with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
             case = {"name": "optional", "optional": True, "skip_reason": "compiler capability unavailable"}
-            result = self.run_case_quietly(case, Path(temporary))
+            result = self.run_case_quietly(case, Path(temporary), ["pointers", "abi"])
             self.assertEqual(result["status"], "skipped")
             self.assertEqual(result["skip_reason"], "compiler capability unavailable")
+            self.assertEqual(result["feature_families"], ["pointers", "abi"])
+
+    def test_completed_result_keeps_feature_family_metadata(self):
+        with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
+            result = self.run_case_quietly(base_case(), Path(temporary), ["integer_semantics"])
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["feature_families"], ["integer_semantics"])
+
+    def test_acceptance_manifest_classifies_every_case_by_known_family(self):
+        manifest = RUNNER.load_manifest(ROOT / "testdata" / "fixtures" / "acceptance_manifest.json")
+        case_names = {case["name"] for case in manifest["cases"]}
+        self.assertEqual(set(manifest["feature_families"]), case_names)
+        self.assertIn("pointers", manifest["feature_families"]["c_void_pointer_boundaries"])
+        self.assertIn("abi", manifest["feature_families"]["c_void_pointer_boundaries"])
+        self.assertTrue(all(manifest["feature_families"].values()))
 
     def test_invalid_manifest_shapes_are_reported_cleanly(self):
         invalid_manifests = (
@@ -214,6 +229,8 @@ class FixtureManifestRunnerTests(unittest.TestCase):
             {"schema_version": 1, "cases": [dict(base_case(), name="../escape")]},
             {"schema_version": 1, "cases": [dict(base_case(), timeout_seconds=0)]},
             {"schema_version": 1, "cases": [dict(base_case(), expected_exit_code=True)]},
+            {"schema_version": 1, "cases": [base_case()], "feature_families": {"runner_self_test": ["unknown"]}},
+            {"schema_version": 1, "cases": [base_case()], "feature_families": {}},
         )
         with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
             manifest_path = Path(temporary) / "invalid.json"

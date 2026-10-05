@@ -3,7 +3,7 @@
 # calls add_one, so it exercises project function state after the first
 # translation-unit region has been reclaimed.
 mkdir -p build/project-db
-./build/elisa-c-transpiler --compile-commands testdata/fixtures/compile_commands.json \
+test_translator_bounded --compile-commands testdata/fixtures/compile_commands.json \
     --output-dir build/project-db
 rg -q 'include "module_a.elisa"' build/project-db/elisa_project.elisa
 rg -q 'include "other.module_a.elisa"' build/project-db/elisa_project.elisa
@@ -22,12 +22,12 @@ set -e
 # by the previous translator manifest; an unrelated file in the same directory
 # must survive unchanged.
 mkdir -p build/project-obsolete
-./build/elisa-c-transpiler --compile-commands testdata/fixtures/compile_commands.json \
+test_translator_bounded --compile-commands testdata/fixtures/compile_commands.json \
     --output-dir build/project-obsolete
 test -e build/project-obsolete/module_a.elisa
 test -e build/project-obsolete/module_b.elisa
 touch build/project-obsolete/user-owned.elisa
-./build/elisa-c-transpiler --output-dir build/project-obsolete testdata/fixtures/simple.c
+test_translator_bounded --output-dir build/project-obsolete testdata/fixtures/simple.c
 test -e build/project-obsolete/simple.elisa
 test ! -e build/project-obsolete/module_a.elisa
 test ! -e build/project-obsolete/module_b.elisa
@@ -36,7 +36,7 @@ test -e build/project-obsolete/user-owned.elisa
 
 # C++20's unordered_map::contains is supplied by the translator-owned cpp
 # adapter; keep the language standard from the compilation database intact.
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --max-frontend-output-bytes 268435456 \
     --compile-commands testdata/fixtures/cpp_unordered_map_contains_compile_commands.json \
     --output-dir build
@@ -47,7 +47,7 @@ rg -q 'values\.contains\(8\)' build/cpp_unordered_map_contains.elisa
 ! rg -q '^def elisa_nonnull' build/elisa_project.elisa
 ! rg -q '^def elisa_nonnull_readonly' build/elisa_project.elisa
 ! rg -q '^extern va_list' build/elisa_project.elisa
-clang++ -std=c++20 testdata/fixtures/cpp_unordered_map_contains.cpp \
+test_clangxx_bounded -std=c++20 testdata/fixtures/cpp_unordered_map_contains.cpp \
     -o build/cpp_unordered_map_contains.native
 ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh" \
     -emit exe -O0 -o build/cpp_unordered_map_contains.generated \
@@ -64,7 +64,7 @@ set -e
 # of the translator's repository-relative cpp_lib wrapper. Copy the generated
 # Elisa project away from the translator output directory and compile it there.
 mkdir -p build/cpp-relocatable-support build/cpp-relocatable-moved
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --max-frontend-output-bytes 268435456 \
     --cpp-lib-dir "$root_dir/cpp_lib" \
     --elisa-std-dir "$stage1_worktree/elisacore_std" \
@@ -81,10 +81,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/cpp-relocatable-moved/generated
 
 mkdir -p build/project-identity build/project-identity-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_identity_compile_commands.json \
     --output-dir build/project-identity
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_identity_compile_commands_reversed.json \
     --output-dir build/project-identity-reversed
 rg -o --no-filename '^include "(part|symbol-unit|symbol_unit)_[0-9]+\.elisa"$' \
@@ -128,10 +128,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-identity-reversed/generated
 
 mkdir -p build/project-internal-linkage build/project-internal-linkage-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_internal_linkage_compile_commands.json \
     --output-dir build/project-internal-linkage
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_internal_linkage_compile_commands_reversed.json \
     --output-dir build/project-internal-linkage-reversed
 internal_symbols=$(rg -o --no-filename '__elisa_internal_[0-9]+_helper__arity_1__type_[0-9]+' \
@@ -178,10 +178,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-internal-linkage-reversed/generated
 
 mkdir -p build/project-anonymous-namespace build/project-anonymous-namespace-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_anonymous_namespace_compile_commands.json \
     --output-dir build/project-anonymous-namespace
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_anonymous_namespace_compile_commands_reversed.json \
     --output-dir build/project-anonymous-namespace-reversed
 anonymous_function_symbols=$(rg -o --no-filename '__elisa_internal_[0-9]+_helper__arity_1__type_[0-9]+' \
@@ -204,7 +204,7 @@ rg -o --no-filename '^global mutable __elisa_internal_[0-9]+_project_anonymous_s
 [ "$(wc -l < build/project-anonymous-namespace/internal-globals.sorted | tr -d ' ')" -eq 2 ]
 cmp build/project-anonymous-namespace/internal-globals.sorted \
     build/project-anonymous-namespace-reversed/internal-globals.sorted
-clang++ -std=c++17 \
+test_clangxx_bounded -std=c++17 \
     testdata/fixtures/project_anonymous_namespace/alpha.cpp \
     testdata/fixtures/project_anonymous_namespace/beta.cpp \
     testdata/fixtures/project_anonymous_namespace/main.cpp \
@@ -220,10 +220,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-anonymous-namespace-reversed/generated
 
 mkdir -p build/project-cpp-overloads build/project-cpp-overloads-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_cpp_overloads_compile_commands.json \
     --output-dir build/project-cpp-overloads
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_cpp_overloads_compile_commands_reversed.json \
     --output-dir build/project-cpp-overloads-reversed
 cmp build/project-cpp-overloads/elisa_project.elisa build/project-cpp-overloads-reversed/elisa_project.elisa
@@ -237,7 +237,7 @@ rg -q '^def project_choose\(value: i64\) -> i32' build/project-cpp-overloads/alp
 ! rg -q '^export fn .* = project_choose$' build/project-cpp-overloads/alpha.elisa
 [ "$(rg -o --no-filename '^extern __c_external_project_choose__abi_[0-9]+' build/project-cpp-overloads/main.elisa | wc -l | tr -d ' ')" -eq 3 ]
 rg -q '__c_external_project_choose__abi_[0-9]+\(\(small\)\.i32\(\)\)' build/project-cpp-overloads/main.elisa
-clang++ -std=c++17 \
+test_clangxx_bounded -std=c++17 \
     testdata/fixtures/project_cpp_overloads/alpha.cpp \
     testdata/fixtures/project_cpp_overloads/main.cpp \
     -o build/project-cpp-overloads/native
@@ -252,10 +252,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-cpp-overloads-reversed/generated
 
 mkdir -p build/project-cpp-internal-const build/project-cpp-internal-const-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_cpp_internal_const_compile_commands.json \
     --output-dir build/project-cpp-internal-const
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_cpp_internal_const_compile_commands_reversed.json \
     --output-dir build/project-cpp-internal-const-reversed
 cmp build/project-cpp-internal-const/elisa_project.elisa build/project-cpp-internal-const-reversed/elisa_project.elisa
@@ -285,10 +285,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-cpp-internal-const-reversed/generated
 
 mkdir -p build/project-external-declarations build/project-external-declarations-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_declarations_compile_commands.json \
     --output-dir build/project-external-declarations
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_declarations_compile_commands_reversed.json \
     --output-dir build/project-external-declarations-reversed
 cmp build/project-external-declarations/elisa_project.elisa build/project-external-declarations-reversed/elisa_project.elisa
@@ -316,10 +316,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-external-declarations-reversed/generated
 
 mkdir -p build/project-external-objects build/project-external-objects-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_objects_compile_commands.json \
     --output-dir build/project-external-objects
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_objects_compile_commands_reversed.json \
     --output-dir build/project-external-objects-reversed
 cmp build/project-external-objects/elisa_project.elisa build/project-external-objects-reversed/elisa_project.elisa
@@ -340,10 +340,10 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-external-objects-reversed/generated
 
 mkdir -p build/project-extern-initializer build/project-extern-initializer-reversed
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_extern_initializer_compile_commands.json \
     --output-dir build/project-extern-initializer
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_extern_initializer_compile_commands_reversed.json \
     --output-dir build/project-extern-initializer-reversed
 cmp build/project-extern-initializer/elisa_project.elisa build/project-extern-initializer-reversed/elisa_project.elisa
@@ -365,12 +365,12 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 
 mkdir -p build/project-duplicate-extern-definition build/project-duplicate-extern-definition-reversed
 set +e
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_duplicate_extern_definition_compile_commands.json \
     --output-dir build/project-duplicate-extern-definition \
     > build/project-duplicate-extern-definition.stdout 2> build/project-duplicate-extern-definition.stderr
 duplicate_extern_definition_rc=$?
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_duplicate_extern_definition_compile_commands_reversed.json \
     --output-dir build/project-duplicate-extern-definition-reversed \
     > build/project-duplicate-extern-definition-reversed.stdout 2> build/project-duplicate-extern-definition-reversed.stderr
@@ -387,12 +387,12 @@ rg -q 'duplicate-external-object-definition' build/project-duplicate-extern-defi
 
 mkdir -p build/project-external-object-conflict build/project-external-object-conflict-reversed
 set +e
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_object_conflict_compile_commands.json \
     --output-dir build/project-external-object-conflict \
     > build/project-external-object-conflict.stdout 2> build/project-external-object-conflict.stderr
 external_object_conflict_rc=$?
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_object_conflict_compile_commands_reversed.json \
     --output-dir build/project-external-object-conflict-reversed \
     > build/project-external-object-conflict-reversed.stdout 2> build/project-external-object-conflict-reversed.stderr
@@ -409,12 +409,12 @@ rg -q 'incompatible-external-object-declaration' build/project-external-object-c
 
 mkdir -p build/project-external-object-array-conflict build/project-external-object-array-conflict-reversed
 set +e
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_object_array_conflict_compile_commands.json \
     --output-dir build/project-external-object-array-conflict \
     > build/project-external-object-array-conflict.stdout 2> build/project-external-object-array-conflict.stderr
 external_object_array_conflict_rc=$?
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_object_array_conflict_compile_commands_reversed.json \
     --output-dir build/project-external-object-array-conflict-reversed \
     > build/project-external-object-array-conflict-reversed.stdout 2> build/project-external-object-array-conflict-reversed.stderr
@@ -431,12 +431,12 @@ rg -q 'incompatible-external-object-declaration' build/project-external-object-a
 
 mkdir -p build/project-external-conflict build/project-external-conflict-reversed
 set +e
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_conflict_compile_commands.json \
     --output-dir build/project-external-conflict \
     > build/project-external-conflict.stdout 2> build/project-external-conflict.stderr
 external_conflict_rc=$?
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_conflict_compile_commands_reversed.json \
     --output-dir build/project-external-conflict-reversed \
     > build/project-external-conflict-reversed.stdout 2> build/project-external-conflict-reversed.stderr
@@ -453,12 +453,12 @@ rg -q 'incompatible-external-function-declaration' build/project-external-confli
 
 mkdir -p build/project-external-pointee-conflict build/project-external-pointee-conflict-reversed
 set +e
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_declaration_qualifiers_compile_commands.json \
     --output-dir build/project-external-pointee-conflict \
     > build/project-external-pointee-conflict.stdout 2> build/project-external-pointee-conflict.stderr
 external_pointee_conflict_rc=$?
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/project_external_declaration_qualifiers_compile_commands_reversed.json \
     --output-dir build/project-external-pointee-conflict-reversed \
     > build/project-external-pointee-conflict-reversed.stdout 2> build/project-external-pointee-conflict-reversed.stderr
@@ -474,7 +474,7 @@ rg -q 'incompatible-external-function-declaration' build/project-external-pointe
 [ ! -e build/project-external-pointee-conflict-reversed/elisa_project.elisa ]
 
 set +e
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --output-dir build/project-duplicate-identity-guard \
     testdata/fixtures/project_identity/a/part.c \
     testdata/fixtures/project_identity/a/../a/part.c \
@@ -488,7 +488,7 @@ rg -q 'indistinguishable stable output identities' build/project-duplicate-ident
 [ ! -e build/project-duplicate-identity-guard/elisa_project.elisa ]
 
 mkdir -p build/project-global-init
-./build/elisa-c-transpiler --compile-commands testdata/fixtures/project_global_init_compile_commands.json \
+test_translator_bounded --compile-commands testdata/fixtures/project_global_init_compile_commands.json \
     --output-dir build/project-global-init
 rg -q '^def elisa_init_project\(\)' build/project-global-init/elisa_project.elisa
 rg -q 'elisa_init_project\(\)' build/project-global-init/project_global_init_main.elisa
@@ -500,7 +500,7 @@ ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh"
 ./build/project-global-init/project
 
 mkdir -p build/project-forward
-./build/elisa-c-transpiler --compile-commands testdata/fixtures/forward_compile_commands.json \
+test_translator_bounded --compile-commands testdata/fixtures/forward_compile_commands.json \
     --output-dir build/project-forward
 rg -q 'include "forward_decl_main.elisa"' build/project-forward/elisa_project.elisa
 rg -q 'include "forward_decl_impl.elisa"' build/project-forward/elisa_project.elisa
@@ -518,7 +518,7 @@ set -e
 [ "$forward_project_generated_rc" -eq 0 ]
 
 mkdir -p build/project-cpp-abi
-./build/elisa-c-transpiler --compile-commands testdata/fixtures/cpp_abi_compile_commands.json \
+test_translator_bounded --compile-commands testdata/fixtures/cpp_abi_compile_commands.json \
     --output-dir build/project-cpp-abi
 rg -q '^@link_name\("_Z7cpp_addii"\)$' build/project-cpp-abi/cpp_abi.elisa
 rg -q '^export fn __c_abi_cpp_add__2' build/project-cpp-abi/cpp_abi.elisa
@@ -532,7 +532,7 @@ set -e
 [ "$cpp_abi_generated_rc" -eq 42 ]
 
 mkdir -p build/project-language-override
-./build/elisa-c-transpiler \
+test_translator_bounded \
     --compile-commands testdata/fixtures/language_override_compile_commands.json \
     --output-dir build/project-language-override
 rg -q '^def main\(\) -> i32' build/project-language-override/language_override.elisa

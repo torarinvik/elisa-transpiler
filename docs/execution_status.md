@@ -5,19 +5,172 @@ feature is not complete merely because a handler exists or translation exits
 successfully; generated Elisa must also be compiled, linked, and exercised
 where applicable.
 
+## Latest isolated compiler source synchronization — products pending safe rebuild — 2026-10-05
+
+The dedicated Stage0 worktree was fast-forwarded from `6a0628cc48a7` to the
+committed Stage0 `main` head `11858f2e6347b63cb4e9bf674f299471d2f3404f`;
+the dedicated Stage1 worktree was fast-forwarded from `8e08cd3397b1` to the
+committed Stage1 `main` head `2691a64c7522c94eee0d5b0b930d1995c7376a3c`.
+Both private worktrees were clean before synchronization and are clean at the
+new revisions. The corresponding main checkouts contain uncommitted edits;
+only their committed heads were incorporated, and those working changes were
+left untouched.
+
+The local Stage0 executable and Stage1 executable/runtime still match the
+previous source revisions (`6a0628cc` and `8e08cd33` respectively). The
+compatibility manifest records both the current source revision and each
+artifact's source revision, marks freshness false, and keeps translator
+validation pending. Do not use these products as current-source verification;
+rebuild Stage0 and Stage1 from the refreshed worktrees, then rebuild the
+translator and rerun focused plus serial acceptance tests.
+
+No compiler was launched for this synchronization. A fresh host sample fell
+to 38% free memory with a Stage0 debug compiler process active; the shared
+Stage1 seed lock was absent, but the 60% build floor was not met. The bounded
+build gate remains closed.
+
+## High-half unsigned narrowing regression — unverified — 2026-10-05
+
+Extended the generic `integer_constant_semantics.c` fixture to cast high-bit
+`uint64_t` constants into `uint8_t`, `uint16_t` and `uint32_t`, and added
+emitted-shape assertions for the expected normalized values. This specifically
+checks modulo-width normalization when the evaluator carries the source value
+as a negative raw `i64` bit pattern. `git diff --check` and the affected shell
+suite's syntax check pass. No native/generated compile or execution result is
+claimed: while checking compiler availability, a separate Stage1 seed held
+the shared build slot and system-wide free memory was 55%, below the test
+driver's 60% floor. The expanded regression remains pending a safe compiler
+window.
+
+## Compiler compatibility provenance and cache invalidation — in progress — 2026-10-05
+
+Added `docs/compiler_compatibility.json` with the isolated Stage0 and Stage1
+source revisions, clean-worktree assertions, executable/runtime SHA-256
+identities, artifact source revisions plus Stage1 build-recipe/source-tree
+hashes, and the target triple. The
+manifest explicitly says current translator-source validation is pending; the
+recent formatter change and acceptance fixtures have not yet been built and
+rerun against this pair. `scripts/test.sh` now folds the manifest hash into
+the translator input fingerprint, and `scripts/test_build_cache.sh` verifies
+that changing the manifest changes that fingerprint. The new three-test
+`scripts/test_compiler_compatibility.py` validates the manifest shape, guards
+against reporting pending validation as verified, and checks the pinned
+revision/cleanliness/artifact hashes when the isolated local worktrees exist.
+The three manifest checks, cache mutation regression, shell syntax, and
+`git diff --check` pass without launching Elisa.
+
+At the implementation snapshot, host free memory was 42% and another Stage1
+seed build held the shared lock, so compiler-backed validation remained
+paused. The manifest is a provenance record for the latest audited local
+compiler worktrees, not a claim of successful Stage0-to-Stage1 reproduction or
+translator behavior compatibility. Fresh snapshots after these small
+self-tests ranged from 34% to 48% free memory; the latest is 36%. The shared
+lock has been repeatedly reacquired by separate compiler tasks. Its current
+owner is live seed-script PID 41020 with Stage0 compiler PID 41114 (about 2.3
+GiB RSS); an unrelated Stage1 build is also active. No compiler process was
+started by this task. The safe-build gate therefore remains closed.
+
+## Quality-report normalization and acceptance coverage — partial — 2026-10-05
+
+Extended `scripts/quality_report.sh` to use an explicitly selected local
+translator (`ELISA_TRANSLATOR_BIN`), normalize generated-text pressure counts
+against typed-IR expression/statement/function counts, and optionally attach
+the fixture runner's outcome summary. Zero denominators print `n/a`; coverage
+reports selected/result totals, whether all selected cases have recorded
+outcomes, pass fraction, and each distinct result category including
+unsupported, skipped, timeout, crash, resource-limit, monitor-error and
+missing-tool counts. The raw emitted-text metrics are explicitly labeled as
+heuristics because patterns inside string literals can still contribute; this
+does not complete the plan item for structural-only measurements or duplicated
+code/unnecessary-local analysis.
+
+Added structural counts from typed-IR record kinds for Cast and Sequence
+expressions, If/For/While/DoWhile/Switch statements, and normalized cast,
+sequence, control-node, and loop-node rates. These use the stable `expr` and
+`stmt` record kinds rather than searching emitted Elisa. The fake-translator
+regression verifies exact structural counts/rates and zero-denominator `n/a`
+output, and demonstrates that IR-lookalike text in generated output can inflate
+the explicitly heuristic text count without changing structural counts.
+`sh scripts/test_quality_report.sh`, shell syntax checks, and
+`git diff --check` pass without invoking Elisa. V03 remains partial: source-text
+pressure scans are still heuristic, and duplicate-code, unnecessary-local,
+null-assertion provenance, and unsafe-scope structural metrics are not yet
+implemented.
+
+The quality reporter now requires the exact `typed-ir-v13` dump header and
+exactly one counts record with each denominator it consumes (`exprs`, `stmts`,
+`switch_cases`, `functions`, and `globals`). Unknown dump versions and absent,
+duplicate, or malformed required count values fail with an explicit error
+instead of silently becoming zero-valued readability measurements. It also
+checks that expression and statement records have sequential indices and that
+their totals match the counts header, rejecting truncated, duplicated, or
+reordered structural input. The fake-translator suite exercises these failure
+cases; these checks validate reporter input integrity and do not replace
+translator/IR correctness tests.
+
+`sh scripts/test_quality_report.sh` passes with a fake translator, checking
+normalization, zero-denominator behavior, outcome reporting and rejection of
+unknown result categories. The acceptance manifest now assigns every case to
+one or more validated semantic families; the runner carries those tags into
+per-case pass/fail/skip records. The coverage reporter also joins an older
+summary to the manifest taxonomy when its saved results predate tag
+propagation, and verifies summary counts agree with result statuses.
+
+Offline analysis of the saved `manifest-unsigned-full` 31-case result (not a
+new compiler run) reports 30/31 overall, ABI 7/8, pointers 7/8, nullability
+2/3, and integer semantics 4/4. The one failed fixture is
+`c_void_pointer_boundaries`, making the failing semantic families visible
+instead of hiding them in the aggregate. `scripts/test_fixture_manifest.py`
+now passes 20 tests, including complete family classification and propagation
+into normal/skipped results; `scripts/test_quality_report.sh` passes the
+family-join and family-rate regression. These tests use no Elisa compiler and
+do not validate fresh real-corpus metrics. The quality test is included in the
+canonical `scripts/test.sh` preflight.
+
 ## Host-wide build safety and Stage1 translator compile — in progress — 2026-10-05
 
 On macOS, `scripts/run_bounded_process.py` can read the system-wide free-memory
 percentage before launch and while an owned process group is running. It
 refuses a preflight at or below the floor, terminates only its owned group if a
 live sample reaches the floor, and fails closed if monitoring is unavailable.
-The default floor is 41%, configurable through
-`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`; the bounded runner itself inherits that
+The local compiler-setup default floor is 41%, while the canonical `test.sh`
+entry point defaults to 60%; both are configurable through
+`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`, and the bounded runner inherits that
 variable when no command-line floor is supplied. Local compiler setup applies
-the same gate to Stage0 builds, Stage1 seeds and runtime builds; `test.sh` also
-gates the translator object/link build, and the manifest runner gates each
-fixture stage. These host limits supplement—not replace—per-process-group RSS,
+the gate to Stage0 builds, Stage1 seeds and runtime builds; `test.sh` gates the
+translator object/link build and the manifest runner gates each fixture stage.
+These host limits supplement—not replace—per-process-group RSS,
 physical-footprint, output and deadline limits.
+
+## Direct shell-suite process bounds — implementation in progress — 2026-10-05
+
+Added a shared `test_run_bounded_process` helper and routed direct translator,
+Elisa compiler, Clang and Clang++ commands in the four sourced shell suites
+through it. Per-tool RSS limits and deadlines are configurable with
+`ELISA_TEST_TRANSLATOR_*`, `ELISA_TEST_ELISA_*` and
+`ELISA_TEST_NATIVE_*`; on macOS they inherit the test driver's 60% free-memory
+floor unless explicitly overridden. `run_bounded_process.py` gained an
+opt-in quiet-success report mode so runner telemetry does not contaminate
+captured typed-IR dumps or successful compiler diagnostics, while nonzero
+commands and limit breaches still report resource evidence. Stage1 shell-driver
+calls retain their existing internal process-group limits.
+
+The compiler-bearing Python integration probes in `test.sh` now run inside an
+aggregate bounded process group as well. This covers each harness's Python
+memory (including captured Clang AST JSON), translator calls, native Clang
+builds and Elisa object compilation together. The cap and deadline are
+configurable via `ELISA_TEST_PYTHON_PROBE_MAX_RSS_KB` and
+`ELISA_TEST_PYTHON_PROBE_TIMEOUT_SECONDS`; a wiring regression fails if a
+compiler-bearing probe is later added to the canonical driver without the
+wrapper. This bounds canonical test runs; running those Python files directly
+still bypasses the outer harness limit.
+
+`sh scripts/test_test_support.sh`, `python3 scripts/test_run_bounded_process.py`,
+shell syntax checks and `git diff --check` pass with fake children. No Elisa
+compiler or translator acceptance command was run for this change: at the
+latest snapshot another compiler process was active and host free memory was
+53%, below the test driver's 60% floor, so the memory-sensitive end-to-end
+suites remain pending.
 
 Validation on 2026-10-05: `scripts/test_run_bounded_process.py` passes 12 tests,
 including environment-default propagation, preflight refusal when the sampler
@@ -33,18 +186,122 @@ bounded run peaked at 313,616 KiB process-group RSS and 284,354 KiB physical
 footprint, with host free memory bottoming at 51%. This compile verifies the
 recent explicit C ABI pointer-erasure boundary in `clang_process.elisa`.
 
+Continuation self-tests on 2026-10-05: `python3 scripts/test_fixture_manifest.py`
+passed all 18 tests, `python3 scripts/test_run_bounded_process.py` passed all
+12 tests, and `sh scripts/test_build_cache.sh` passed its fingerprint/hash/
+executable checks. These tests use fake or small child processes and do not
+exercise Elisa translation. At the latest host snapshot, the shared seed lock
+was absent and no Elisa compiler process was visible, but system free memory
+was 54%, below the 60% floor for the pending source-fresh translator rebuild.
+Subsequent memory samples ranged from 46% to 53%; the latest is 48%, with the
+shared seed lock absent and a separate Docker compiler validation active (PID
+45738). A local Stage0 compile observed immediately beforehand has exited. The
+translator rebuild remains gated until a fresh sample exceeds 60% and no
+competing compiler work is active.
+The next check showed 43% free, no shared seed lock, and an unrelated Linux-host
+Stage1 compile (PID 48039, about 382 MiB RSS). The prior Stage1 processes had
+finished; this new process again leaves the translator rebuild below the safe
+threshold.
+
 The object was then linked against the matching private Stage1 runtime using
 the bounded runner, a 512-MiB RSS cap and a 60% host floor. Linking exited 0;
 the resulting arm64 executable `build/elisa-c-transpiler` has SHA-256
 `8f24c7644167bd5b2c8680d97e0a4b945fb3957c28c54dd38637ea5b30a2b771`. Link
 peak process-group RSS was 2,640 KiB and host free memory remained 75%.
 
-The translator or fixture regressions have not yet been run after that change.
-A separate Stage1 seed (owner PID 55761, verified live) reacquired the shared
-lock immediately after linking. The latest read-only snapshot showed 70% host
-free memory, but the shared lock is still held, so compiler-backed validation
-remains paused until that process exits. This is a linked translator build,
-not a passing translator behavior suite.
+`runtime_unsigned_wrap` exposed that C's `(unsigned int)-1` was emitted as
+`-1` in a `u32` initializer. The generic target-value emitter now normalizes
+compile-time integer values modulo the unsigned destination width, including
+the raw-bit-pattern case for `u64`. Its fixture covers max values for `u8`,
+`u16`, `u32` and `u64` plus dynamic `u32` addition and multiplication
+wraparound. The focused fixture passes native/generated compile, link,
+execution and parity. The full 31-case manifest now passes 30 cases, with only
+`c_void_pointer_boundaries` failing during generated Elisa compilation. The
+manifest's lowest host free-memory sample was 63%; the focused object and
+executable hashes are respectively
+`de5b0d4d11aceccc124e3abd8d0aad5461fe771e2daf59a732424b10aa5f917c` and
+`ecbdc62c24bd0acc9975e6850174509eea1f33c037ef5f113dae43ddb11f3b88`.
+JSON validation, source line limits, diff checks and all 30 runner tests pass.
+
+Follow-up on 2026-10-05: expanded `integer_constant_semantics.c` with uint64
+unary negation, high-bit AND/OR/XOR, high-half division/remainder, a defined
+u32-to-u64 cast, and `<=`, `>=`, and `!=` comparisons. Added generated-source
+shape assertions for those folds in `scripts/test_suites/core_fixtures.sh`.
+`git diff --check`, the shell syntax check, and source line-limit check pass;
+translator emission, Elisa compilation, runtime parity, and the exact generated
+shapes remain unverified until a safe toolchain window. At an earlier snapshot
+the host was below the Stage1 build floor (41% free):
+`${TMPDIR}/elisac-stage1-global-seed.lock` contains PID 41862, whose live seed
+script has Stage1 compiler PID 41900 at about 1.04 GiB RSS; a separate Docker
+compiler validation is also active. Do not launch Stage1 work until those jobs
+finish and memory remains above the 60% floor. Subsequent snapshots below
+supersede this one.
+
+Later the same day, a bounded translation of the expanded integer fixture using
+the already-built (pre-fix) translator stopped with `EXC_BREAKPOINT` in
+`CTranslator.append_i64`. A bounded LLDB run localized it to signed negation of
+`INT64_MIN` while formatting the high-bit `u64` AND result; the process group
+peaked at 113,504 KiB RSS / 72,562 KiB physical footprint, with host free memory
+bottoming at 44%, and exited normally after LLDB captured the stop. The generic
+`append_i64` implementation now computes negative magnitude in `u64`, avoiding
+that overflow. The fixture additionally requires exact signed-minimum emission.
+Static checks pass, but the translator binary predates this source fix, so the
+new source has not yet been compiled or exercised. A previous 58% host sample
+had no seed lock and a Docker compiler validation active. The latest check is
+53% free: the correct shared seed lock was held by PID 90705 (Stage1 compiler
+PID 90748, about 1.10 GiB RSS), and a separate Stage0 compile (PID 90440, about
+1.67 GiB RSS) was active. Those processes have since exited and the lock is
+currently absent. A fresh 30-second memory poll ranged from 50% to 55% free,
+ending at 53%, while two unrelated Linux-host Stage1 compiles remained active.
+A new continuation snapshot is 44% free with the shared seed lock held by PID
+5015 (Stage1 compiler PID 5060, about 1.92 GiB RSS); another Linux-host Stage1
+compile (PID 4688, about 1.24 GiB RSS) and a local Stage1 compile (PID 9355,
+about 443 MiB RSS) are also active. The compiler-build floor remains unmet.
+After the 30-second recovery poll, memory ranged from 48% to 51% free and ended
+at 49%. A new seed attempt has since reacquired the shared lock (PID 23472;
+compiler PID 23511, about 1.70 GiB RSS); another Stage0 compiler (PID 23955,
+about 1.70 GiB RSS) is active as well. No translator or Elisa build was started.
+That seed later completed and released the lock, but the newest sample remains
+below threshold at 52% free while a separate Linux-host Stage1 compile (PID
+37136, about 586 MiB RSS) is active. The 60% floor still prevents our build.
+
+The `c_void_pointer_boundaries` failure is now reproduced in the saved October 5
+acceptance run: translation exits 0, but the pinned Stage1 compiler exits 1
+with `view "restored" cannot be used: storage dependency facts were invalidated
+by darray push of slot`. The generated Elisa contains no `darray.push`; `slot`
+is a pointer into a fixed two-element array. The saved generated source SHA-256
+is `1a392a149abd1a64d3c058b5a2db05dc11a3b27b444c739ff14f9f8c5fe7c9a0`, and
+the result record SHA-256 is
+`4412204768874fc1f289f72cfcbee88e291621a1dc3a6d91e8a6583f8651538a`. The
+compiler identity for that run matches the pinned Stage1 commit and executable
+in `docs/compiler_compatibility.json`.
+
+Read-only tracing of that Stage1 source identifies a narrower candidate than
+the earlier `void`-is-nonscalar hypothesis: `param_growth_summary.elisa`
+routes `Stmt.Return` values through `pgs_expr(..., escape=true, ...)`; for a
+user call, `pgs_user_argument` treats `escape` as `pgs_place_grows`, so returning
+the mutable alias from `identity_slot` can enter the callee's relocation/growth
+summary despite the body performing no write. Separately,
+`storage_callee_param_may_relocate` classifies a mutable reference to opaque
+`void` as potentially relocatable. This points to a missing distinction between
+“mutable alias escapes” and “callee grows/replaces storage”; it is a source-level
+hypothesis, not yet a compiler fix. A reduced compiler regression and a fresh
+compiler build/test are required before changing the summary semantics. No
+fixture-specific rewrite is being used to hide the failure.
+
+The bounded runner initially refused a translator rebuild at 58% host free
+memory. Once compiler load subsided and a fresh lock/freshness check passed,
+the translator object compiled at `-O0` with 321,696 KiB peak RSS / 292,402
+KiB peak physical footprint and a 63% minimum host-free reading; linking and
+the 31-case run also stayed above the 60% floor. The authoritative shared
+seed lock is `${TMPDIR}/elisac-stage1-global-seed.lock` on this Mac, not
+`/tmp/elisac-stage1-global-seed.lock`. A fresh process check found that lock
+owned by a live Stage0 seed (PID 55794; compiler RSS 1,145,184 KiB) and host
+free memory at 53%. The earlier `/tmp` directory check was not a valid lock
+check. The latest snapshot shows the actual seed lock free and no Elisa
+compiler process visible, but host free memory is still 55%, below the 60%
+floor. No further compiler probes should start until a fresh check clears
+that floor.
 
 ## Translation-result region ownership — implementation in progress, partially compiler-verified — 2026-10-03
 

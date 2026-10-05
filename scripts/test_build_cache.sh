@@ -15,10 +15,31 @@ hash_file() {
     fi
 }
 
+hash_stream() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{ print $1 }'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{ print $1 }'
+    else
+        echo "need shasum or sha256sum to test build-cache fingerprints" >&2
+        return 2
+    fi
+}
+
 cache_test_dir=$(mktemp -d /tmp/elisa-transpiler-cache-test.XXXXXX)
 trap 'rm -rf "$cache_test_dir"' EXIT HUP INT TERM
 cache_test_binary="$cache_test_dir/elisa-c-transpiler"
 cache_test_fingerprint="$cache_test_dir/translator-build.fingerprint"
+cache_test_manifest="$cache_test_dir/compiler_compatibility.json"
+
+printf '{"compiler":"pair-a"}\n' > "$cache_test_manifest"
+first_inputs_fingerprint=$(translator_build_cache_inputs_fingerprint source-fingerprint "$cache_test_manifest")
+printf '{"compiler":"pair-b"}\n' > "$cache_test_manifest"
+second_inputs_fingerprint=$(translator_build_cache_inputs_fingerprint source-fingerprint "$cache_test_manifest")
+[ "$first_inputs_fingerprint" != "$second_inputs_fingerprint" ] || {
+    echo "compiler compatibility manifest change did not invalidate the build fingerprint" >&2
+    exit 1
+}
 
 printf '#!/bin/sh\nexit 0\n' > "$cache_test_binary"
 chmod +x "$cache_test_binary"

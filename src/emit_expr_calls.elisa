@@ -341,6 +341,22 @@ extend CTranslator:
         if target_is_bool and not typed_expr_is_boolean(ctx, index):
             typed_emit_condition(out, ctx, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
+        if not target_is_bool and c_type_is_integer(target_type) and clang_target_type_is_unsigned(ctx.target_abi, target_type) and (c_type_is_integer(expression.type_name) or c_type_is_enum(expression.type_name)):
+            # C converts an integer to an unsigned destination modulo 2^N.
+            # Elisa rejects a negative signed literal in an unsigned slot, so
+            # normalize compile-time values at this target-typed boundary.
+            constant_unsigned_source: mutable i64 = 0
+            converted_unsigned: mutable i64 = 0
+            if typed_eval_integer_constant(ctx, index, constant_unsigned_source) and typed_integer_constant_in_type(ctx.target_abi, constant_unsigned_source, target_type, converted_unsigned):
+                if clang_target_type_integer_width(ctx.target_abi, target_type) == 64 and converted_unsigned < 0:
+                    # The constant evaluator stores uint64 in the matching raw
+                    # i64 bit pattern; restore its Elisa unsigned type.
+                    append_view(out, sview("(", 0, -1))
+                    append_i64(out, converted_unsigned)
+                    append_view(out, sview(").u64()", 0, -1))
+                else:
+                    append_i64(out, converted_unsigned)
+                return
         if source_is_enum and c_type_is_integer(target_type) and not target_is_bool:
             typed_emit_scalar_conversion(out, ctx, index, target_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return

@@ -241,6 +241,7 @@ def run(
     poll_seconds: float,
     min_system_free_percent: int | None = None,
     system_memory_poll_seconds: float = SYSTEM_MEMORY_SAMPLE_SECONDS,
+    quiet_success_report: bool = False,
 ) -> int:
     if os.name != "posix":
         print("run_bounded_process: POSIX process groups are required", file=sys.stderr)
@@ -326,16 +327,17 @@ def run(
 
             return_code = process.poll()
             if return_code is not None and not group_live:
-                footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
-                system_memory_report = (
-                    f"; minimum host free memory {minimum_system_free_percent}%"
-                    if min_system_free_percent is not None else ""
-                )
-                print(
-                    f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
-                    f"{footprint_report}{system_memory_report}",
-                    file=sys.stderr,
-                )
+                if not quiet_success_report or return_code != 0:
+                    footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
+                    system_memory_report = (
+                        f"; minimum host free memory {minimum_system_free_percent}%"
+                        if min_system_free_percent is not None else ""
+                    )
+                    print(
+                        f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
+                        f"{footprint_report}{system_memory_report}",
+                        file=sys.stderr,
+                    )
                 return return_code if return_code >= 0 else 128 - return_code
             time.sleep(poll_seconds)
     except MonitorError as error:
@@ -348,17 +350,18 @@ def run(
         except MonitorError:
             group_live = True
         if not group_live and process.poll() is not None:
-            footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
-            system_memory_report = (
-                f"; minimum host free memory {minimum_system_free_percent}%"
-                if min_system_free_percent is not None else ""
-            )
-            print(
-                f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
-                f"{footprint_report}{system_memory_report}",
-                file=sys.stderr,
-            )
             return_code = process.wait()
+            if not quiet_success_report or return_code != 0:
+                footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
+                system_memory_report = (
+                    f"; minimum host free memory {minimum_system_free_percent}%"
+                    if min_system_free_percent is not None else ""
+                )
+                print(
+                    f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
+                    f"{footprint_report}{system_memory_report}",
+                    file=sys.stderr,
+                )
             return return_code if return_code >= 0 else 128 - return_code
         limit_reason = f"could not monitor owned process group: {error}"
     except KeyboardInterrupt:
@@ -392,6 +395,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=os.environ.get("ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT"),
     )
     parser.add_argument("--system-memory-poll-seconds", type=positive_float, default=SYSTEM_MEMORY_SAMPLE_SECONDS)
+    parser.add_argument(
+        "--quiet-success-report",
+        action="store_true",
+        help="do not append resource telemetry to stderr when the child succeeds",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args(argv)
     command = arguments.command
@@ -404,6 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments.poll_seconds,
         arguments.min_system_free_percent,
         arguments.system_memory_poll_seconds,
+        arguments.quiet_success_report,
     )
 
 

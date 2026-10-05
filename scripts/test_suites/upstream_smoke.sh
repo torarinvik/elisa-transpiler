@@ -5,7 +5,7 @@ clang -std=c11 -DINI_USE_STACK=1 -I "$ini_root" -c "$ini_root/ini.c" -o build/in
 clang -std=c11 -DINI_USE_STACK=1 -I "$ini_root" -I "$ini_root/examples" \
     "$ini_root/examples/ini_dump.c" "$ini_root/ini.c" -o build/ini_dump.native
 
-"$translator_bin" "$ini_root/examples/ini_dump.c" > build/ini_dump.generated.elisa
+test_translator_bounded "$ini_root/examples/ini_dump.c" > build/ini_dump.generated.elisa
 # C library bindings must come from Clang declarations. Their source spellings
 # are retained; no target function gets a translator-owned ABI entry just
 # because its spelling is printf, strncpy, strcmp, or something similar.
@@ -41,7 +41,7 @@ cjson_root=testdata/upstream/cJSON
 clang -std=c11 -I "$cjson_root" \
     "$cjson_root/cjson_smoke.c" -lm -o build/cjson.native
 
-"$translator_bin" "$cjson_root/cjson_smoke.c" > build/cjson.generated.elisa
+test_translator_bounded "$cjson_root/cjson_smoke.c" > build/cjson.generated.elisa
 rg -q '^struct Parse_buffer:$' build/cjson.generated.elisa
 # These C fields are `const unsigned char *`: their POINTER SLOTS and the other
 # parser-state fields are assigned during parsing. Elisa's field-level
@@ -94,7 +94,7 @@ rg -q '^def cJSON_PrintUnformatted\(' build/cjson.full.generated.elisa
 
 kilo_root=testdata/upstream/kilo
 clang -std=c11 "$kilo_root/kilo.c" -o build/kilo.native
-"$translator_bin" "$kilo_root/kilo.c" > build/kilo.generated.elisa
+test_translator_bounded "$kilo_root/kilo.c" > build/kilo.generated.elisa
 rg -q '^def editorSetStatusMessage\(fmt: (i8|u8)&\?, \.\.\.\) -> void' build/kilo.generated.elisa
 rg -Fq 'atexit((editorAtExit).cast[void&])' build/kilo.generated.elisa
 ! rg -q '^extern memset\(' build/kilo.generated.elisa
