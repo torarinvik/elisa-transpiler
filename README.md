@@ -222,6 +222,19 @@ layout. A pre-existing conflicting `src/.compiler_std` path is left untouched
 and reported as an error. Set `ELISAC_BIN` only when deliberately testing a
 different compiler.
 
+## Compiler freshness
+
+`docs/compiler_compatibility.json` is the authoritative compiler-pair record.
+Its 2026-10-05 snapshot has isolated Stage0 and Stage1 sources at
+`11858f2e` and `2691a64c`, while the local Stage0 executable and Stage1
+executable/runtime are from older revisions; translator validation is pending.
+Historical test results therefore do not verify the current translator source
+against that refreshed compiler pair. Rebuild the local products and rerun the
+focused and serial acceptance suites before making that claim. The snapshot
+also records the private Stage1 worktree as dirty because of a modified
+tracked `.DS_Store`; preserve and inspect that unrelated change rather than
+silently reverting it.
+
 ## Test
 
 From the repository root:
