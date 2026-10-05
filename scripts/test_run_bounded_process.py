@@ -152,6 +152,61 @@ class BoundedProcessTests(unittest.TestCase):
             self.assertFalse(sentinel.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
+    def test_environment_host_memory_floor_is_used_without_cli_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_memory_pressure = Path(temporary) / "memory_pressure"
+            fake_memory_pressure.write_text(
+                "#!/bin/sh\nprintf 'System-wide memory free percentage: 40%%\\n'\n"
+            )
+            fake_memory_pressure.chmod(0o755)
+            sentinel = Path(temporary) / "child-started"
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment.get('PATH', '')}"
+            environment["ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT"] = "40"
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER), "--max-rss-kb", "262144",
+                    "--timeout-seconds", "5", "--",
+                    sys.executable, "-c", f"open({str(sentinel)!r}, 'w').close()",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 125, result.stderr)
+            self.assertIn("refusing to start command", result.stderr)
+            self.assertIn("must stay above 40%", result.stderr)
+            self.assertFalse(sentinel.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
+    def test_host_memory_sampler_failure_refuses_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_memory_pressure = Path(temporary) / "memory_pressure"
+            fake_memory_pressure.write_text("#!/bin/sh\necho sampler-failed >&2\nexit 1\n")
+            fake_memory_pressure.chmod(0o755)
+            sentinel = Path(temporary) / "child-started"
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment.get('PATH', '')}"
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER), "--max-rss-kb", "262144",
+                    "--timeout-seconds", "5", "--min-system-free-percent", "40", "--",
+                    sys.executable, "-c", f"open({str(sentinel)!r}, 'w').close()",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("cannot verify host memory before launch", result.stderr)
+            self.assertIn("sampler-failed", result.stderr)
+            self.assertFalse(sentinel.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
     def test_host_memory_floor_terminates_owned_group(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             counter = Path(temporary) / "memory-pressure-count"

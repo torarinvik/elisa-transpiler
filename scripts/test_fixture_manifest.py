@@ -88,6 +88,62 @@ class FixtureManifestRunnerTests(unittest.TestCase):
             self.assertEqual(len(stdout), 1024)
             self.assertEqual(Path(result["stdout_file"]).read_bytes(), stdout)
 
+    def test_host_memory_floor_refuses_launch_at_threshold(self):
+        with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
+            marker = Path(temporary) / "child-started"
+            command = python_argv("from pathlib import Path;Path(%r).touch()" % str(marker))
+            with mock.patch.object(RUNNER.bounded_process, "system_memory_free_percent", return_value=40):
+                result, stdout, stderr = RUNNER.run_command(
+                    Path(temporary), "host-floor", command, 2, min_system_free_percent=40
+                )
+            self.assertEqual(result["status"], "resource_limited", stderr.decode("utf-8", "replace"))
+            self.assertIn("before launch", result["limit_reason"])
+            self.assertEqual(result["minimum_system_free_percent"], 40)
+            self.assertEqual(stdout, b"")
+            self.assertFalse(marker.exists())
+
+    def test_host_memory_sampler_failure_refuses_launch(self):
+        with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
+            marker = Path(temporary) / "child-started"
+            command = python_argv("from pathlib import Path;Path(%r).touch()" % str(marker))
+            with mock.patch.object(
+                RUNNER.bounded_process,
+                "system_memory_free_percent",
+                side_effect=RUNNER.bounded_process.MonitorError("sampler unavailable"),
+            ):
+                result, stdout, stderr = RUNNER.run_command(
+                    Path(temporary), "host-monitor-error", command, 2,
+                    min_system_free_percent=40,
+                )
+            self.assertEqual(result["status"], "monitor_error", stderr.decode("utf-8", "replace"))
+            self.assertIn("sampler unavailable", result["limit_reason"])
+            self.assertEqual(stdout, b"")
+            self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(os.name == "posix", "host-memory termination uses owned process groups")
+    def test_falling_host_memory_floor_terminates_owned_stage(self):
+        with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
+            with (
+                mock.patch.object(
+                    RUNNER.bounded_process,
+                    "system_memory_free_percent",
+                    side_effect=[80, 39],
+                ),
+                mock.patch.object(RUNNER, "PROCESS_POLL_SECONDS", 0.01),
+            ):
+                result, _, stderr = RUNNER.run_command(
+                    Path(temporary),
+                    "host-floor-drop",
+                    python_argv("import time;time.sleep(30)"),
+                    5,
+                    min_system_free_percent=40,
+                    system_memory_poll_seconds=0.01,
+                )
+            self.assertEqual(result["status"], "resource_limited", stderr.decode("utf-8", "replace"))
+            self.assertIn("39% reached safety floor 40%", result["limit_reason"])
+            self.assertEqual(result["minimum_system_free_percent"], 39)
+            self.assertIn("owned process group members", stderr.decode("utf-8", "replace"))
+
     def test_case_compares_expected_nonzero_exit(self):
         with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
             result = self.run_case_quietly(base_case(), Path(temporary))

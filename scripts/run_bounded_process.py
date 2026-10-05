@@ -386,7 +386,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-rss-kb", type=positive_int, required=True)
     parser.add_argument("--timeout-seconds", type=positive_float, required=True)
     parser.add_argument("--poll-seconds", type=positive_float, default=0.1)
-    parser.add_argument("--min-system-free-percent", type=percentage)
+    parser.add_argument(
+        "--min-system-free-percent",
+        type=percentage,
+        default=os.environ.get("ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT"),
+    )
     parser.add_argument("--system-memory-poll-seconds", type=positive_float, default=SYSTEM_MEMORY_SAMPLE_SECONDS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     arguments = parser.parse_args(argv)

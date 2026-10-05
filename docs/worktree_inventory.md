@@ -6,39 +6,45 @@ uncommitted work before this snapshot. No pre-existing files were reset or
 removed. After capturing the snapshot, only this new inventory document was
 staged and committed; all other dirty paths remained untouched.
 
-## Re-audit — 2026-10-05
+## Re-audit — 2026-10-05 (updated)
 
-Read-only compiler-source and process-safety re-audit; no compiler build,
-worktree creation, checkout or source refresh was started.
+Read-only compiler-source/process audit plus a bounded translator object build.
+No compiler source checkout or shared compiler artifact was modified.
 
-- Translator: branch `main`, HEAD
-  `2b098cde3bcae7b01938f5d739d944ed3e2ce96d`. At audit time the only tracked
-  modifications were the bounded-process host-memory gate, its setup
-  integration and regression tests, plus the Stage1 freshness-guard test
-  adaptation. Ignored `build/`, upstream fixtures and `src/.compiler_std`
-  remain preserved; the standard-library link still targets the intended
-  translator-local Stage1 worktree path.
+- Translator: branch `main`, HEAD `12494313eaad` before the current uncommitted
+  safety/ABI-validation slice. The modified tracked paths are the bounded
+  process runner, fixture manifest runner, test driver and tests, Stage1
+  freshness test, and `src/clang_process.elisa`. Ignored build products,
+  upstream fixtures and `src/.compiler_std` remain preserved. The standard
+  library symlink points to the translator's private Stage1 worktree.
 - Stage0 source checkout: `../Go projects/Elisa-core`, clean `main` at
-  `6a0628cc48a7e019ed023c835b379fb55522ff1e`.
+  `6a0628cc48a7e019ed023c835b379fb55522ff1e`; private worktree
+  `../elisa-transpiler-worktrees/stage0-latest`, branch
+  `codex/transpiler-local-stage0-latest`, is also clean at that exact commit.
+  Its executable SHA-256 is
+  `15254cdbf96c981b0c0cc31a65b95357761801aee2db08884e5a05b76c9c89a3`.
 - Stage1 source checkout: `../Elisa-compiler`, clean `main` at
-  `8e08cd3397b1680c61bfb76b70e1a76541522e3d`. Its source-fresh Stage1
+  `8e08cd3397b1680c61bfb76b70e1a76541522e3d`; private worktree
+  `../elisa-transpiler-worktrees/transpiler`, branch
+  `codex/transpiler-local-stage1`, is clean at the same commit. Its Stage1
   executable SHA-256 is
-  `f7d4dc3c2a2a126da19723abdcd806bf99f08a71cc8bf15a35c2f508e2e19b9d`,
+  `f7d4dc3c2a2a126da19723abdcd806bf99f08a71cc8bf15a35c2f508e2e19b9d`, and
   matching runtime SHA-256 is
-  `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`, and
-  provenance sidecar SHA-256 is
-  `d69a501ba4dfdae54c5ea9975a9faf477641789e171aee8d0980c02b06adc375`.
-  The Stage1 source-freshness guard reported this product current for the
-  source checkout. These main-checkout artifacts have not yet been copied
-  into the translator's private compiler worktree.
-- The translator-local Stage0 and Stage1 worktree directories are absent;
-  their configured branches are not yet checked out. A separate Stage1 seed
-  was active under `/private/tmp/luna-g75-return-repro-20261005` and held
-  `${TMPDIR}/elisac-stage1-global-seed.lock`. The host sampler reported 37%
-  free memory during the harmless runner smoke test. The new setup guard's
-  default 41% floor therefore correctly makes this an unsafe compiler-build
-  window. Wait for the lock and recheck host headroom before creating/building
-  the translator-local compiler pair.
+  `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`. The
+  source-freshness guard reports the product current for the checked-out
+  source. Stage0/Stage1 main and private worktree revisions match exactly.
+- Using that private Stage1 binary, `src/main.elisa` compiled to
+  `build/transpiler.o` with SHA-256
+  `d23591ccf2e728ca1142d228b48c8a5ac454b1ecc7ba0490c8172bf8e59703ce`.
+  The bounded compile peaked at 313,616 KiB RSS and 284,354 KiB physical
+  footprint; host free memory bottomed at 51%. The object has not yet been
+  linked or exercised by translator tests.
+- A separate compiler task held the shared Stage1 seed lock during this audit;
+  host free memory fluctuated between 43% and 57%. The translator task did not
+  start another compiler job while that lock was held. Its bounded object
+  compile completed during a verified lock-free interval; the lock was
+  reacquired immediately afterward, so link and fixture validation remain
+  deferred to the next safe window.
 
 ## Re-audit — 2026-10-03
 

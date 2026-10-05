@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTCOMES = ("passed", "failed", "timed_out", "crashed", "resource_limited", "monitor_error", "unsupported", "skipped", "missing_tool")
 PROCESS_POLL_SECONDS = 0.02
 DEFAULT_STAGE_OUTPUT_BYTES = 64 * 1024 * 1024
+SYSTEM_MEMORY_SAMPLE_SECONDS = 1.0
 
 
 class ManifestError(Exception):
@@ -62,7 +63,16 @@ def substitute_argv(template, values, field_name):
     return result
 
 
-def run_command(case_dir, stage, argv, timeout_seconds, max_rss_kb=None, max_output_bytes=DEFAULT_STAGE_OUTPUT_BYTES):
+def run_command(
+    case_dir,
+    stage,
+    argv,
+    timeout_seconds,
+    max_rss_kb=None,
+    max_output_bytes=DEFAULT_STAGE_OUTPUT_BYTES,
+    min_system_free_percent=None,
+    system_memory_poll_seconds=SYSTEM_MEMORY_SAMPLE_SECONDS,
+):
     started = time.monotonic()
     stdout_path = case_dir / (stage + ".stdout.bin")
     stderr_path = case_dir / (stage + ".stderr.bin")
@@ -81,6 +91,40 @@ def run_command(case_dir, stage, argv, timeout_seconds, max_rss_kb=None, max_out
     result["max_output_bytes"] = max_output_bytes
     stdout_stream = stdout_path.open("wb")
     stderr_stream = stderr_path.open("wb")
+    minimum_system_free_percent = None
+    last_system_memory_sample = 0.0
+
+    def finish_without_launch(status, reason):
+        result["status"] = status
+        result["limit_reason"] = reason
+        result["duration_seconds"] = round(time.monotonic() - started, 6)
+        result["peak_rss_kb"] = 0
+        if minimum_system_free_percent is not None:
+            result["minimum_system_free_percent"] = minimum_system_free_percent
+        stdout_stream.close()
+        stderr_stream.write(("fixture runner: " + reason + "\n").encode("utf-8", "replace"))
+        stderr_stream.close()
+        stdout = stdout_path.read_bytes()
+        stderr = stderr_path.read_bytes()
+        result["stdout_bytes"] = len(stdout)
+        result["stderr_bytes"] = len(stderr)
+        return result, stdout, stderr
+
+    if min_system_free_percent is not None:
+        try:
+            minimum_system_free_percent = bounded_process.system_memory_free_percent()
+        except bounded_process.MonitorError as error:
+            return finish_without_launch(
+                "monitor_error", "could not verify host memory before launch: " + str(error)
+            )
+        if minimum_system_free_percent <= min_system_free_percent:
+            return finish_without_launch(
+                "resource_limited",
+                "host system memory free percentage %d%% must stay above %d%% before launch"
+                % (minimum_system_free_percent, min_system_free_percent),
+            )
+        last_system_memory_sample = time.monotonic()
+
     try:
         process = subprocess.Popen(
             argv,
@@ -182,6 +226,25 @@ def run_command(case_dir, stage, argv, timeout_seconds, max_rss_kb=None, max_out
                         "aggregate physical footprint %d KiB reached safety threshold %d KiB (configured RSS cap %d KiB)"
                         % (footprint_kb, (footprint_threshold_bytes + 1023) // 1024, max_rss_kb)
                     )
+        if (
+            not limit_reason
+            and min_system_free_percent is not None
+            and group_live
+            and now - last_system_memory_sample >= system_memory_poll_seconds
+        ):
+            try:
+                free_percent = bounded_process.system_memory_free_percent()
+            except bounded_process.MonitorError as error:
+                limit_reason = "could not monitor host system memory: " + str(error)
+                result["status"] = "monitor_error"
+            else:
+                minimum_system_free_percent = min(minimum_system_free_percent, free_percent)
+                last_system_memory_sample = time.monotonic()
+                if free_percent <= min_system_free_percent:
+                    limit_reason = (
+                        "host system memory free percentage %d%% reached safety floor %d%%"
+                        % (free_percent, min_system_free_percent)
+                    )
         if limit_reason:
             if result["status"] not in ("monitor_error", "timed_out"):
                 result["status"] = "resource_limited"
@@ -216,6 +279,8 @@ def run_command(case_dir, stage, argv, timeout_seconds, max_rss_kb=None, max_out
     stdout_stream.close()
     stderr_stream.close()
     result["peak_rss_kb"] = peak_rss_kb
+    if minimum_system_free_percent is not None:
+        result["minimum_system_free_percent"] = minimum_system_free_percent
     if footprint_available:
         result["peak_physical_footprint_kb"] = peak_footprint_kb
     if limit_reason:
@@ -294,6 +359,8 @@ def run_case(case, arguments):
             timeout,
             getattr(arguments, "max_rss_kb", None),
             getattr(arguments, "max_output_bytes", DEFAULT_STAGE_OUTPUT_BYTES),
+            getattr(arguments, "min_system_free_percent", None),
+            getattr(arguments, "system_memory_poll_seconds", SYSTEM_MEMORY_SAMPLE_SECONDS),
         )
         stages.append(stage_result)
         return stage_result, stdout, stderr
@@ -506,6 +573,16 @@ def main():
     parser.add_argument("--timeout-seconds", type=float, help="override each case deadline")
     parser.add_argument("--default-timeout-seconds", type=float, default=120.0)
     parser.add_argument("--max-rss-kb", type=bounded_process.positive_int, help="per-stage aggregate process-group RSS cap, with macOS physical-footprint monitoring")
+    default_system_memory_floor = os.environ.get("ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT")
+    if sys.platform == "darwin" and default_system_memory_floor is None:
+        default_system_memory_floor = "41"
+    parser.add_argument("--min-system-free-percent", type=bounded_process.percentage, default=default_system_memory_floor, help="macOS host free-memory floor enforced before and during each stage")
+    parser.add_argument(
+        "--system-memory-poll-seconds",
+        type=bounded_process.positive_float,
+        default=SYSTEM_MEMORY_SAMPLE_SECONDS,
+        help="minimum interval between host free-memory samples",
+    )
     parser.add_argument(
         "--max-output-bytes",
         type=bounded_process.positive_int,

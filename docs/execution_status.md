@@ -5,29 +5,41 @@ feature is not complete merely because a handler exists or translation exits
 successfully; generated Elisa must also be compiled, linked, and exercised
 where applicable.
 
-## Host-wide build safety gate — implementation in progress — 2026-10-05
+## Host-wide build safety and Stage1 translator compile — in progress — 2026-10-05
 
-`scripts/run_bounded_process.py` now optionally checks macOS's
-`memory_pressure` free-memory percentage before starting a command and samples
-it during execution. A low preflight reading refuses launch; a later breach
-terminates only the owned process group. `scripts/setup_local_compilers.sh`
-applies this gate to Stage0 builds, Stage1 seeds and runtime builds, using a
-default 41% minimum free percentage (`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`
-overrides the threshold), while retaining each operation's process-group RSS
-and deadline limits. Unsupported or malformed host-memory readings fail
-closed when the option is enabled.
+On macOS, `scripts/run_bounded_process.py` can read the system-wide free-memory
+percentage before launch and while an owned process group is running. It
+refuses a preflight at or below the floor, terminates only its owned group if a
+live sample reaches the floor, and fails closed if monitoring is unavailable.
+The default floor is 41%, configurable through
+`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`; the bounded runner itself inherits that
+variable when no command-line floor is supplied. Local compiler setup applies
+the same gate to Stage0 builds, Stage1 seeds and runtime builds; `test.sh` also
+gates the translator object/link build, and the manifest runner gates each
+fixture stage. These host limits supplement—not replace—per-process-group RSS,
+physical-footprint, output and deadline limits.
 
-The bounded-runner suite passes all 10 tests on macOS, including simulated
-preflight refusal and a simulated falling host-memory reading that terminates
-the owned child. The real sampler also passed a harmless `/usr/bin/true` smoke
-at 37% reported free memory. Stage1 freshness-guard regressions, shell syntax,
-Python compilation, source line limits and `git diff --check` pass. At that
-37% sample, a separate Stage1 seed held the host-wide seed lock; consequently
-no compiler build, worktree refresh or translator rebuild was started. The
-gate's unit tests validate enforcement, but no compiler build has yet been
-run through the newly wrapped setup path. A follow-up live check at 41% free
-memory confirmed the configured 41% floor refuses launch (including the exact
-at-the-threshold case) before starting even a harmless child.
+Validation on 2026-10-05: `scripts/test_run_bounded_process.py` passes 12 tests,
+including environment-default propagation, preflight refusal when the sampler
+fails, threshold refusal and termination after a simulated live memory drop.
+`scripts/test_fixture_manifest.py` passes 18 tests, including preflight refusal
+on monitor failure and owned-stage termination. Stage1
+freshness regressions, shell syntax, Python byte-compilation, source line
+limits and `git diff --check` also pass. A source-fresh Stage1 product from
+commit `8e08cd3397b1680c61bfb76b70e1a76541522e3d` compiled
+`src/main.elisa` to `build/transpiler.o` using `-emit obj -O0`; the object SHA-256
+is `d23591ccf2e728ca1142d228b48c8a5ac454b1ecc7ba0490c8172bf8e59703ce`. The
+bounded run peaked at 313,616 KiB process-group RSS and 284,354 KiB physical
+footprint, with host free memory bottoming at 51%. This compile verifies the
+recent explicit C ABI pointer-erasure boundary in `clang_process.elisa`.
+
+The translator object has not yet been linked, and the translator or fixture
+regressions have not yet been run after that change. A separate Stage1 seed
+reacquired the shared lock immediately after object compilation. At the latest
+read-only snapshot it was still held and host free memory had fallen to 43%.
+Link and compiler-backed fixture validation remain pending until the lock
+clears and a safe memory window is available. The compile is therefore a
+verified frontend object result, not a passing translator build or suite.
 
 ## Translation-result region ownership — implementation in progress, partially compiler-verified — 2026-10-03
 

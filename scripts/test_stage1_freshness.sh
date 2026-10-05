@@ -15,6 +15,9 @@ test_root=$(CDPATH= cd -- "$(mktemp -d "${TMPDIR:-/tmp}/elisa-stage1-freshness.X
 trap 'rm -rf "$test_root"' EXIT HUP INT TERM
 mkdir -p "$test_root/compiler/bin" "$test_root/compiler/scripts" \
     "$test_root/compiler/src" "$test_root/compiler/elisacore_std"
+git -C "$test_root/compiler" init -q
+git -C "$test_root/compiler" -c user.name="Stage1 freshness test" \
+    -c user.email="stage1-freshness@example.invalid" commit --allow-empty -q -m baseline
 cp "$freshness_guard" "$test_root/compiler/scripts/assert_stage1_fresh.sh"
 cp "$(command -v sh)" "$test_root/compiler/bin/elisac-stage1"
 chmod +x "$test_root/compiler/bin/elisac-stage1"

@@ -4,6 +4,11 @@ set -eu
 root_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root_dir"
 
+if [ "$(uname -s)" = Darwin ]; then
+    ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT=${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-41}
+    export ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT
+fi
+
 . "$root_dir/scripts/test_support.sh"
 test_install_failure_trace
 
@@ -203,6 +208,22 @@ hash_file() {
 
 . "$root_dir/scripts/build_cache.sh"
 
+translator_run_bounded() {
+    translator_max_rss_kb=$1
+    translator_timeout_seconds=$2
+    shift 2
+    if [ "$(uname -s)" = Darwin ]; then
+        python3 scripts/run_bounded_process.py \
+            --max-rss-kb "$translator_max_rss_kb" \
+            --timeout-seconds "$translator_timeout_seconds" \
+            --min-system-free-percent "${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-41}" -- "$@"
+    else
+        python3 scripts/run_bounded_process.py \
+            --max-rss-kb "$translator_max_rss_kb" \
+            --timeout-seconds "$translator_timeout_seconds" -- "$@"
+    fi
+}
+
 compute_translator_inputs_fingerprint() {
     clang_path=$(command -v clang || true)
     [ -n "$clang_path" ] || { echo "clang is required to build the translator" >&2; return 2; }
@@ -258,28 +279,20 @@ else
     # It never shells the argv and only signals the process group it created.
     translator_build_max_rss_kb=${ELISA_TRANSLATOR_BUILD_MAX_RSS_KB:-2097152}
     translator_build_timeout_seconds=${ELISA_TRANSLATOR_BUILD_TIMEOUT_SECONDS:-600}
-    python3 scripts/run_bounded_process.py \
-        --max-rss-kb "$translator_build_max_rss_kb" \
-        --timeout-seconds "$translator_build_timeout_seconds" -- \
+    translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
         "$elisa_bin" -emit obj -O0 -o build/transpiler.o src/main.elisa
     # A selected self-hosted stage1 runtime is a complete, matching runtime
     # boundary. Do not mix it with stage0 profiling hooks: those hooks belong
     # to the stage0 ABI and can make a stage1-built translator hang or fail in
     # otherwise unrelated probes. The default path remains unchanged.
     if [ -n "$elisa_runtime" ]; then
-        python3 scripts/run_bounded_process.py \
-            --max-rss-kb "$translator_build_max_rss_kb" \
-            --timeout-seconds "$translator_build_timeout_seconds" -- \
+        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
             clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o "$elisa_runtime" -lm
     elif [ -n "$profile_hooks" ]; then
-        python3 scripts/run_bounded_process.py \
-            --max-rss-kb "$translator_build_max_rss_kb" \
-            --timeout-seconds "$translator_build_timeout_seconds" -- \
+        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
             clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o "$profile_hooks" -lm
     else
-        python3 scripts/run_bounded_process.py \
-            --max-rss-kb "$translator_build_max_rss_kb" \
-            --timeout-seconds "$translator_build_timeout_seconds" -- \
+        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
             clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o -lm
     fi
     translator_binary_fingerprint=$(hash_file "$translator_path")

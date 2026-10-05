@@ -13,7 +13,7 @@ extern clang_close(descriptor: i32) -> i32
 @link_name("chdir")
 extern clang_chdir(path: cstr) -> i32
 @link_name("execvp")
-extern clang_execvp(file: cstr, arguments: mutable cstr&&) -> i32
+extern clang_execvp(file: cstr, arguments: mutable void&) -> i32
 @link_name("_exit")
 extern clang_exit(status: i32) -> void
 @link_name("kill")
@@ -382,7 +382,12 @@ module CTranslator:
                 _ = clang_close(stderr_file_descriptor)
             if use_working_directory and clang_chdir(working_directory) != 0:
                 clang_exit(126.i32())
-            _ = clang_execvp(arguments[0].cast[cstr], arguments)
+            # POSIX execvp consumes the `char **` argv buffer without changing
+            # it. Keep its pointer identity and depth, and erase the nested
+            # Elisa reference type only at this explicit C ABI boundary.
+            argv_file: cstr = arguments[0]
+            argv_address: mutable void& = arguments.cast[mutable void&] can Unsafe.PointerCast
+            _ = clang_execvp(argv_file, argv_address)
             clang_exit(127.i32())
         _ = clang_setpgid(process, process)
         parent_close_status: i32 = clang_close(stdout_write_descriptor)
@@ -516,7 +521,8 @@ module CTranslator:
         else:
             for index in 0..<file_size.usize() |text, output|:
                 output.push(text[index])
-        _ = clang_munmap(mapped_address.cast[mutable void&], file_size.usize())
+        mapped_address_view: mutable void& = mapped_address.cast[mutable void&] can Unsafe.PointerCast
+        _ = clang_munmap(mapped_address_view, file_size.usize())
         _ = c_fclose(stdout_file)
         succeeded <- true
 
