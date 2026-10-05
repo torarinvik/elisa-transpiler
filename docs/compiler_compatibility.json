@@ -19,7 +19,7 @@
       "repository": "Elisa-compiler",
       "worktree": "../elisa-transpiler-worktrees/transpiler",
       "source_revision": "2691a64c7522c94eee0d5b0b930d1995c7376a3c",
-      "source_worktree_clean": true,
+      "source_worktree_clean": false,
       "source_freshness_verified": false,
       "artifact_build_recipe_sha256": "e0967a96814e4810869032da1a65cc190868ea4c9e65ca5cf52da989cdd04a16",
       "executable": {

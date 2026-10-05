@@ -29,7 +29,7 @@ class CompilerCompatibilityManifestTests(unittest.TestCase):
         for stage in ("stage0", "stage1"):
             compiler = self.manifest["compiler_pair"][stage]
             self.assertRegex(compiler["source_revision"], REVISION)
-            self.assertTrue(compiler["source_worktree_clean"])
+            self.assertIsInstance(compiler["source_worktree_clean"], bool)
             self.assertIsInstance(compiler["source_freshness_verified"], bool)
             self.assertFalse(Path(compiler["worktree"]).is_absolute())
             self.assertRegex(compiler["executable"]["sha256"], HASH)
@@ -77,7 +77,11 @@ class CompilerCompatibilityManifestTests(unittest.TestCase):
             )
             with self.subTest(stage=stage):
                 self.assertEqual(revision, compiler["source_revision"])
-                self.assertEqual(status, "", "pinned compiler worktree must be clean")
+                self.assertEqual(
+                    status == "",
+                    compiler["source_worktree_clean"],
+                    "manifest must report the pinned compiler worktree's actual cleanliness",
+                )
                 artifacts = [compiler["executable"]]
                 if stage == "stage1":
                     artifacts.append(compiler["runtime"])

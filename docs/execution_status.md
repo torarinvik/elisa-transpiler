@@ -29,6 +29,14 @@ to 38% free memory with a Stage0 debug compiler process active; the shared
 Stage1 seed lock was absent, but the 60% build floor was not met. The bounded
 build gate remains closed.
 
+The later provenance audit found the private Stage1 checkout at `2691a64c`
+has a modified tracked `.DS_Store`. That unrelated file was not reverted. The
+compatibility manifest now marks Stage1's source worktree dirty, and its
+provenance test checks that the recorded cleanliness matches `git status`
+instead of assuming that a previously clean checkout stays clean. Do not
+describe this checkout as clean; compiler products are already stale relative
+to its source revision.
+
 ## High-half unsigned narrowing regression — unverified — 2026-10-05
 
 Extended the generic `integer_constant_semantics.c` fixture to cast high-bit
