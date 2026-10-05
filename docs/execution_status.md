@@ -33,13 +33,18 @@ bounded run peaked at 313,616 KiB process-group RSS and 284,354 KiB physical
 footprint, with host free memory bottoming at 51%. This compile verifies the
 recent explicit C ABI pointer-erasure boundary in `clang_process.elisa`.
 
-The translator object has not yet been linked, and the translator or fixture
-regressions have not yet been run after that change. A separate Stage1 seed
-reacquired the shared lock immediately after object compilation. At the latest
-read-only snapshot it was still held and host free memory had fallen to 43%.
-Link and compiler-backed fixture validation remain pending until the lock
-clears and a safe memory window is available. The compile is therefore a
-verified frontend object result, not a passing translator build or suite.
+The object was then linked against the matching private Stage1 runtime using
+the bounded runner, a 512-MiB RSS cap and a 60% host floor. Linking exited 0;
+the resulting arm64 executable `build/elisa-c-transpiler` has SHA-256
+`8f24c7644167bd5b2c8680d97e0a4b945fb3957c28c54dd38637ea5b30a2b771`. Link
+peak process-group RSS was 2,640 KiB and host free memory remained 75%.
+
+The translator or fixture regressions have not yet been run after that change.
+A separate Stage1 seed (owner PID 55761, verified live) reacquired the shared
+lock immediately after linking. The latest read-only snapshot showed 70% host
+free memory, but the shared lock is still held, so compiler-backed validation
+remains paused until that process exits. This is a linked translator build,
+not a passing translator behavior suite.
 
 ## Translation-result region ownership — implementation in progress, partially compiler-verified — 2026-10-03
 

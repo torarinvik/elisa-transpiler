@@ -8,15 +8,15 @@ staged and committed; all other dirty paths remained untouched.
 
 ## Re-audit — 2026-10-05 (updated)
 
-Read-only compiler-source/process audit plus a bounded translator object build.
-No compiler source checkout or shared compiler artifact was modified.
+Read-only compiler-source/process audit plus bounded translator object/link
+builds. No compiler source checkout or shared compiler artifact was modified.
 
-- Translator: branch `main`, HEAD `12494313eaad` before the current uncommitted
-  safety/ABI-validation slice. The modified tracked paths are the bounded
-  process runner, fixture manifest runner, test driver and tests, Stage1
-  freshness test, and `src/clang_process.elisa`. Ignored build products,
-  upstream fixtures and `src/.compiler_std` remain preserved. The standard
-  library symlink points to the translator's private Stage1 worktree.
+- Translator: branch `main`, initially at `12494313eaad` for this audit; the
+  safety/ABI-validation slice was committed as `7c794ad` and the refreshed
+  baseline evidence as `2b990a9`. The working tree was clean after those
+  commits. Ignored build products, upstream fixtures and `src/.compiler_std`
+  remain preserved. The standard-library symlink points to the translator's
+  private Stage1 worktree.
 - Stage0 source checkout: `../Go projects/Elisa-core`, clean `main` at
   `6a0628cc48a7e019ed023c835b379fb55522ff1e`; private worktree
   `../elisa-transpiler-worktrees/stage0-latest`, branch
@@ -37,14 +37,17 @@ No compiler source checkout or shared compiler artifact was modified.
   `build/transpiler.o` with SHA-256
   `d23591ccf2e728ca1142d228b48c8a5ac454b1ecc7ba0490c8172bf8e59703ce`.
   The bounded compile peaked at 313,616 KiB RSS and 284,354 KiB physical
-  footprint; host free memory bottomed at 51%. The object has not yet been
-  linked or exercised by translator tests.
-- A separate compiler task held the shared Stage1 seed lock during this audit;
-  host free memory fluctuated between 43% and 57%. The translator task did not
-  start another compiler job while that lock was held. Its bounded object
-  compile completed during a verified lock-free interval; the lock was
-  reacquired immediately afterward, so link and fixture validation remain
-  deferred to the next safe window.
+  footprint; host free memory bottomed at 51%. It linked against the matching
+  private runtime to arm64 executable `build/elisa-c-transpiler`, SHA-256
+  `8f24c7644167bd5b2c8680d97e0a4b945fb3957c28c54dd38637ea5b30a2b771`, under
+  a 512-MiB RSS cap and 60% host floor. Compiler/fixture behavior tests remain
+  pending.
+- Another compiler task repeatedly acquired the shared Stage1 seed lock during
+  this audit; observed host free memory ranged from 34% to 75%. The translator
+  task started its object and link builds only during verified lock-free
+  intervals and used explicit host floors. The latest lock owner, PID 55761,
+  was verified live; despite a 70% host reading, fixture runs remain deferred
+  until this shared lock is released.
 
 ## Re-audit — 2026-10-03
 
