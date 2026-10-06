@@ -4174,6 +4174,25 @@ compiler jobs were active, below the repository's 60% launch floor. Fresh
 translator build, generated-code execution, and corpus parity remain pending a
 safe local compiler window.
 
+## Relocatable release assembler — 2026-10-06
+
+`scripts/package_release.py` now assembles a deterministic release directory
+from an explicit translator binary, translator-owned C++ adapters, the selected
+Elisa standard-library sources, and caller-supplied license files. Its
+versioned manifest records file hashes, target, compiler source/product
+identities, Clang identity, and the compatibility-record hash without copying
+machine-specific source paths. It refuses unverified compiler records,
+symlinks, support-tree overlap, missing required modules/licenses, and an
+existing destination. The compiler-free regression assembles twice, compares
+all bytes, relocates one result, and invokes the packaged fake translator; all
+10 cases pass. The test is wired into `scripts/test.sh`.
+
+No distributable artifact was created. The checked-in compiler record remains
+pending/stale, the repository has no project-level license file, and no fresh
+translator/compiler build was attempted because host free memory was 32%, below
+the 60% build floor. The packager intentionally refuses those current inputs;
+release packaging and clean-layout product verification remain open.
+
 ## Source-linked rewrite explanations — 2026-10-03
 
 `--explain-rewrites` now emits opt-in, machine-readable applied/declined events
