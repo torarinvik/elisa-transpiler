@@ -67,6 +67,7 @@ python3 scripts/test_translator_genericity.py
 python3 scripts/test_metamorphic_normalization.py
 python3 scripts/test_ast_json_minimize.py
 python3 scripts/test_property_corpus.py
+python3 scripts/test_package_release.py
 python3 scripts/test_ast_depth.py --self-test
 sh scripts/test_setup_local_compilers.sh
 sh scripts/test_build_cache.sh

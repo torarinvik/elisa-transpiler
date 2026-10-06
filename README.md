@@ -250,6 +250,16 @@ standard-library modeling, bounded AST projection for header-heavy units, and
 large-unit compiler/backend capacity—are kept
 explicitly conservative rather than emitted as misleading Elisa.
 
+## Release packaging
+
+`scripts/package_release.py` assembles a relocatable directory containing a
+built translator, the selected compatibility and standard-library sources,
+explicit license files, and a versioned hash manifest. It refuses stale
+compiler provenance and existing destinations. The repository has no
+project-level `LICENSE`, so a distributable package remains unavailable until
+the applicable license set is selected and supplied. See
+[`docs/releasing.md`](docs/releasing.md) for the exact inputs and release gates.
+
 Wolf4SDL is the next exploratory corpus. Its implementation is predominantly
 procedural C-style code, although most files use a `.cpp` extension and a few
 translation units use genuine C++ containers. The source is kept separate from
