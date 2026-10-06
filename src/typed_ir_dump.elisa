@@ -108,11 +108,64 @@ extend CTranslator:
             out.push(string_view_index(digits, byte / 16).u8())
             out.push(string_view_index(digits, byte % 16).u8())
 
+    def typed_dump_append_hex_u64(out: mutable darray[u8]&, value: u64) -> void:
+        digits: sview = "0123456789abcdef"
+        for index in 0..<16 |out, value, digits|:
+            shift: i64 = (15 - index) * 4
+            digit: i64 = ((value >> shift.u64()) & 15.u64()).i64()
+            out.push(string_view_index(digits, digit).u8())
+
+    def typed_dump_append_content_hash(out: mutable darray[u8]&, name: sview, hash: TypedContentHash) -> void:
+        typed_dump_append_view(out, sview(" ", 0, -1))
+        typed_dump_append_view(out, name)
+        typed_dump_append_view(out, sview("=", 0, -1))
+        if hash.available:
+            typed_dump_append_hex_u64(out, hash.value)
+        else:
+            typed_dump_append_view(out, sview("null", 0, -1))
+
     def typed_dump_append_bool(out: mutable darray[u8]&, value: bool) -> void:
         if value:
             typed_dump_append_view(out, sview("true", 0, -1))
         else:
             typed_dump_append_view(out, sview("false", 0, -1))
+
+    def typed_dump_append_fp_option(out: mutable darray[u8]&, name: sview, value: sview) -> void:
+        typed_dump_append_view(out, sview("fp_option ", 0, -1))
+        typed_dump_append_view(out, name)
+        typed_dump_append_view(out, sview("=", 0, -1))
+        typed_dump_append_view(out, value)
+        typed_dump_append_view(out, sview("\n", 0, -1))
+
+    def typed_dump_append_fp_options(out: mutable darray[u8]&, options: ClangFPOptionVector) -> void:
+        typed_dump_append_fp_option(out, sview("exception_behavior", 0, -1), clang_fp_exception_setting_name(options.exception_behavior))
+        typed_dump_append_fp_option(out, sview("fenv_access", 0, -1), clang_fp_boolean_setting_name(options.fenv_access))
+        typed_dump_append_fp_option(out, sview("rounding_mode", 0, -1), clang_fp_rounding_setting_name(options.rounding_mode))
+        typed_dump_append_fp_option(out, sview("rounding_math", 0, -1), clang_fp_boolean_setting_name(options.rounding_math))
+        typed_dump_append_fp_option(out, sview("contract", 0, -1), clang_fp_contract_setting_name(options.contract))
+        typed_dump_append_fp_option(out, sview("explicit_contract", 0, -1), clang_fp_contract_setting_name(options.explicit_contract))
+        typed_dump_append_fp_option(out, sview("contract_explicitly_seen", 0, -1), "true" if options.contract_explicitly_seen else "false")
+        typed_dump_append_fp_option(out, sview("denormal", 0, -1), clang_fp_denormal_setting_name(options.denormal))
+        typed_dump_append_fp_option(out, sview("denormal_fp32", 0, -1), clang_fp_denormal_setting_name(options.denormal_fp32))
+        typed_dump_append_fp_option(out, sview("math_errno", 0, -1), clang_fp_boolean_setting_name(options.math_errno))
+        typed_dump_append_fp_option(out, sview("honor_nans", 0, -1), clang_fp_boolean_setting_name(options.honor_nans))
+        typed_dump_append_fp_option(out, sview("honor_infinities", 0, -1), clang_fp_boolean_setting_name(options.honor_infinities))
+        typed_dump_append_fp_option(out, sview("finite_math_only", 0, -1), clang_fp_boolean_setting_name(options.finite_math_only))
+        typed_dump_append_fp_option(out, sview("signed_zeros", 0, -1), clang_fp_boolean_setting_name(options.signed_zeros))
+        typed_dump_append_fp_option(out, sview("associative_math", 0, -1), clang_fp_boolean_setting_name(options.associative_math))
+        typed_dump_append_fp_option(out, sview("reciprocal_math", 0, -1), clang_fp_boolean_setting_name(options.reciprocal_math))
+        typed_dump_append_fp_option(out, sview("approximate_functions", 0, -1), clang_fp_boolean_setting_name(options.approximate_functions))
+        typed_dump_append_fp_option(out, sview("trapping_math", 0, -1), clang_fp_boolean_setting_name(options.trapping_math))
+        typed_dump_append_fp_option(out, sview("cx_limited_range", 0, -1), clang_fp_boolean_setting_name(options.cx_limited_range))
+        typed_dump_append_fp_option(out, sview("float_store", 0, -1), clang_fp_boolean_setting_name(options.float_store))
+        typed_dump_append_fp_option(out, sview("strict_float_cast_overflow", 0, -1), clang_fp_boolean_setting_name(options.strict_float_cast_overflow))
+        typed_dump_append_fp_option(out, sview("single_precision_constant", 0, -1), clang_fp_boolean_setting_name(options.single_precision_constant))
+        typed_dump_append_fp_option(out, sview("protect_parens", 0, -1), clang_fp_boolean_setting_name(options.protect_parens))
+        typed_dump_append_fp_option(out, sview("complex_arithmetic", 0, -1), clang_fp_complex_setting_name(options.complex_arithmetic))
+        typed_dump_append_fp_option(out, sview("eval_method", 0, -1), clang_fp_eval_setting_name(options.eval_method))
+        typed_dump_append_fp_option(out, sview("excess_precision", 0, -1), clang_fp_excess_precision_setting_name(options.excess_precision))
+        typed_dump_append_fp_option(out, sview("driver_link_effect", 0, -1), clang_fp_driver_link_effect_name(options.driver_link_effect))
+        typed_dump_append_fp_option(out, sview("unknown_option_seen", 0, -1), "true" if options.unknown_option_seen else "false")
 
     def typed_dump_diagnostic(out: mutable darray[u8]&, index: i64, diagnostic: TypedDiagnostic) -> void:
         typed_dump_append_view(out, sview("diagnostic ", 0, -1))
@@ -125,6 +178,9 @@ extend CTranslator:
         typed_dump_append_hex(out, diagnostic.subject_type)
         typed_dump_append_view(out, sview(" required_capability_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.required_capability)
+        typed_dump_append_view(out, sview(" translation_unit_hex=", 0, -1))
+        typed_dump_append_hex(out, diagnostic.translation_unit)
+        typed_dump_append_content_hash(out, sview("translation_unit_content_hash", 0, -1), diagnostic.translation_unit_content_hash)
         typed_dump_append_view(out, sview(" range_start_offset=", 0, -1))
         typed_dump_append_i64(out, diagnostic.range_start_offset)
         typed_dump_append_view(out, sview(" range_end_offset=", 0, -1))
@@ -133,22 +189,27 @@ extend CTranslator:
         typed_dump_append_hex(out, diagnostic.source)
         typed_dump_append_view(out, sview(" physical_source_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.canonical_source)
+        typed_dump_append_content_hash(out, sview("source_content_hash", 0, -1), diagnostic.source_content_hash)
         typed_dump_append_view(out, sview(" spelling_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.spelling_source)
         typed_dump_append_view(out, sview(" spelling_physical_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.spelling_canonical_source)
+        typed_dump_append_content_hash(out, sview("spelling_source_content_hash", 0, -1), diagnostic.spelling_source_content_hash)
         typed_dump_append_view(out, sview(" spelling_included_from_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.spelling_included_from)
         typed_dump_append_view(out, sview(" spelling_included_from_physical_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.spelling_included_from_canonical)
+        typed_dump_append_content_hash(out, sview("spelling_included_from_content_hash", 0, -1), diagnostic.spelling_included_from_content_hash)
         typed_dump_append_view(out, sview(" expansion_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.expansion_source)
         typed_dump_append_view(out, sview(" expansion_physical_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.expansion_canonical_source)
+        typed_dump_append_content_hash(out, sview("expansion_source_content_hash", 0, -1), diagnostic.expansion_source_content_hash)
         typed_dump_append_view(out, sview(" expansion_included_from_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.expansion_included_from)
         typed_dump_append_view(out, sview(" expansion_included_from_physical_hex=", 0, -1))
         typed_dump_append_hex(out, diagnostic.expansion_included_from_canonical)
+        typed_dump_append_content_hash(out, sview("expansion_included_from_content_hash", 0, -1), diagnostic.expansion_included_from_content_hash)
         typed_dump_append_view(out, sview(" location=", 0, -1))
         typed_dump_append_i64(out, diagnostic.line)
         typed_dump_append_view(out, sview(":", 0, -1))
@@ -169,9 +230,13 @@ extend CTranslator:
     # source formatting and can be consumed by regression tooling.
     def typed_dump_ir[@r](ctx: TypedContext[r]&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
         out: mutable darray[u8] = []
-        typed_dump_append_view(&out, sview("typed-ir-v13\nsource_hex=", 0, -1))
+        typed_dump_append_view(&out, sview("typed-ir-v16\nsource_hex=", 0, -1))
         typed_dump_append_hex(&out, sview(ctx.source, 0, -1))
         typed_dump_append_view(&out, sview("\n", 0, -1))
+        typed_dump_append_view(&out, sview("floating_point_mode=", 0, -1))
+        typed_dump_append_view(&out, clang_fp_mode_name(ctx.floating_point_options.mode))
+        typed_dump_append_view(&out, sview("\n", 0, -1))
+        typed_dump_append_fp_options(&out, ctx.floating_point_options)
         typed_dump_append_view(&out, sview("counts exprs=", 0, -1))
         typed_dump_append_i64(&out, ctx.exprs.count.i64())
         typed_dump_append_view(&out, sview(" expr_children=", 0, -1))

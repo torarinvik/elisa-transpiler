@@ -1,4 +1,8 @@
 extend CTranslator:
+    struct TypedContentHash:
+        value: u64
+        available: bool
+
     struct TypedSourceRange[@r]:
         file: sview @r
         included_from: sview @r
@@ -16,6 +20,7 @@ extend CTranslator:
 
     struct TypedIRSourceOrigin[@r]:
         node: JsonValueHandle[r]
+        translation_unit: sview @r
         source: TypedSourceRange[r]
         spelling: TypedSourceRange[r]
         expansion: TypedSourceRange[r]
@@ -24,6 +29,7 @@ extend CTranslator:
     struct TypedGeneratedSourceSpan[@r]:
         generated_start: mutable i64
         generated_end: mutable i64
+        translation_unit: sview @r
         source: TypedOwnedSourceRange[r]
         spelling: TypedOwnedSourceRange[r]
         expansion: TypedOwnedSourceRange[r]

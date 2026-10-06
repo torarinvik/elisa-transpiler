@@ -2,7 +2,7 @@ extend CTranslator:
     def typed_set_expr_source_origin[@r](ctx: mutable TypedContext[r]&, index: i64, node: JsonValueHandle[r], reason: sview) -> void:
         return if not ctx.source_mapping_enabled or index < 0 or index >= ctx.expr_source_origins.count.i64()
         origin: TypedIRSourceOrigin[r] = ctx.expr_source_origins[index.usize()]
-        ctx.expr_source_origins[index.usize()] <- typed_ir_source_origin(node, reason) if json_handle_is_null(origin.node)
+        ctx.expr_source_origins[index.usize()] <- typed_ir_source_origin(node, reason, ctx.canonical_source) if json_handle_is_null(origin.node)
 
     def typed_lower_expr[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         start: i64 = ctx.exprs.count.i64()

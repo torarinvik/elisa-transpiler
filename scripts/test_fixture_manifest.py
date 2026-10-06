@@ -60,6 +60,9 @@ def run_arguments(output_dir, timeout=None, max_rss_kb=None):
 
 
 class FixtureManifestRunnerTests(unittest.TestCase):
+    def test_macos_default_free_memory_floor_matches_setup_safety_floor(self):
+        self.assertEqual(RUNNER.DEFAULT_MACOS_SYSTEM_MEMORY_FLOOR_PERCENT, 60)
+
     def run_case_quietly(self, case, output_dir, feature_families=None):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return RUNNER.run_case(case, run_arguments(output_dir), feature_families)
@@ -247,12 +250,40 @@ class FixtureManifestRunnerTests(unittest.TestCase):
     def test_timeout_kills_child_process_group(self):
         with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
             marker = Path(temporary) / "child-survived"
-            child_code = "import pathlib,time;time.sleep(0.5);pathlib.Path(%r).touch()" % str(marker)
-            parent_code = "import subprocess,sys,time;subprocess.Popen([sys.executable,'-c',%r]);time.sleep(30)" % child_code
-            result, _, _ = RUNNER.run_command(Path(temporary), "timeout", python_argv(parent_code), 0.1)
-            self.assertEqual(result["status"], "timed_out")
-            time.sleep(0.6)
-            self.assertFalse(marker.exists(), "timed-out child outlived its process group")
+            ready = Path(temporary) / "child-ready"
+            group_id_file = Path(temporary) / "owned-group"
+            child_code = (
+                "import os,pathlib,signal,sys,time;"
+                f"marker=pathlib.Path({str(marker)!r});"
+                "signal.signal(signal.SIGTERM,lambda *_:(marker.write_text('terminated'),sys.exit(0)));"
+                f"pathlib.Path({str(ready)!r}).write_text(str(os.getpid()));"
+                "time.sleep(30)"
+            )
+            parent_code = (
+                "import os,pathlib,subprocess,sys,time\n"
+                f"pathlib.Path({str(group_id_file)!r}).write_text(str(os.getpid()))\n"
+                f"subprocess.Popen([sys.executable,'-c',{child_code!r}])\n"
+                f"ready=pathlib.Path({str(ready)!r})\n"
+                "startup_deadline=time.monotonic()+15\n"
+                "while not ready.exists() and time.monotonic()<startup_deadline:\n"
+                " time.sleep(0.01)\n"
+                "time.sleep(30)\n"
+            )
+            result, _, _ = RUNNER.run_command(Path(temporary), "timeout", python_argv(parent_code), 2.0)
+            test_passed = False
+            try:
+                self.assertEqual(result["status"], "timed_out")
+                self.assertTrue(ready.exists(), "child did not reach its ready state before timeout")
+                self.assertTrue(marker.exists(), "timed-out child did not receive process-group SIGTERM")
+                self.assertEqual(marker.read_text(encoding="utf-8"), "terminated")
+                test_passed = True
+            finally:
+                # A regression must not leave behind the test-owned child.
+                if not test_passed and group_id_file.exists():
+                    try:
+                        os.killpg(int(group_id_file.read_text(encoding="utf-8")), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     @unittest.skipUnless(os.name == "posix", "process-group RSS monitoring is POSIX-specific")
     def test_rss_limit_kills_owned_stage_and_is_classified(self):

@@ -1,0 +1,70 @@
+extend CTranslator:
+    def typed_lower_function[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], inside_anonymous_namespace: bool) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        saved_function_name: sview = ctx.current_function_name
+        saved_function_id: sview = ctx.current_function_id
+        saved_function_source: sview = ctx.current_function_source
+        ctx.current_function_name <- ast_name(node)
+        ctx.current_function_id <- ast_string(ast_field(node, sview("id", 0, -1)))
+        ctx.current_function_source <- ast_location_source_file(node)
+        ctx.current_function_source <- sview(ctx.source, 0, -1) if ctx.current_function_source.len == 0
+        params_start: i64 = ctx.params.count.i64()
+        ordinal: mutable i64 = 0
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, ordinal|:
+                parameter: JsonValueHandle[r] = ast_child(node, index)
+                if sview_eq(ast_kind(parameter), sview("ParmVarDecl", 0, -1)):
+                    parameter_type: sview = typed_c_type(ctx, parameter) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    if c_type_has_nonconstant_array_bound(parameter_type) or c_type_has_zero_array_bound(parameter_type):
+                        typed_record_unsupported(ctx, parameter, sview("variable or zero-length array parameter bound/lifetime", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    # A C parameter is a local object even when its pointee is
+                    # const; `const T *p` still permits rebinding p.
+                    is_mutable: bool = false
+                    parameter_name: mutable sview = safe_identifier(ast_name(parameter))
+                    parameter_name <- external_parameter_name(ordinal) if parameter_name.len == 0
+                    ctx.params.push(TypedParam[r]{name: parameter_name, type_name: parameter_type, is_mutable: is_mutable})
+                    ordinal <- ordinal + 1
+        body_node: JsonValueHandle[r] = ast_find_child(node, sview("CompoundStmt", 0, -1))
+        ctx.labels <- []
+        typed_collect_labels(ctx, body_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        saved_return_type: sview = ctx.current_return_type
+        saved_has_goto: bool = ctx.current_has_goto
+        function_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        # Clang keeps a typedef name on some function return types even when
+        # the alias table knows that it denotes a function pointer. Resolve
+        # the return declarator before selecting the typed-IR result type.
+        function_result_type: sview = typed_resolve_type_aliases(ctx, c_function_return_type(function_type)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        ctx.current_return_type <- typed_emitted_value_type(ctx, function_result_type)
+        ctx.current_has_goto <- false
+        first_compound_literal: i64 = ctx.compound_literals.count.i64()
+        first_expr: i64 = ctx.exprs.count.i64()
+        body: i64 = typed_lower_stmt(ctx, body_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        body <- typed_attach_compound_literal_storage(ctx, body, first_compound_literal, first_expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if body >= 0
+        has_goto: bool = ctx.current_has_goto
+        ctx.current_return_type <- saved_return_type
+        ctx.current_function_name <- saved_function_name
+        ctx.current_function_id <- saved_function_id
+        ctx.current_function_source <- saved_function_source
+        ctx.current_has_goto <- saved_has_goto
+        if body < 0:
+            return -1
+        label_count: mutable i64 = ctx.labels.count.i64()
+        label_count <- -1 - label_count if ctx.project_mode and ast_is_header_inline_definition(node, ctx.source)
+        function_name: sview = safe_identifier(ast_name(node))
+        function_link_name: mutable sview = ""
+        # Project output is also a linkable translation unit. Preserve C/C++
+        # external linkage with a thin export wrapper, while keeping the actual
+        # implementation private to Elisa. Static and header-inline definitions
+        # must remain local, and C varargs cannot yet cross an export boundary.
+        if ctx.project_mode and label_count >= 0 and not ast_is_static_decl(node) and not inside_anonymous_namespace and not sview_eq(function_name, sview("main", 0, -1)) and sview_find_byte(function_type, 46) < 0:
+            function_link_name <- ast_function_link_name(node)
+        declaration_id: sview = typed_decl_identity(ctx, node)
+        function_index: i64 = typed_push_function(ctx, TypedFunction[r]{name: function_name, declaration_id: declaration_id, internal_linkage: ast_is_static_decl(node) or inside_anonymous_namespace, link_name: function_link_name, return_type: function_type, params_start: params_start, params_count: ctx.params.count.i64() - params_start, body: body, variadic: sview_find_byte(function_type, 46) >= 0, has_global_effect: ast_contains_static_decl(body_node), has_unsafe_effect: ast_contains_kind(node, sview("ArraySubscriptExpr", 0, -1)), has_goto: has_goto, label_count: label_count, comment: ast_comment_text(node)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        signature_index: i64 = typed_user_function_signature_index(ctx, declaration_id, ast_name(node), function_type)
+        if signature_index >= 0:
+            signature: TypedUserFunctionSignature[r] = ctx.user_function_signatures[signature_index.usize()]
+            ctx.user_function_signatures[signature_index.usize()] <- TypedUserFunctionSignature[r]{
+                name: signature.name, type_name: signature.type_name, result_type: signature.result_type, declaration_id: signature.declaration_id,
+                function_index: function_index, params_count: signature.params_count, variadic: signature.variadic
+            }
+        return function_index

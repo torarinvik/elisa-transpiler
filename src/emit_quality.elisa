@@ -72,6 +72,9 @@ extend CTranslator:
     def typed_expr_is_assignment_value_sequence[@r](expression: TypedExpr[r]) -> bool:
         return expression.kind == TypedExprKind.Sequence and expression.value == 5
 
+    def typed_expr_is_compound_literal_sequence[@r](expression: TypedExpr[r]) -> bool:
+        return expression.kind == TypedExprKind.Sequence and (expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_MUTABLE or expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_READONLY)
+
     def typed_expr_is_compound_assignment_value_sequence[@r](expression: TypedExpr[r]) -> bool:
         return expression.kind == TypedExprKind.Sequence and expression.value >= 6 and expression.value <= 15
     def typed_compound_assignment_value_helper_is_first[@r](ctx: TypedContext[r]&, index: i64) -> bool:
@@ -201,15 +204,33 @@ extend CTranslator:
         if sview_eq(expression.text, sview("*", 0, -1)) and typed_expr_is_one_literal(ctx, expression.lhs):
             return expression.rhs
         return -1
+    def typed_expr_identity_result_type_matches[@r](ctx: TypedContext[r]&, index: i64, operand_index: i64) -> bool:
+        return false if index < 0 or index >= ctx.exprs.count.i64() or operand_index < 0 or operand_index >= ctx.exprs.count.i64()
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        operand: TypedExpr[r] = typed_expr_at(ctx, operand_index)
+        # `sizeof` nodes retain their operand type for emission, although the
+        # emitted size value has the target's size_t representation.
+        return true if operand.kind == TypedExprKind.Sizeof
+        return false if not c_type_is_integer(expression.type_name) or not c_type_is_integer(operand.type_name)
+        expression_abi_type: sview = clang_target_type_abi_base(ctx.target_abi, expression.type_name)
+        operand_abi_type: sview = clang_target_type_abi_base(ctx.target_abi, operand.type_name)
+        return expression_abi_type.len > 0 and sview_eq(expression_abi_type, operand_abi_type)
     def typed_expr_is_identity_binary[@r](ctx: TypedContext[r]&, index: i64) -> i64:
         return -1 if index < 0 or index >= ctx.exprs.count.i64()
         expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return -1 if expression.kind != TypedExprKind.Binary or not c_type_is_integer(expression.type_name)
+        candidate: i64 = typed_expr_identity_binary_candidate_operand(ctx, index)
+        return -1 if (sview_eq(expression.text, sview("<<", 0, -1)) or sview_eq(expression.text, sview(">>", 0, -1))) and not c_type_is_unsigned_integer(expression.type_name)
+        return -1 if candidate < 0 or not typed_expr_identity_result_type_matches(ctx, index, candidate)
         return -1 if not typed_expr_is_side_effect_free(ctx, expression.rhs) or not typed_expr_is_side_effect_free(ctx, expression.lhs)
-        return typed_expr_identity_binary_candidate_operand(ctx, index)
+        return candidate
     def typed_expr_identity_binary_decline_reason[@r](ctx: TypedContext[r]&, index: i64) -> sview:
         return sview("", 0, 0) if typed_expr_identity_binary_candidate_operand(ctx, index) < 0
         expression: TypedExpr[r] = typed_expr_at(ctx, index)
         return sview("result-not-integer", 0, -1) if not c_type_is_integer(expression.type_name)
+        return sview("signed-left-shift-may-be-undefined", 0, -1) if sview_eq(expression.text, sview("<<", 0, -1)) and not c_type_is_unsigned_integer(expression.type_name)
+        return sview("signed-right-shift-is-implementation-defined", 0, -1) if sview_eq(expression.text, sview(">>", 0, -1)) and not c_type_is_unsigned_integer(expression.type_name)
+        candidate: i64 = typed_expr_identity_binary_candidate_operand(ctx, index)
+        return sview("operand-result-abi-type-mismatch", 0, -1) if not typed_expr_identity_result_type_matches(ctx, index, candidate)
         return sview("operand-has-side-effects", 0, -1) if not typed_expr_is_side_effect_free(ctx, expression.rhs) or not typed_expr_is_side_effect_free(ctx, expression.lhs)
         return sview("", 0, 0)

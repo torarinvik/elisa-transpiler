@@ -32,5 +32,14 @@ static std::unordered_map<int*, int> pointer_keys;
 
 int main()
 {
+    std::unordered_map<int, int> unsupported_operation;
+    unsupported_operation[1] = 22;
+    auto unsupported_iterator = unsupported_operation.find(1);
+    // erase(iterator) is a distinct overload from the supported erase(key).
+    unsupported_operation.erase(unsupported_iterator);
+    // The iterator-range overload is also outside the current adapter.
+    unsupported_operation.erase(unsupported_operation.find(1), unsupported_operation.find(2));
+    // reserve() is not part of the current Elisa adapter.
+    unsupported_operation.reserve(16);
     return 0;
 }

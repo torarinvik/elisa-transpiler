@@ -1,0 +1,1 @@
+-O2 -ffast-math -c testdata/fixtures/simple.c

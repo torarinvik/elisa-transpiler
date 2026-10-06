@@ -9,6 +9,7 @@ extend CTranslator:
         has_arguments: bool
         command_valid: bool
         short_enums: bool
+        floating_point_options: ClangFPOptionVector
 
     def cli_module_stem(source: sview) -> sview:
         start: mutable i64 = 0

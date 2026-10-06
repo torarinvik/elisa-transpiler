@@ -138,6 +138,15 @@ extend CTranslator:
                     append_view(out, sview("), ", 0, -1))
                     typed_emit_expr(out, ctx, assignment.rhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     append_view(out, sview(")", 0, -1))
+                elif typed_expr_is_compound_literal_sequence(expression):
+                    assignment: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
+                    out.push(4) if expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_MUTABLE else out.push(5)
+                    typed_emit_compound_literal_helper_name(out, ctx, expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_READONLY)
+                    append_view(out, sview("(&(", 0, -1))
+                    typed_emit_expr(out, ctx, assignment.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview("), ", 0, -1))
+                    typed_emit_expr(out, ctx, assignment.rhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview(")", 0, -1))
                 elif typed_expr_is_compound_assignment_value_sequence(expression):
                     assignment: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
                     update: TypedExpr[r] = typed_expr_at(ctx, assignment.rhs)
@@ -260,16 +269,14 @@ extend CTranslator:
                     typed_emit_expr(out, ctx, expression.rhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     append_view(out, sview("]", 0, -1))
                 else:
-                    append_view(out, sview("(", 0, -1)) if nested.kind == TypedExprKind.Name and sview_eq(nested.text, sview("argv", 0, -1))
                     typed_emit_nonnull_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     append_view(out, sview("[", 0, -1))
                     typed_emit_expr(out, ctx, expression.rhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     append_view(out, sview("]", 0, -1))
-                    # C++ unordered_map stores mapped values inside a generic
-                    # entry box so nullable pointer values do not become
-                    # dictionary elements of optional-reference type.
-                    append_view(out, sview(".value", 0, -1)) if cpp_type_is_unordered_map(nested.type_name)
-                    append_view(out, sview(")", 0, -1)) if nested.kind == TypedExprKind.Name and sview_eq(nested.text, sview("argv", 0, -1))
+                    # C++ unordered_map entries point to stable arena-backed
+                    # slots; project the mapped lvalue across dictionary rehash.
+                    if cpp_type_is_unordered_map(nested.type_name):
+                        append_view(out, sview(".slot.value", 0, -1))
             TypedExprKind.Conditional:
                 typed_emit_conditional_value(out, ctx, index, expression.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             TypedExprKind.Member:
@@ -366,7 +373,7 @@ extend CTranslator:
                     # `VAArgExpr` is lowered to this compiler-owned marker. The
                     # result type comes from Clang, so the generated source keeps
                     # the exact requested element type (`va_arg[i32]`, `va_arg[f64]`,
-                    # or a translated aggregate) without a cJSON-specific mapping.
+                    # or a translated aggregate) without a source-library-specific mapping.
                     append_view(out, sview("va_arg[", 0, -1))
                     append_c_type_contextual(out, ctx, expression.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     append_view(out, sview("]((&", 0, -1))

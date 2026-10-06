@@ -11,19 +11,52 @@ output_path=${2:-build/quality.generated.elisa}
 coverage_summary=${3:-}
 coverage_manifest=${4:-}
 translator_bin=${ELISA_TRANSLATOR_BIN:-./build/elisa-c-transpiler}
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
+source_report_path=$(python3 "$script_dir/quality_provenance.py" --json-string "$source_path")
+output_report_path=$(python3 "$script_dir/quality_provenance.py" --json-string "$output_path")
+compiler_manifest=${ELISA_COMPILER_COMPATIBILITY_MANIFEST:-$repo_dir/docs/compiler_compatibility.json}
+case "$translator_bin" in
+    */*) ;;
+    *)
+        resolved_translator=$(command -v "$translator_bin" || true)
+        if [ -z "$resolved_translator" ]; then
+            printf 'quality report: translator executable not found: %s\n' "$translator_bin" >&2
+            exit 2
+        fi
+        translator_bin=$resolved_translator
+        ;;
+esac
+if [ ! -f "$translator_bin" ] || [ ! -x "$translator_bin" ]; then
+    printf 'quality report: translator is not an executable file: %s\n' "$translator_bin" >&2
+    exit 2
+fi
+if ! python3 "$script_dir/quality_provenance.py" --check-output \
+    "$output_path" "$source_path" "$translator_bin" "$compiler_manifest" \
+    "$coverage_summary" "$coverage_manifest"; then
+    exit 2
+fi
 mkdir -p "$(dirname -- "$output_path")"
 quality_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/elisa-quality.XXXXXX")
 trap 'rm -rf "$quality_tmp_dir"' EXIT HUP INT TERM
 quality_ir_path=$quality_tmp_dir/typed-ir.dump
+source_sha256_before=$(python3 "$script_dir/quality_provenance.py" --hash-file "$source_path")
+translator_sha256_before=$(python3 "$script_dir/quality_provenance.py" --hash-file "$translator_bin")
 if ! "$translator_bin" --dump-typed-ir --explain-rewrites \
     "$source_path" > "$output_path" 2> "$quality_ir_path"; then
     cat "$quality_ir_path" >&2
     exit 1
 fi
 
-ir_version=$(sed -n '1p' "$quality_ir_path")
-if [ "$ir_version" != "typed-ir-v13" ]; then
-    printf 'quality report: unsupported typed-IR dump version %s (expected typed-ir-v13)\n' \
+ir_header_count=$(rg -c '^typed-ir-v[0-9]+$' "$quality_ir_path" 2>/dev/null || true)
+if [ "$ir_header_count" != 1 ]; then
+    printf 'quality report: expected exactly one typed-IR version header, found %s\n' \
+        "${ir_header_count:-0}" >&2
+    exit 2
+fi
+ir_version=$(rg -m 1 '^typed-ir-v[0-9]+$' "$quality_ir_path" || true)
+if [ "$ir_version" != "typed-ir-v16" ]; then
+    printf 'quality report: unsupported typed-IR dump version %s (expected typed-ir-v16)\n' \
         "${ir_version:-<missing>}" >&2
     exit 2
 fi
@@ -46,7 +79,7 @@ for required_ir_count in exprs stmts switch_cases functions globals; do
     count_field_occurrences=$(printf '%s\n' "$counts_line" \
         | rg -o "(^| )${required_ir_count}=[^ ]+" | wc -l | tr -d ' ')
     if [ "$count_field_occurrences" != 1 ]; then
-        printf 'quality report: typed-IR v13 counts record has %s %s fields; expected exactly one\n' \
+        printf 'quality report: typed-IR v16 counts record has %s %s fields; expected exactly one\n' \
             "${count_field_occurrences:-0}" "$required_ir_count" >&2
         exit 2
     fi
@@ -54,7 +87,7 @@ for required_ir_count in exprs stmts switch_cases functions globals; do
         | sed -n "s/.* ${required_ir_count}=\\([0-9][0-9]*\\).*/\\1/p")
     case "$count_value" in
         ''|*[!0-9]*)
-            printf 'quality report: typed-IR v13 counts record has no unique non-negative %s field\n' \
+            printf 'quality report: typed-IR v16 counts record has no unique non-negative %s field\n' \
                 "$required_ir_count" >&2
             exit 2
             ;;
@@ -82,6 +115,9 @@ if ! awk -v expected_exprs="$expected_ir_exprs" -v expected_statements="$expecte
 fi
 
 ir_function_metrics=$(python3 scripts/quality_ir_metrics.py "$quality_ir_path")
+ir_provenance=$(python3 "$script_dir/quality_provenance.py" \
+    "$source_path" "$output_path" "$translator_bin" "$compiler_manifest" \
+    "$source_sha256_before" "$translator_sha256_before")
 
 ir_expr_kind_count() {
     kind=$1
@@ -160,8 +196,9 @@ ir_sequence_nodes_per_1000_exprs=$(per_unit_rate "$ir_sequence_node_count" "$ir_
 ir_control_nodes_per_function=$(per_unit_rate "$ir_control_node_count" "$ir_function_count" 1)
 ir_loop_nodes_per_function=$(per_unit_rate "$ir_loop_node_count" "$ir_function_count" 1)
 
-printf 'source: %s\n' "$source_path"
-printf 'output: %s\n' "$output_path"
+printf 'source: %s\n' "$source_report_path"
+printf 'output: %s\n' "$output_report_path"
+printf '%s\n' "$ir_provenance"
 printf 'lines: %s\n' "$line_count"
 printf 'functions: %s\n' "$function_count"
 printf 'externals: %s\n' "$external_count"
@@ -189,6 +226,7 @@ printf 'ir_loop_nodes: %s\n' "$ir_loop_node_count"
 printf 'ir_control_nodes: %s\n' "$ir_control_node_count"
 printf 'ir_gotos: %s\n' "${ir_goto_count:-0}"
 printf 'ir_labels: %s\n' "${ir_label_count:-0}"
+printf '%s\n' "$ir_function_metrics" | sed -n '/^ir_rewrite_/p'
 printf 'rewrite_redundant_casts: %s\n' "$rewrite_redundant_casts"
 printf 'rewrite_identity_binaries: %s\n' "$rewrite_identity_binaries"
 printf 'rewrite_integer_folds: %s\n' "$rewrite_integer_folds"
@@ -207,7 +245,7 @@ printf 'ir_cast_nodes_per_1000_ir_exprs: %s\n' "$ir_cast_nodes_per_1000_exprs"
 printf 'ir_sequence_nodes_per_1000_ir_exprs: %s\n' "$ir_sequence_nodes_per_1000_exprs"
 printf 'ir_control_nodes_per_function: %s\n' "$ir_control_nodes_per_function"
 printf 'ir_loop_nodes_per_function: %s\n' "$ir_loop_nodes_per_function"
-printf '%s\n' "$ir_function_metrics"
+printf '%s\n' "$ir_function_metrics" | sed -n '/^ir_functions_with_bodies:/,$p'
 if [ -n "$coverage_summary" ]; then
     if [ -n "$coverage_manifest" ]; then
         python3 scripts/quality_coverage.py "$coverage_summary" "$coverage_manifest"

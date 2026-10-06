@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/simple.c\u0000truncated",
+    "arguments": ["clang", "-std=c11", "testdata/fixtures/simple.c"]
+  }
+]

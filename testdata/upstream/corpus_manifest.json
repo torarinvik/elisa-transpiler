@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "canonical_suite_command": "sh scripts/test.sh --suite upstream",
+  "repository_file_hashes": {
+    "testdata/fixtures/cjson_smoke.c": "f64cc359108bbfaf9cedbd905e928f97d40e566a0fd824251a0d86cabf249c5e"
+  },
+  "corpora": [
+    {
+      "name": "inih",
+      "root": "testdata/upstream/inih",
+      "required_for_suite": true,
+      "source_identity": {
+        "kind": "vendored-git-tree",
+        "tree": "33787047c04375515565b09f2bbf7f9116e96291",
+        "recorded_by_commit": "dc4e1cc6ddcb81c421027a55a30ca912c77cc6b6",
+        "upstream_url": "https://github.com/benhoyt/inih",
+        "upstream_revision": "26254ee9de7681f8825433415443e7116ff24b98",
+        "release": "r62"
+      },
+      "license": {
+        "spdx": "BSD-3-Clause",
+        "files": ["LICENSE.txt"]
+      },
+      "provenance_files": ["ini.c", "ini.h", "examples/ini_dump.c"],
+      "translation": {
+        "source": "examples/ini_dump.c",
+        "argv": ["{translator}", "{source}"],
+        "suite_script": "scripts/test_suites/upstream_smoke.sh"
+      },
+      "native": {
+        "kind": "commands",
+        "compiler": "clang",
+        "commands": [
+          ["clang", "-std=c11", "-DINI_USE_STACK=1", "-I", "{corpus_root}", "-c", "{corpus_root}/ini.c", "-o", "{build_dir}/ini.o"],
+          ["clang", "-std=c11", "-DINI_USE_STACK=1", "-I", "{corpus_root}", "-I", "{corpus_root}/examples", "{corpus_root}/examples/ini_dump.c", "{corpus_root}/ini.c", "-o", "{build_dir}/ini_dump.native"]
+        ],
+        "behavior_checks": ["sample-file-output", "no-argument-status-output-diagnostics", "missing-file-status-output-diagnostics"]
+      }
+    },
+    {
+      "name": "kilo",
+      "root": "testdata/upstream/kilo",
+      "required_for_suite": true,
+      "source_identity": {
+        "kind": "vendored-git-tree",
+        "tree": "a51e102d34c15cacb4ec931761a40d139cf2962a",
+        "recorded_by_commit": "dc4e1cc6ddcb81c421027a55a30ca912c77cc6b6",
+        "upstream_url": "https://github.com/antirez/kilo",
+        "upstream_revision": "323d93b29bd89a2cb446de90c4ed4fea1764176e"
+      },
+      "license": {
+        "spdx": "BSD-2-Clause",
+        "files": ["LICENSE"]
+      },
+      "upstream_note": "Salvatore Sanfilippo (antirez); vendored tree matches the official repository HEAD checked during this audit.",
+      "provenance_files": ["kilo.c", "LICENSE"],
+      "translation": {
+        "source": "kilo.c",
+        "argv": ["{translator}", "{source}"],
+        "suite_script": "scripts/test_suites/upstream_smoke.sh"
+      },
+      "native": {
+        "kind": "commands",
+        "compiler": "clang",
+        "commands": [["clang", "-std=c11", "{corpus_root}/kilo.c", "-o", "{build_dir}/kilo.native"]],
+        "behavior_checks": ["no-argument-status-stdout-stderr"]
+      }
+    },
+    {
+      "name": "cJSON",
+      "root": "testdata/upstream/cJSON",
+      "required_for_suite": true,
+      "source_identity": {
+        "kind": "nested-git-commit",
+        "commit": "c859b25da02955fef659d658b8f324b5cde87be3",
+        "release": "v1.7.19",
+        "upstream_url": "https://github.com/DaveGamble/cJSON"
+      },
+      "license": {
+        "spdx": "MIT",
+        "files": ["LICENSE"]
+      },
+      "provenance_files": ["cJSON.c", "cJSON.h"],
+      "translation": {
+        "source": "testdata/fixtures/cjson_smoke.c",
+        "source_root": "repository",
+        "argv": ["{translator}", "{source}"],
+        "suite_script": "scripts/test_suites/upstream_smoke.sh"
+      },
+      "native": {
+        "kind": "commands",
+        "compiler": "clang",
+        "commands": [["clang", "-std=c11", "-I", "{corpus_root}", "{repo_root}/testdata/fixtures/cjson_smoke.c", "-lm", "-o", "{build_dir}/cjson.native"]],
+        "behavior_checks": ["smoke-output-equality"],
+        "elisa_compile_runtime_gate": "nullable-function-field compiler capability probe"
+      }
+    },
+    {
+      "name": "Wolf4SDL",
+      "root": "testdata/upstream/wolf4sdl",
+      "required_for_suite": false,
+      "source_identity": {
+        "kind": "nested-git-commit",
+        "commit": "a51c229ed89cab1904d68abb8938def3cf456725",
+        "upstream_url": "https://github.com/fabiangreffrath/wolf4sdl"
+      },
+      "license": {
+        "spdx": "GPL-2.0",
+        "files": ["license-gpl.txt"],
+        "separate_notice_files": ["license-id.txt"]
+      },
+      "provenance_files": ["Makefile", "version.h", "license-gpl.txt", "license-id.txt"],
+      "translation": {
+        "status": "exploratory-only",
+        "suite_script": null,
+        "compile_database_generator": "scripts/wolf_compile_commands.py",
+        "generated_compile_database": "build/wolf4sdl/compile_commands.json",
+        "note": "Generate a host-local database from the pinned SDL2 Makefile with python3 scripts/wolf_compile_commands.py after installing the SDL2 and SDL2_mixer development packages. The checked-in SDL3 database is not valid for this source snapshot."
+      },
+      "native": {
+        "kind": "documented-context-only",
+        "compiler": "host C and C++ compilers via Makefile",
+        "makefile": "Makefile",
+        "configured_source_units": [
+          "opl3.c", "id_ca.cpp", "id_in.cpp", "id_pm.cpp", "id_sd.cpp", "id_us_1.cpp", "id_vh.cpp", "id_vl.cpp", "signon.cpp", "wl_act1.cpp", "wl_act2.cpp", "wl_agent.cpp", "wl_atmos.cpp", "wl_cloudsky.cpp", "wl_debug.cpp", "wl_draw.cpp", "wl_floorceiling.cpp", "wl_game.cpp", "wl_inter.cpp", "wl_main.cpp", "wl_menu.cpp", "wl_parallax.cpp", "wl_play.cpp", "wl_state.cpp", "wl_text.cpp", "states.cpp"
+        ],
+        "all_source_units": [
+          "id_ca.cpp", "id_in.cpp", "id_pm.cpp", "id_sd.cpp", "id_us_1.cpp", "id_vh.cpp", "id_vl.cpp", "opl3.c", "signon.cpp", "states.cpp", "wl_act1.cpp", "wl_act2.cpp", "wl_agent.cpp", "wl_atmos.cpp", "wl_cloudsky.cpp", "wl_debug.cpp", "wl_dir3dspr.cpp", "wl_draw.cpp", "wl_floorceiling.cpp", "wl_game.cpp", "wl_inter.cpp", "wl_main.cpp", "wl_menu.cpp", "wl_parallax.cpp", "wl_play.cpp", "wl_shade.cpp", "wl_state.cpp", "wl_text.cpp"
+        ],
+        "not_in_default_build": ["wl_dir3dspr.cpp", "wl_shade.cpp"],
+        "c_standard": "gnu99",
+        "cxx_standard": "host compiler default",
+        "common_warning_flags": ["-Wall", "-Wpointer-arith", "-Wreturn-type", "-Wwrite-strings", "-Wcast-align"],
+        "c_only_warning_flags": ["-Werror-implicit-function-declaration", "-Wimplicit-int", "-Wsequence-point"],
+        "required_packages": ["sdl2", "SDL2_mixer"],
+        "note": "The Makefile builds the game, but complete native dependencies and a portable runtime/data-file gate are not currently provided by the translator test suite."
+      }
+    }
+  ]
+}

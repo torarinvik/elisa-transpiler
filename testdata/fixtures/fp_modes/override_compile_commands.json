@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/simple.c",
+    "command": "clang -Ofast -ffp-model=precise -c testdata/fixtures/simple.c"
+  }
+]

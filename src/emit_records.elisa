@@ -207,6 +207,7 @@ extend CTranslator:
             for index in 0..<count |ctx, node|:
                 field: JsonValueHandle[r] = ast_child(node, index)
                 if sview_eq(ast_kind(field), sview("FieldDecl", 0, -1)):
+                    typed_record_unsupported(ctx, field, sview("bit-field field layout and access", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if typed_field_is_bitfield_node(field)
                     field_type: sview = typed_c_type(ctx, field) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     typed_record_validate_array_field(ctx, field, field_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     ctx.fields.push(TypedField[r]{name: safe_identifier(ast_name(field)), type_name: field_type, is_mutable: c_type_pointer_count(field_type) > 0 and not c_type_is_const_pointer(field_type)})

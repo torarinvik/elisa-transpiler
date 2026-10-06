@@ -1,0 +1,130 @@
+extend CTranslator:
+    def typed_compound_literal_slot_index[@r](ctx: TypedContext[r]&, node_id: sview, function_id: sview) -> i64:
+        for index in 0..<ctx.compound_literals.count |ctx, node_id, function_id|:
+            slot: TypedCompoundLiteralStorage[r] = ctx.compound_literals[index]
+            return index if sview_eq(slot.node_id, node_id) and sview_eq(slot.function_id, function_id)
+        return -1
+
+    def typed_register_compound_literal[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], type_name: sview) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        node_id: sview = ast_string(ast_field(node, sview("id", 0, -1)))
+        if ctx.current_function_id.len == 0:
+            typed_record_unsupported(ctx, node, sview("file-scope compound-literal static storage", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        if node_id.len == 0:
+            typed_record_unsupported(ctx, node, sview("compound-literal storage identity", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        existing: i64 = typed_compound_literal_slot_index(ctx, node_id, ctx.current_function_id)
+        if existing >= 0:
+            return existing if sview_eq(ctx.compound_literals[existing.usize()].type_name, c_type_without_qualifiers(type_name))
+            typed_record_unsupported(ctx, node, sview("compound-literal type identity", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        generated_name: mutable darray[u8] = []
+        append_view(&generated_name, sview("__elisa_transpiler_compound_literal_", 0, -1))
+        append_i64(&generated_name, ctx.compound_literals.count.i64())
+        copied_name: cstr = string_view_copy(bytes_view(generated_name)) can Memory.Allocate
+        storage_type: sview = c_type_without_qualifiers(type_name)
+        ctx.compound_literals.push(TypedCompoundLiteralStorage[r]{node_id: node_id, function_id: ctx.current_function_id, name: sview(copied_name, 0, -1), type_name: storage_type, node: node})
+        return ctx.compound_literals.count.i64() - 1
+
+    def typed_lower_compound_literal_initializer[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], type_name: sview) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return typed_lower_expr(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if not sview_eq(ast_kind(node), sview("InitListExpr", 0, -1)) or c_type_is_array(type_name) or typed_record_index(ctx, type_name) >= 0
+        count: i64 = ast_initializer_child_count(node)
+        if count == 0:
+            return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if count != 1:
+            typed_record_unsupported(ctx, node, sview("scalar compound-literal initializer", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        return typed_lower_expr(ctx, ast_initializer_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_lower_compound_literal[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], type_name: sview) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        if ctx.source_language_is_cxx:
+            typed_record_unsupported(ctx, node, sview("C++ compound-literal lifetime semantics", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        if typed_type_spelling_has_word(type_name, sview("volatile", 0, -1)):
+            typed_record_unsupported(ctx, node, sview("volatile compound-literal access", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        if ast_child_count(node) != 1:
+            typed_record_unsupported(ctx, node, sview("compound-literal initializer shape", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        if typed_ast_has_effectful_comma(ast_child(node, 0)):
+            typed_record_unsupported(ctx, node, sview("compound-literal initializer sequencing", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        object_type: sview = c_type_without_qualifiers(c_array_base_type(type_name)) if c_type_is_array(type_name) else c_type_without_qualifiers(type_name)
+        record_index: i64 = typed_record_index(ctx, object_type)
+        if record_index >= 0 and ctx.records[record_index.usize()].is_union:
+            typed_record_unsupported(ctx, node, sview("union compound-literal layout", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return -1
+        slot_index: i64 = typed_register_compound_literal(ctx, node, type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return -1 if slot_index < 0
+        slot: TypedCompoundLiteralStorage[r] = ctx.compound_literals[slot_index.usize()]
+        initializer: i64 = typed_lower_compound_literal_initializer(ctx, ast_child(node, 0), type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return -1 if initializer < 0
+        target: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Name, text: slot.name, type_name: slot.type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: slot.type_name, lhs: target, rhs: initializer, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        mode: i64 = TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_READONLY if c_type_is_const_object(type_name) else TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_MUTABLE
+        return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Sequence, text: sview("", 0, 0), type_name: type_name, lhs: assignment, rhs: target, third: -1, args_start: -1, args_count: 0, value: mode}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_compound_literal_candidate_used[@r](ctx: TypedContext[r]&, body: i64, name: sview, current_slot: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return true if typed_context_name_conflicts(ctx, name)
+        return true if body >= 0 and typed_stmt_has_name_suffix(ctx, body, name, sview("", 0, 0))
+        for index in 0..<ctx.params.count.i64() |ctx, name|:
+            return true if sview_eq(ctx.params[index.usize()].name, name)
+        for index in 0..<current_slot |ctx, name, current_slot|:
+            slot: TypedCompoundLiteralStorage[r] = ctx.compound_literals[index]
+            return true if sview_eq(slot.name, name)
+        return false
+
+    def typed_compound_literal_unique_name[@r](ctx: TypedContext[r]&, body: i64, current_slot: i64) -> sview @r can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        original: sview = ctx.compound_literals[current_slot.usize()].name
+        attempt: mutable i64 = 0
+        while attempt < 4096:
+            candidate: mutable darray[u8] = []
+            append_view(&candidate, original)
+            if attempt > 0:
+                append_view(&candidate, sview("_", 0, -1))
+                append_i64(&candidate, attempt)
+            candidate_view: sview = bytes_view(candidate)
+            if not typed_compound_literal_candidate_used(ctx, body, candidate_view, current_slot):
+                copied: cstr = string_view_copy(candidate_view) can Memory.Allocate
+                return sview(copied, 0, -1)
+            attempt <- attempt + 1
+        return sview("", 0, 0)
+
+    def typed_rename_compound_literal_exprs[@r](ctx: mutable TypedContext[r]&, first_expr: i64, old_name: sview, new_name: sview) -> void:
+        for index in first_expr..<ctx.exprs.count.i64() |ctx, first_expr, old_name, new_name|:
+            expression: TypedExpr[r] = ctx.exprs[index.usize()]
+            if expression.kind == TypedExprKind.Name and sview_eq(expression.text, old_name):
+                expression.text <- new_name
+                ctx.exprs[index.usize()] <- expression
+
+    def typed_attach_compound_literal_storage[@r](ctx: mutable TypedContext[r]&, body: i64, first_slot: i64, first_expr: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return body if first_slot >= ctx.compound_literals.count.i64()
+        return -1 if body < 0 or ctx.stmts[body.usize()].kind != TypedStmtKind.Block
+        block: mutable TypedStmt[r] = ctx.stmts[body.usize()]
+        new_children: mutable darray[i64] = []
+        for index in first_slot..<ctx.compound_literals.count.i64() |ctx, body, first_slot, first_expr, block, new_children|:
+            slot: TypedCompoundLiteralStorage[r] = ctx.compound_literals[index.usize()]
+            continue if not sview_eq(slot.function_id, ctx.current_function_id)
+            unique_name: sview = typed_compound_literal_unique_name(ctx, body, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if unique_name.len == 0:
+                typed_record_unsupported(ctx, slot.node, sview("compound-literal generated-name space", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return -1
+            if not sview_eq(unique_name, slot.name):
+                typed_rename_compound_literal_exprs(ctx, first_expr, slot.name, unique_name)
+                slot.name <- unique_name
+                ctx.compound_literals[index.usize()] <- slot
+            initializer: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Zeroed, text: sview("zeroed", 0, -1), type_name: slot.type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            declaration: i64 = typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Declaration, expr: initializer, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: slot.name, type_name: slot.type_name}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if ctx.source_mapping_enabled:
+                ctx.expr_source_origins[initializer.usize()] <- typed_ir_source_origin(slot.node, sview("storage reserved for C compound literal", 0, -1), ctx.canonical_source)
+                ctx.stmt_source_origins[declaration.usize()] <- typed_ir_source_origin(slot.node, sview("storage reserved for C compound literal", 0, -1), ctx.canonical_source)
+            new_children.push(declaration)
+        return body if new_children.count == 0
+        for offset in 0..<block.children_count |ctx, block, new_children|:
+            new_children.push(ctx.stmt_children[(block.children_start + offset).usize()])
+        block.children_start <- ctx.stmt_children.count.i64()
+        block.children_count <- new_children.count.i64()
+        for index in 0..<new_children.count |ctx, new_children|:
+            ctx.stmt_children.push(new_children[index])
+        ctx.stmts[body.usize()] <- block
+        return body

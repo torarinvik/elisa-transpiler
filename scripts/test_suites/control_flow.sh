@@ -130,6 +130,74 @@ set -e
 rg -q 'continue' build/loop_condition_effects.generated.elisa
 rg -q 'while true:' build/loop_condition_effects.generated.elisa
 
+# A side-effecting assignment result is one evaluation even when a surrounding
+# comparison is tested repeatedly by a loop.
+test_translator_bounded testdata/fixtures/loop_assignment_call_condition.c \
+    > build/loop_assignment_call_condition.generated.elisa
+awk '
+    /^def while_assignment_condition\(/ { active = "while"; next }
+    /^def if_assignment_condition\(/ {
+        if (active == "while" && while_calls != 1) invalid = 1
+        active = "if"
+        next
+    }
+    /^def while_assignment_zero_condition\(/ {
+        if (active == "if" && if_calls != 1) invalid = 1
+        active = "zero"
+        next
+    }
+    /^def skipped_assignment_short_circuit_condition\(/ {
+        if (active == "zero" && zero_calls != 1) invalid = 1
+        active = "short"
+        short_seen = 1
+        next
+    }
+    /^def dynamic_and_condition\(/ {
+        if (active == "short" && short_calls != 0) invalid = 1
+        active = "dynamic_and"
+        dynamic_seen = 1
+        next
+    }
+    /^def dynamic_or_condition\(/ {
+        if (active == "dynamic_and" && dynamic_and_calls != 1) invalid = 1
+        active = "dynamic_or"
+        next
+    }
+    /^def dynamic_short_circuit_assignment_condition\(/ {
+        if (active == "dynamic_or" && dynamic_or_calls != 1) invalid = 1
+        active = "dynamic"
+        next
+    }
+    /^def main\(/ {
+        if (active == "dynamic" && (dynamic_and_calls != 1 || dynamic_or_calls != 1)) invalid = 1
+        active = ""
+    }
+    active == "while" && /next_while_value\(/ { while_calls++ }
+    active == "zero" && /next_zero_condition_value\(/ { zero_calls++ }
+    active == "if" && /next_if_value\(/ { if_calls++ }
+    active == "short" && /next_short_circuit_condition_value\(/ { short_calls++ }
+    active == "dynamic_and" && /next_short_circuit_condition_value\(/ { dynamic_and_calls++ }
+    active == "dynamic_or" && /next_short_circuit_condition_value\(/ { dynamic_or_calls++ }
+    END {
+        if (while_calls != 1 || zero_calls != 1 || if_calls != 1 || short_calls != 0 || dynamic_and_calls != 1 || dynamic_or_calls != 1 || !short_seen || !dynamic_seen || invalid) exit 1
+    }
+' build/loop_assignment_call_condition.generated.elisa
+clang -std=c11 testdata/fixtures/loop_assignment_call_condition.c \
+    -o build/loop_assignment_call_condition.native
+"$elisa_bin" -emit obj -O0 \
+    -o build/loop_assignment_call_condition.generated.o \
+    build/loop_assignment_call_condition.generated.elisa
+clang -Wl,-dead_strip -o build/loop_assignment_call_condition.generated \
+    build/loop_assignment_call_condition.generated.o
+set +e
+./build/loop_assignment_call_condition.native
+loop_assignment_native_rc=$?
+./build/loop_assignment_call_condition.generated
+loop_assignment_generated_rc=$?
+set -e
+[ "$loop_assignment_native_rc" -eq 0 ] && \
+    [ "$loop_assignment_generated_rc" -eq 0 ]
+
 test_translator_bounded testdata/fixtures/compound_assignment_conditional_place.c \
     > build/compound_assignment_conditional_place.generated.elisa
 clang -std=c11 testdata/fixtures/compound_assignment_conditional_place.c \
@@ -296,6 +364,42 @@ rg -Fq '[missing translator capability: comma effects in record-valued condition
 rg -Fq '[missing translator capability: sequencing effectful aggregate call argument]' build/conditional_comma_unsupported.err
 
 set +e
+test_translator_bounded testdata/fixtures/union_compound_literal_array_unsupported.c \
+    > build/union_compound_literal_array_unsupported.out \
+    2> build/union_compound_literal_array_unsupported.err
+union_compound_literal_array_rc=$?
+set -e
+[ "$union_compound_literal_array_rc" -ne 0 ]
+[ ! -s build/union_compound_literal_array_unsupported.out ]
+rg -Fq '[missing translator capability: union compound-literal layout]' \
+    build/union_compound_literal_array_unsupported.err
+
+check_unsupported_compound_literal() {
+    case_name=$1
+    source_path=$2
+    missing_capability=$3
+    set +e
+    test_translator_bounded "$source_path" \
+        > "build/$case_name.out" 2> "build/$case_name.err"
+    translation_rc=$?
+    set -e
+    [ "$translation_rc" -ne 0 ]
+    [ ! -s "build/$case_name.out" ]
+    rg -Fq "[missing translator capability: $missing_capability]" \
+        "build/$case_name.err"
+}
+
+check_unsupported_compound_literal file_scope_compound_literal \
+    testdata/fixtures/file_scope_compound_literal_unsupported.c \
+    'file-scope compound-literal static storage'
+check_unsupported_compound_literal volatile_compound_literal \
+    testdata/fixtures/volatile_compound_literal_unsupported.c \
+    'volatile compound-literal access'
+check_unsupported_compound_literal cpp_compound_literal_extension \
+    testdata/fixtures/cpp_compound_literal_extension_unsupported.cpp \
+    'C++ compound-literal lifetime semantics'
+
+set +e
 test_translator_bounded testdata/fixtures/const_volatile_comma.c \
     > build/const_volatile_comma.out 2> build/const_volatile_comma.err
 const_volatile_comma_rc=$?
@@ -411,7 +515,7 @@ set -e
 [ "$declaration_index_native_rc" -eq 0 ] && [ "$declaration_index_generated_rc" -eq 0 ]
 test_translator_bounded --dump-typed-ir testdata/fixtures/declaration_index.c \
     > build/declaration_index.dump.stdout.elisa 2> build/declaration_index.dump.typed-ir
-rg -q '^typed-ir-v13$' build/declaration_index.dump.typed-ir
+rg -q '^typed-ir-v16$' build/declaration_index.dump.typed-ir
 rg -q '^declaration-info [0-9]+ canonical=false has_previous=true user=true extern=false cpp_iterator_map_type_hex= cpp_iterator_name_hex= cpp_iterator_line=0$' \
     build/declaration_index.dump.typed-ir
 

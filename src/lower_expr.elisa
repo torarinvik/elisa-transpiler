@@ -1,92 +1,9 @@
 extend CTranslator:
-    def typed_type_spelling_identifier_byte(byte: i64) -> bool:
-        return true if byte >= 65 and byte <= 90
-        return true if byte >= 97 and byte <= 122
-        return true if byte >= 48 and byte <= 57
-        return byte == 95
-
-    def typed_type_spelling_has_word(type_name: sview, word: sview) -> bool:
-        return false if word.len == 0 or type_name.len < word.len
-        for start in 0..<(type_name.len - word.len + 1) |type_name, word|:
-            matches: mutable bool = true
-            for offset in 0..<word.len |type_name, word, start, matches|:
-                matches <- false if string_view_index(type_name, start + offset) != string_view_index(word, offset)
-            continue if not matches
-            has_left_boundary: bool = start == 0 or not typed_type_spelling_identifier_byte(string_view_index(type_name, start - 1))
-            end: i64 = start + word.len
-            has_right_boundary: bool = end == type_name.len or not typed_type_spelling_identifier_byte(string_view_index(type_name, end))
-            return true if has_left_boundary and has_right_boundary
-        return false
-
-    def typed_float_builtin_kind(name: sview) -> i64:
-        # These are Clang builtin identities, not target-library names.  C's
-        # NAN/INFINITY macros commonly lower to these functions, and emitting
-        # them as externals would make the result depend on a platform libm
-        # symbol that may not exist (for example __builtin_huge_valf).
-        return 1 if sview_eq(name, sview("__builtin_nan", 0, -1)) or sview_eq(name, sview("__builtin_nanf", 0, -1)) or sview_eq(name, sview("__builtin_nans", 0, -1)) or sview_eq(name, sview("__builtin_nansf", 0, -1))
-        return 2 if sview_eq(name, sview("__builtin_inf", 0, -1)) or sview_eq(name, sview("__builtin_inff", 0, -1)) or sview_eq(name, sview("__builtin_huge_val", 0, -1)) or sview_eq(name, sview("__builtin_huge_valf", 0, -1))
-        return 0
-    def typed_pointer_difference_element_size[@r](ctx: TypedContext[r]&, pointer_type: sview) -> i64:
-        return clang_target_type_size_bytes(ctx.target_abi, pointer_type) if c_type_pointer_count(pointer_type) > 1
-        element_type: sview = c_type_pointer_base(pointer_type)
-        return 1 if sview_eq(c_type_without_qualifiers(element_type), sview("void", 0, -1))
-        enum_index: i64 = typed_enum_index(ctx, element_type)
-        return clang_target_type_size_bytes(ctx.target_abi, ctx.enums[enum_index.usize()].underlying_type) if enum_index >= 0
-        record_index: i64 = typed_record_index(ctx, element_type)
-        return typed_record_layout_size_bytes(ctx, element_type) if record_index >= 0
-        return clang_target_type_size_bytes(ctx.target_abi, element_type)
-    def typed_ast_expression_has_effect[@r](node: JsonValueHandle[r]) -> bool:
-        kind: sview = ast_kind(node)
-        if sview_eq(kind, sview("CallExpr", 0, -1)):
-            return false if ast_child_count(node) > 0 and typed_float_builtin_kind(typed_callee_name(ast_child(node, 0))) > 0
-            return true
-        return true if sview_eq(kind, sview("CXXMemberCallExpr", 0, -1)) or sview_eq(kind, sview("CXXOperatorCallExpr", 0, -1)) or sview_eq(kind, sview("CXXConstructExpr", 0, -1)) or sview_eq(kind, sview("VAArgExpr", 0, -1))
-        return true if typed_type_spelling_has_word(ast_qual_type(node), sview("volatile", 0, -1))
-        return true if sview_eq(kind, sview("CompoundAssignOperator", 0, -1))
-        if sview_eq(kind, sview("BinaryOperator", 0, -1)):
-            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
-            return true if sview_eq(opcode, sview("=", 0, -1)) or sview_eq(opcode, sview("+=", 0, -1)) or sview_eq(opcode, sview("-=", 0, -1)) or sview_eq(opcode, sview("*=", 0, -1)) or sview_eq(opcode, sview("/=", 0, -1)) or sview_eq(opcode, sview("%=", 0, -1)) or sview_eq(opcode, sview("&=", 0, -1)) or sview_eq(opcode, sview("|=", 0, -1)) or sview_eq(opcode, sview("^=", 0, -1)) or sview_eq(opcode, sview("<<=", 0, -1)) or sview_eq(opcode, sview(">>=", 0, -1))
-        if sview_eq(kind, sview("UnaryOperator", 0, -1)):
-            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
-            return true if sview_eq(opcode, sview("++", 0, -1)) or sview_eq(opcode, sview("--", 0, -1))
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count |node|:
-                return true if typed_ast_expression_has_effect(ast_child(node, index))
-        return false
-    def typed_ast_expression_has_volatile_access[@r](node: JsonValueHandle[r]) -> bool:
-        return true if typed_type_spelling_has_word(ast_qual_type(node), sview("volatile", 0, -1))
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count |node|:
-                return true if typed_ast_expression_has_volatile_access(ast_child(node, index))
-        return false
-    def typed_ast_has_effectful_comma[@r](node: JsonValueHandle[r]) -> bool:
-        if sview_eq(ast_kind(node), sview("BinaryOperator", 0, -1)) and sview_eq(ast_string(ast_field(node, sview("opcode", 0, -1))), sview(",", 0, -1)) and ast_child_count(node) > 1:
-            return true if typed_ast_expression_has_effect(ast_child(node, 0))
-        count: i64 = ast_child_count(node)
-        if count >= 0:
-            for index in 0..<count |node|:
-                return true if typed_ast_has_effectful_comma(ast_child(node, index))
-        return false
-    def typed_resolve_decl[@r](ctx: mutable TypedContext[r]&, referenced: JsonValueHandle[r]) -> TypedDeclInfo[r] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        decl_id: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
-        if decl_id.len > 0:
-            for index in 0..<ctx.decl_infos.count |ctx, decl_id|:
-                info: TypedDeclInfo[r] = ctx.decl_infos[index]
-                return info if sview_eq(info.id, decl_id)
-        declaration: mutable JsonValueHandle[r] = typed_decl_lookup(ctx, decl_id) if decl_id.len > 0 else json_handle_null(ctx.root)
-        declaration <- referenced if json_handle_is_null(declaration)
-        canonical_id: sview = typed_decl_canonical_id(ctx, decl_id)
-        declaration_slot: i64 = typed_decl_index_find_slot(ctx, decl_id)
-        has_previous: bool = declaration_slot >= 0 and ctx.declaration_index[declaration_slot.usize()].previous_id.len > 0
-        is_canonical: bool = canonical_id.len == 0 or sview_eq(decl_id, canonical_id)
-        info: TypedDeclInfo[r] = TypedDeclInfo[r]{id: decl_id, is_canonical: is_canonical, has_previous: has_previous, is_user: ast_is_user_declaration(declaration, ctx.source), is_extern: sview_eq(ast_string(ast_field(declaration, sview("storageClass", 0, -1))), sview("extern", 0, -1)), cpp_iterator_map_type: sview("", 0, 0), cpp_iterator_decl_name: sview("", 0, 0), cpp_iterator_decl_line: 0}
-        ctx.decl_infos.push(info) if decl_id.len > 0
-        return info
     def typed_lower_expr_impl[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         kind: sview = ast_kind(node)
         type_name: mutable sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        if sview_eq(kind, sview("CompoundLiteralExpr", 0, -1)):
+            return typed_lower_compound_literal(ctx, node, type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         # Clang's desugared iterator spelling contains implementation pointers
         # from libc++/libstdc++. Once ownership is proven from find/end, use a
         # pointer-free semantic marker so C pointer nullability logic cannot
@@ -129,6 +46,10 @@ extend CTranslator:
             return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: sview("__builtin_va_arg", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: 1, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("IntegerLiteral", 0, -1)) or sview_eq(kind, sview("FloatingLiteral", 0, -1)):
             literal_kind: TypedExprKind = TypedExprKind.Integer if sview_eq(kind, sview("IntegerLiteral", 0, -1)) else TypedExprKind.Floating
+            # Clang's FloatingLiteral `value` is the target-rounded APFloat
+            # value, not necessarily the source token. Preserve it verbatim:
+            # reparsing the original decimal as Elisa f64 and narrowing later
+            # can double-round a C `float` literal near a binary32 midpoint.
             return typed_push_expr(ctx, TypedExpr[r]{kind: literal_kind, text: ast_string(ast_field(node, sview("value", 0, -1))), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if sview_eq(kind, sview("CharacterLiteral", 0, -1)):
             return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Character, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: typed_number(ast_field(node, sview("value", 0, -1)))}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

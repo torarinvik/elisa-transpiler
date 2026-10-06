@@ -57,7 +57,18 @@ case "$test_suite" in
         ;;
 esac
 
+case "$test_suite" in
+    all|upstream) python3 scripts/test_upstream_provenance.py ;;
+esac
+python3 scripts/test_wolf_compile_commands.py
+
 sh scripts/check_source_line_limits.sh
+python3 scripts/test_translator_genericity.py
+python3 scripts/test_metamorphic_normalization.py
+python3 scripts/test_ast_json_minimize.py
+python3 scripts/test_property_corpus.py
+python3 scripts/test_ast_depth.py --self-test
+sh scripts/test_setup_local_compilers.sh
 sh scripts/test_build_cache.sh
 sh scripts/test_quality_report.sh
 sh scripts/test_test_support.sh
@@ -218,7 +229,7 @@ translator_run_bounded() {
         python3 scripts/run_bounded_process.py \
             --max-rss-kb "$translator_max_rss_kb" \
             --timeout-seconds "$translator_timeout_seconds" \
-            --min-system-free-percent "${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-41}" -- "$@"
+            --min-system-free-percent "${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-60}" -- "$@"
     else
         python3 scripts/run_bounded_process.py \
             --max-rss-kb "$translator_max_rss_kb" \
@@ -366,6 +377,15 @@ case "$test_suite" in
             --case c_record_and_six_element_array \
             --case floating_edge_values \
             --case variadic_va_copy
+        ELISA_PROPERTY_CORPUS_RUNTIME="$elisa_runtime" \
+            python3 scripts/run_property_corpus.py \
+                --translator build/elisa-c-transpiler \
+                --elisa-compiler "$elisa_bin" \
+                --seed "${ELISA_PROPERTY_CORPUS_SEED:-1729}" \
+                --output-dir build/property-corpus \
+                --max-rss-kb "${ELISA_FIXTURE_PROCESS_MAX_RSS_KB:-1572864}" \
+                --timeout-seconds "${ELISA_PROPERTY_CORPUS_STAGE_TIMEOUT_SECONDS:-90}" \
+                --max-output-bytes "${ELISA_FIXTURE_PROCESS_MAX_OUTPUT_BYTES:-67108864}"
         ;;
 esac
 

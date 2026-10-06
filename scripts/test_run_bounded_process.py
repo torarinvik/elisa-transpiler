@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,59 @@ class BoundedProcessTests(unittest.TestCase):
                 ).stdout.strip()
                 self.assertTrue(not state or state.startswith("Z"), f"child still running: {state}")
 
+    def test_poll_interval_cannot_extend_the_deadline(self) -> None:
+        started = time.monotonic()
+        result = self.invoke(
+            "--max-rss-kb", "262144", "--timeout-seconds", "0.25",
+            "--poll-seconds", "10", "--", sys.executable, "-c",
+            "import time; time.sleep(30)",
+            timeout=4,
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("deadline exceeded (0.25s)", result.stderr)
+        self.assertLess(elapsed, 2.5, f"poll interval delayed deadline for {elapsed:.2f}s")
+
+    @unittest.skipUnless(os.name == "posix" and shutil.which("ps"), "POSIX process sampling")
+    def test_slow_process_sampler_is_capped_by_the_remaining_deadline(self) -> None:
+        real_ps = shutil.which("ps")
+        assert real_ps is not None
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            fake_ps = temporary_path / "ps"
+            marker = temporary_path / "first-call"
+            fake_ps.write_text(
+                f"#!{sys.executable}\n"
+                "import os, sys, time\n"
+                f"marker = {str(marker)!r}\n"
+                f"real_ps = {real_ps!r}\n"
+                "if not os.path.exists(marker):\n"
+                "    open(marker, 'w').close()\n"
+                "    time.sleep(5)\n"
+                "os.execv(real_ps, [real_ps, *sys.argv[1:]])\n",
+                encoding="utf-8",
+            )
+            fake_ps.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment.get('PATH', '')}"
+            started = time.monotonic()
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER), "--max-rss-kb", "262144",
+                    "--timeout-seconds", "0.25", "--poll-seconds", "0.02", "--",
+                    sys.executable, "-c", "import time; time.sleep(30)",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=4,
+            )
+            elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("deadline exceeded (0.25s)", result.stderr)
+        self.assertLess(elapsed, 3.0, f"slow monitor delayed deadline for {elapsed:.2f}s")
+
     def test_rss_limit_kills_owned_group(self) -> None:
         allocation_code = "import time; data=bytearray(24*1024*1024); data[::4096]=b'x'*(len(data)//4096); time.sleep(30)"
         result = self.invoke(
@@ -149,6 +203,83 @@ class BoundedProcessTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 125, result.stderr)
             self.assertIn("refusing to start command", result.stderr)
+            self.assertFalse(sentinel.exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
+    def test_initial_headroom_gate_is_separate_from_live_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_memory_pressure = Path(temporary) / "memory_pressure"
+            sample_count = Path(temporary) / "sample-count"
+            fake_memory_pressure.write_text(
+                "#!/bin/sh\n"
+                f"count_file={str(sample_count)!r}\n"
+                "count=0\n"
+                "[ ! -f \"$count_file\" ] || count=$(cat \"$count_file\")\n"
+                "count=$((count + 1))\n"
+                "printf '%s\\n' \"$count\" > \"$count_file\"\n"
+                "free=85\n"
+                "[ \"$count\" -eq 1 ] || free=70\n"
+                "printf 'System-wide memory free percentage: %s%%\\n' \"$free\"\n"
+            )
+            fake_memory_pressure.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment.get('PATH', '')}"
+            # Keep the child alive until the runner has taken at least one
+            # post-launch sample. A fixed short sleep can finish before that
+            # sample when the host is busy, making this gate test scheduling-
+            # dependent rather than testing the initial/live threshold split.
+            child_code = (
+                "import pathlib,time\n"
+                f"sample_count=pathlib.Path({str(sample_count)!r})\n"
+                "while True:\n"
+                " try:\n"
+                "  if int(sample_count.read_text(encoding='utf-8')) >= 2: break\n"
+                " except (OSError,ValueError): pass\n"
+                " time.sleep(0.01)\n"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER), "--max-rss-kb", "262144",
+                    "--timeout-seconds", "5", "--min-system-free-percent", "60",
+                    "--require-initial-system-free-percent", "80",
+                    "--system-memory-poll-seconds", "0.01", "--",
+                    sys.executable, "-c", child_code,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertGreaterEqual(int(sample_count.read_text()), 2)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
+    def test_initial_headroom_gate_refuses_launch_before_child_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_memory_pressure = Path(temporary) / "memory_pressure"
+            fake_memory_pressure.write_text(
+                "#!/bin/sh\nprintf 'System-wide memory free percentage: 80%%\\n'\n"
+            )
+            fake_memory_pressure.chmod(0o755)
+            sentinel = Path(temporary) / "child-started"
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary}{os.pathsep}{environment.get('PATH', '')}"
+            result = subprocess.run(
+                [
+                    sys.executable, str(RUNNER), "--max-rss-kb", "262144",
+                    "--timeout-seconds", "5", "--min-system-free-percent", "60",
+                    "--require-initial-system-free-percent", "80", "--",
+                    sys.executable, "-c", f"open({str(sentinel)!r}, 'w').close()",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 125, result.stderr)
+            self.assertIn("initial headroom must be above 80%", result.stderr)
             self.assertFalse(sentinel.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS host-memory monitoring")
@@ -275,6 +406,15 @@ class BoundedProcessTests(unittest.TestCase):
         result = self.invoke(
             "--max-rss-kb", "262144", "--timeout-seconds", "5",
             "--min-system-free-percent", "100", "--", sys.executable,
+            "-c", "raise SystemExit(99)",
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("1 through 99", result.stderr)
+
+    def test_rejects_invalid_initial_host_memory_threshold(self) -> None:
+        result = self.invoke(
+            "--max-rss-kb", "262144", "--timeout-seconds", "5",
+            "--require-initial-system-free-percent", "100", "--", sys.executable,
             "-c", "raise SystemExit(99)",
         )
         self.assertEqual(result.returncode, 2)

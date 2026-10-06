@@ -6,7 +6,10 @@ module CTranslator:
         _unused: u8
 
 include "../src/typed_source_map_types.elisa"
+include "../src/clang_argv_options.elisa"
+include "../src/clang_fp_options.elisa"
 include "../src/typed_ir.elisa"
+include "../src/typed_fp_policy.elisa"
 include "../src/clang_target_abi.elisa"
 include "../src/verify_ir.elisa"
 include "../src/typed_ir_dump.elisa"
@@ -32,6 +35,40 @@ extend CTranslator:
         for index in 0..<text.len |output, text|:
             output.push(string_view_index(text, index).u8())
 
+    def typed_fp_test_argv(arguments: sview, text: mutable darray[u8]&, offsets: mutable darray[usize]&) -> void can[Abort.Panic, Memory.Allocate]:
+        offsets.push(0.usize()) can Memory.Allocate, Abort.Panic
+        typed_abi_test_append(&text, sview("clang", 0, -1)) can Memory.Allocate, Abort.Panic
+        text.push(0.u8()) can Memory.Allocate, Abort.Panic
+        cursor: mutable i64 = 0
+        while cursor < arguments.len |text, offsets, arguments, cursor|:
+            while cursor < arguments.len and string_view_index(arguments, cursor) == 32 |cursor, arguments|:
+                cursor <- cursor + 1
+            break if cursor >= arguments.len
+            offsets.push(text.count) can Memory.Allocate, Abort.Panic
+            while cursor < arguments.len and string_view_index(arguments, cursor) != 32 |text, arguments, cursor|:
+                text.push(string_view_index(arguments, cursor).u8()) can Memory.Allocate, Abort.Panic
+                cursor <- cursor + 1
+            text.push(0.u8()) can Memory.Allocate, Abort.Panic
+
+    def typed_fp_test_options(arguments: sview) -> ClangFPOptionVector can[Abort.Panic, Memory.Allocate]:
+        text: mutable darray[u8] = []
+        offsets: mutable darray[usize] = []
+        typed_fp_test_argv(arguments, &text, &offsets) can Abort.Panic, Memory.Allocate
+        return clang_fp_options_from_argv(text, offsets)
+
+    def typed_fp_test_normalized_options(normalized_arguments: sview, original_arguments: sview) -> ClangFPOptionVector can[Abort.Panic, Memory.Allocate]:
+        normalized_text: mutable darray[u8] = []
+        normalized_offsets: mutable darray[usize] = []
+        original_text: mutable darray[u8] = []
+        original_offsets: mutable darray[usize] = []
+        typed_fp_test_argv(normalized_arguments, &normalized_text, &normalized_offsets) can Abort.Panic, Memory.Allocate
+        typed_fp_test_argv(original_arguments, &original_text, &original_offsets) can Abort.Panic, Memory.Allocate
+        return clang_fp_options_from_normalized_argv(normalized_text, normalized_offsets, original_text, original_offsets)
+
+    def typed_fp_test_mode(arguments: sview) -> ClangFloatingPointMode can[Abort.Panic, Memory.Allocate]:
+        options: ClangFPOptionVector = typed_fp_test_options(arguments)
+        return options.mode
+
     def test_context[@r](root: JsonValueHandle[r]) -> TypedContext[r]:
         return test_context_with_language(root, false)
 
@@ -50,7 +87,7 @@ extend CTranslator:
             current_emit_goto_name: sview("", 0, 0), current_switch_done_name: sview("", 0, 0),
             current_switch_done_index: -1, current_function_body: -1, current_trusted_depth: 0,
             needs_cpp_unordered_map: false, source_mapping_enabled: false, project_mode: false, initializer_name: sview("", 0, 0),
-            mode: TypedTranslationMode.Idiomatic, target_abi: clang_target_abi_unknown(), source_language_is_cxx: source_is_cxx, source: "typed_ir_verifier_test",
+            mode: TypedTranslationMode.Idiomatic, floating_point_options: clang_fp_options_default(), target_abi: clang_target_abi_unknown(), source_language_is_cxx: source_is_cxx, source: "typed_ir_verifier_test",
             source_working_directory: sview("", 0, 0), canonical_source: sview("", 0, 0),
             root: root,
             diagnostics: []
@@ -329,19 +366,31 @@ extend CTranslator:
             parsed_null: JsonParseResult = json_parse_checked(&verifier_arena, sview("null", 0, -1))
             root: JsonValueHandle = json_handle_from_result(parsed_null)
             lp64_macros: mutable darray[u8] = []
-            typed_abi_test_append(&lp64_macros, sview("#define __CHAR_BIT__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 8\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
+            typed_abi_test_append(&lp64_macros, sview("#define __CHAR_BIT__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 8\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_FLOAT__ 4\n#define __SIZEOF_DOUBLE__ 8\n#define __SIZEOF_LONG_DOUBLE__ 16\n#define __FLT_RADIX__ 2\n#define __FLT_MANT_DIG__ 24\n#define __FLT_MAX_EXP__ 128\n#define __FLT_MIN_EXP__ (-125)\n#define __FLT_HAS_DENORM__ 1\n#define __FLT_HAS_INFINITY__ 1\n#define __FLT_HAS_QUIET_NAN__ 1\n#define __DBL_MANT_DIG__ 53\n#define __DBL_MAX_EXP__ 1024\n#define __DBL_MIN_EXP__ (-1021)\n#define __DBL_HAS_DENORM__ 1\n#define __DBL_HAS_INFINITY__ 1\n#define __DBL_HAS_QUIET_NAN__ 1\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
             lp64_abi: ClangTargetABI = clang_target_abi_from_macros(lp64_macros)
             return 25 if not lp64_abi.valid
             return 26 if lp64_abi.long_bits != 64 or lp64_abi.pointer_bits != 64 or lp64_abi.size_type_bits != 64
             return 36 if lp64_abi.char_unsigned
+            return 39 if not lp64_abi.float_is_binary32 or not lp64_abi.double_is_binary64
 
             llp64_macros: mutable darray[u8] = []
-            typed_abi_test_append(&llp64_macros, sview("#define __CHAR_BIT__ 8\n#define __CHAR_UNSIGNED__ 1\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 4\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
+            typed_abi_test_append(&llp64_macros, sview("#define __CHAR_BIT__ 8\n#define __CHAR_UNSIGNED__ 1\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 4\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_FLOAT__ 4\n#define __SIZEOF_DOUBLE__ 8\n#define __SIZEOF_LONG_DOUBLE__ 8\n#define __FLT_RADIX__ 2\n#define __FLT_MANT_DIG__ 24\n#define __FLT_MAX_EXP__ 128\n#define __FLT_MIN_EXP__ (-125)\n#define __FLT_HAS_DENORM__ 1\n#define __FLT_HAS_INFINITY__ 1\n#define __FLT_HAS_QUIET_NAN__ 1\n#define __DBL_MANT_DIG__ 53\n#define __DBL_MAX_EXP__ 1024\n#define __DBL_MIN_EXP__ (-1021)\n#define __DBL_HAS_DENORM__ 1\n#define __DBL_HAS_INFINITY__ 1\n#define __DBL_HAS_QUIET_NAN__ 1\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
             llp64_abi: ClangTargetABI = clang_target_abi_from_macros(llp64_macros)
             return 27 if not llp64_abi.valid
             return 28 if llp64_abi.long_bits != 32 or llp64_abi.pointer_bits != 64 or llp64_abi.size_type_bits != 64
             return 37 if not llp64_abi.char_unsigned
+            return 40 if not llp64_abi.float_is_binary32 or not llp64_abi.double_is_binary64
             return 29 if clang_target_abi_from_macros([]).valid
+
+            non_ieee_float_macros: mutable darray[u8] = []
+            typed_abi_test_append(&non_ieee_float_macros, sview("#define __CHAR_BIT__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 8\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_FLOAT__ 4\n#define __SIZEOF_DOUBLE__ 8\n#define __FLT_RADIX__ 2\n#define __FLT_MANT_DIG__ 11\n#define __FLT_MAX_EXP__ 16\n#define __FLT_MIN_EXP__ (-13)\n#define __FLT_HAS_DENORM__ 1\n#define __FLT_HAS_INFINITY__ 1\n#define __FLT_HAS_QUIET_NAN__ 1\n#define __DBL_MANT_DIG__ 53\n#define __DBL_MAX_EXP__ 1024\n#define __DBL_MIN_EXP__ (-1021)\n#define __DBL_HAS_DENORM__ 1\n#define __DBL_HAS_INFINITY__ 1\n#define __DBL_HAS_QUIET_NAN__ 1\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
+            non_ieee_float_abi: ClangTargetABI = clang_target_abi_from_macros(non_ieee_float_macros)
+            return 41 if not non_ieee_float_abi.valid or non_ieee_float_abi.float_is_binary32 or not non_ieee_float_abi.double_is_binary64
+
+            non_ieee_double_macros: mutable darray[u8] = []
+            typed_abi_test_append(&non_ieee_double_macros, sview("#define __CHAR_BIT__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 8\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_FLOAT__ 4\n#define __SIZEOF_DOUBLE__ 8\n#define __FLT_RADIX__ 2\n#define __FLT_MANT_DIG__ 24\n#define __FLT_MAX_EXP__ 128\n#define __FLT_MIN_EXP__ (-125)\n#define __FLT_HAS_DENORM__ 1\n#define __FLT_HAS_INFINITY__ 1\n#define __FLT_HAS_QUIET_NAN__ 1\n#define __DBL_MANT_DIG__ 40\n#define __DBL_MAX_EXP__ 128\n#define __DBL_MIN_EXP__ (-125)\n#define __DBL_HAS_DENORM__ 1\n#define __DBL_HAS_INFINITY__ 1\n#define __DBL_HAS_QUIET_NAN__ 1\n#define __SIZEOF_POINTER__ 8\n#define __SIZE_TYPE__ long unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
+            non_ieee_double_abi: ClangTargetABI = clang_target_abi_from_macros(non_ieee_double_macros)
+            return 42 if not non_ieee_double_abi.valid or not non_ieee_double_abi.float_is_binary32 or non_ieee_double_abi.double_is_binary64
 
             pointer32_macros: mutable darray[u8] = []
             typed_abi_test_append(&pointer32_macros, sview("#define __CHAR_BIT__ 8\n#define __SIZEOF_SHORT__ 2\n#define __SIZEOF_INT__ 4\n#define __SIZEOF_LONG__ 4\n#define __SIZEOF_LONG_LONG__ 8\n#define __SIZEOF_POINTER__ 4\n#define __SIZE_TYPE__ unsigned int\n", 0, -1)) can Abort.Panic, Memory.Allocate
@@ -371,11 +420,174 @@ extend CTranslator:
             first_dump: darray[u8] = typed_dump_ir(valid_context) can Memory.Allocate, Abort.Panic
             second_dump: darray[u8] = typed_dump_ir(valid_context) can Memory.Allocate, Abort.Panic
             return 5 if not typed_dump_test_equal(first_dump, second_dump)
-            return 6 if not typed_dump_test_contains(first_dump, sview("typed-ir-v13\n", 0, -1))
+            return 6 if not typed_dump_test_contains(first_dump, sview("typed-ir-v16\n", 0, -1))
             return 7 if not typed_dump_test_contains(first_dump, sview("text_hex=6e6f6465", 0, -1))
             return 72 if not typed_dump_test_contains(first_dump, sview("params_count=2 variadic=true\n", 0, -1))
             return 89 if not typed_dump_test_contains(first_dump, sview("result_type_hex=693332", 0, -1))
             return 93 if not typed_dump_test_contains(first_dump, sview("result_type_hex=663634", 0, -1))
+            return 100 if typed_fp_test_mode(sview("", 0, 0)) != ClangFloatingPointMode.Strict
+            return 101 if typed_fp_test_mode(sview("-ffast-math", 0, -1)) != ClangFloatingPointMode.Relaxed
+            return 102 if typed_fp_test_mode(sview("-Ofast -fno-fast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 103 if typed_fp_test_mode(sview("-ffp-model=fast", 0, -1)) != ClangFloatingPointMode.Relaxed
+            return 104 if typed_fp_test_mode(sview("-ffp-model=fast -ffp-model=precise", 0, -1)) != ClangFloatingPointMode.Strict
+            return 105 if typed_fp_test_mode(sview("-fno-signed-zeros", 0, -1)) != ClangFloatingPointMode.Unknown
+            return 106 if typed_fp_test_mode(sview("-ffast-math -ffp-contract=fast", 0, -1)) != ClangFloatingPointMode.Unknown
+            return 107 if typed_fp_test_mode(sview("-fno-signed-zeros -ffast-math", 0, -1)) != ClangFloatingPointMode.Unknown
+            return 108 if not typed_dump_test_contains(first_dump, sview("floating_point_mode=strict\n", 0, -1))
+            return 110 if typed_fp_test_mode(sview("-fvendor-math-mode", 0, -1)) != ClangFloatingPointMode.Unknown
+            relaxed_dump_context: mutable TypedContext = test_context(root)
+            relaxed_dump_context.floating_point_options.mode <- ClangFloatingPointMode.Relaxed
+            relaxed_dump: darray[u8] = typed_dump_ir(relaxed_dump_context) can Memory.Allocate, Abort.Panic
+            return 109 if not typed_dump_test_contains(relaxed_dump, sview("floating_point_mode=relaxed\n", 0, -1))
+            return 113 if not typed_fp_relaxed_rewrites_enabled(relaxed_dump_context)
+            unknown_fp_context: mutable TypedContext = test_context(root)
+            unknown_fp_context.floating_point_options.mode <- ClangFloatingPointMode.Unknown
+            return 114 if typed_fp_relaxed_rewrites_enabled(unknown_fp_context)
+            fidelity_fp_context: mutable TypedContext = test_context(root)
+            fidelity_fp_context.mode <- TypedTranslationMode.Fidelity
+            fidelity_fp_context.floating_point_options.mode <- ClangFloatingPointMode.Relaxed
+            return 115 if typed_fp_relaxed_rewrites_enabled(fidelity_fp_context)
+            return 111 if typed_fp_test_mode(sview("-Ofast -O2", 0, -1)) != ClangFloatingPointMode.Unknown
+            return 112 if typed_fp_test_mode(sview("-ffp-model=fast -fdenormal-fp-math=positive-zero -ffp-model=precise", 0, -1)) != ClangFloatingPointMode.Unknown
+            return 116 if typed_fp_test_mode(sview("-fallow-approximate-fns", 0, -1)) != ClangFloatingPointMode.Unknown
+            return 117 if typed_fp_test_mode(sview("-D -ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 118 if typed_fp_test_mode(sview("-include -ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 119 if typed_fp_test_mode(sview("-- -ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 120 if typed_fp_test_mode(sview("-Xclang -ffast-math", 0, -1)) != ClangFloatingPointMode.Relaxed
+            return 121 if typed_fp_test_mode(sview("source_float_math.c", 0, -1)) != ClangFloatingPointMode.Strict
+            return 122 if typed_fp_test_mode(sview("-DNAME=-ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 123 if typed_fp_test_mode(sview("-Ivendor/math_include", 0, -1)) != ClangFloatingPointMode.Strict
+            return 124 if typed_fp_test_mode(sview("-mdaz-ftz", 0, -1)) != ClangFloatingPointMode.Unknown
+            return 125 if typed_fp_test_mode(sview("-ffast-math -mno-daz-ftz", 0, -1)) != ClangFloatingPointMode.Unknown
+
+            fp_fast: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-model=fast", 0, -1))
+            return 126 if fp_fast.mode != ClangFloatingPointMode.Relaxed or fp_fast.contract != ClangFPContractSetting.Fast or fp_fast.math_errno != ClangFPBooleanSetting.Off or fp_fast.complex_arithmetic != ClangFPComplexSetting.Promoted or fp_fast.honor_nans != ClangFPBooleanSetting.On
+            return 127 if fp_fast.denormal != ClangFPDenormalSetting.TargetDefault or fp_fast.denormal_fp32 != ClangFPDenormalSetting.TargetDefault
+            fp_aggressive: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math", 0, -1))
+            return 128 if fp_aggressive.finite_math_only != ClangFPBooleanSetting.On or fp_aggressive.honor_infinities != ClangFPBooleanSetting.Off or fp_aggressive.honor_nans != ClangFPBooleanSetting.Off or fp_aggressive.signed_zeros != ClangFPBooleanSetting.Off
+            fp_override: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-model=fast -ffp-contract=off -fdenormal-fp-math=positive-zero", 0, -1))
+            return 129 if fp_override.contract != ClangFPContractSetting.Off or fp_override.denormal != ClangFPDenormalSetting.PositiveZero or fp_override.unknown_option_seen
+            fp_contract_override: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-contract=fast -fno-fast-math", 0, -1))
+            return 135 if fp_contract_override.contract != ClangFPContractSetting.Fast
+            fp_unsafe_contract_override: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-contract=off -funsafe-math-optimizations -fno-unsafe-math-optimizations", 0, -1))
+            return 136 if fp_unsafe_contract_override.contract != ClangFPContractSetting.Off
+            fp_profile_contract_override: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-model=precise -ffp-contract=fast", 0, -1))
+            return 137 if fp_profile_contract_override.contract != ClangFPContractSetting.Fast
+            fp_protect_parens: ClangFPOptionVector = typed_fp_test_options(sview("-fprotect-parens", 0, -1))
+            return 141 if fp_protect_parens.protect_parens != ClangFPBooleanSetting.On or fp_protect_parens.contract != ClangFPContractSetting.Off
+            fp_protect_parens_contract: ClangFPOptionVector = typed_fp_test_options(sview("-fprotect-parens -ffp-contract=fast", 0, -1))
+            return 142 if fp_protect_parens_contract.protect_parens != ClangFPBooleanSetting.On or fp_protect_parens_contract.contract != ClangFPContractSetting.Off
+            fp_contract_protect_parens: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-contract=fast -fprotect-parens", 0, -1))
+            return 152 if fp_contract_protect_parens.protect_parens != ClangFPBooleanSetting.On or fp_contract_protect_parens.contract != ClangFPContractSetting.Off
+            fp_protect_parens_disabled: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-contract=fast -fprotect-parens -fno-protect-parens", 0, -1))
+            return 153 if fp_protect_parens_disabled.protect_parens != ClangFPBooleanSetting.Off or fp_protect_parens_disabled.contract != ClangFPContractSetting.Fast
+            fp_protect_dump_context: mutable TypedContext = test_context(root)
+            fp_protect_dump_context.floating_point_options <- fp_protect_parens_contract
+            fp_protect_dump: darray[u8] = typed_dump_ir(fp_protect_dump_context) can Memory.Allocate, Abort.Panic
+            return 155 if not typed_dump_test_contains(fp_protect_dump, sview("fp_option contract=off\n", 0, -1))
+            return 156 if not typed_dump_test_contains(fp_protect_dump, sview("fp_option protect_parens=on\n", 0, -1))
+            fp_excess_precision_none: ClangFPOptionVector = typed_fp_test_options(sview("-fexcess-precision=16", 0, -1))
+            return 154 if fp_excess_precision_none.excess_precision != ClangFPExcessPrecisionSetting.NoExcessPrecision or fp_excess_precision_none.unknown_option_seen
+            fp_excess_dump_context: mutable TypedContext = test_context(root)
+            fp_excess_dump_context.floating_point_options <- fp_excess_precision_none
+            fp_excess_dump: darray[u8] = typed_dump_ir(fp_excess_dump_context) can Memory.Allocate, Abort.Panic
+            return 157 if not typed_dump_test_contains(fp_excess_dump, sview("fp_option excess_precision=none\n", 0, -1))
+            fp_exception_maytrap: ClangFPOptionVector = typed_fp_test_options(sview("-ftrapping-math -ffp-exception-behavior=maytrap", 0, -1))
+            return 143 if fp_exception_maytrap.exception_behavior != ClangFPExceptionSetting.MayTrap or fp_exception_maytrap.trapping_math != ClangFPBooleanSetting.Off
+            fp_exception_strict: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-exception-behavior=strict", 0, -1))
+            return 144 if fp_exception_strict.exception_behavior != ClangFPExceptionSetting.Strict or fp_exception_strict.trapping_math != ClangFPBooleanSetting.On
+            fp_trapping_override: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-exception-behavior=ignore -ftrapping-math", 0, -1))
+            return 145 if fp_trapping_override.exception_behavior != ClangFPExceptionSetting.Strict or fp_trapping_override.trapping_math != ClangFPBooleanSetting.On
+            fp_strict_then_precise: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-model=strict -ffp-model=precise", 0, -1))
+            return 146 if fp_strict_then_precise.exception_behavior != ClangFPExceptionSetting.Strict or fp_strict_then_precise.fenv_access != ClangFPBooleanSetting.On or fp_strict_then_precise.rounding_mode != ClangFPRoundingSetting.Dynamic or fp_strict_then_precise.rounding_math != ClangFPBooleanSetting.On or fp_strict_then_precise.trapping_math != ClangFPBooleanSetting.On or fp_strict_then_precise.contract != ClangFPContractSetting.On
+            fp_strict_then_no_fast: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-model=strict -fno-fast-math", 0, -1))
+            return 147 if fp_strict_then_no_fast.exception_behavior != ClangFPExceptionSetting.Strict or fp_strict_then_no_fast.rounding_math != ClangFPBooleanSetting.On or fp_strict_then_no_fast.trapping_math != ClangFPBooleanSetting.On or fp_strict_then_no_fast.contract != ClangFPContractSetting.Off
+            fp_rounding_then_no_fast: ClangFPOptionVector = typed_fp_test_options(sview("-frounding-math -fno-fast-math", 0, -1))
+            return 148 if fp_rounding_then_no_fast.rounding_math != ClangFPBooleanSetting.On or fp_rounding_then_no_fast.rounding_mode != ClangFPRoundingSetting.Dynamic
+            return 149 if typed_fp_test_mode(sview("-Ofast -ffp-model=precise", 0, -1)) != ClangFloatingPointMode.Unknown
+            fp_ofast_conflict: ClangFPOptionVector = typed_fp_test_options(sview("-Ofast -ffp-model=precise", 0, -1))
+            return 150 if not fp_ofast_conflict.unknown_option_seen or fp_ofast_conflict.mode != ClangFloatingPointMode.Unknown
+            fp_ofast_aggressive: ClangFPOptionVector = typed_fp_test_options(sview("-Ofast -ffp-model=aggressive", 0, -1))
+            return 151 if fp_ofast_aggressive.unknown_option_seen or fp_ofast_aggressive.mode != ClangFloatingPointMode.Relaxed
+            fp_unknown: ClangFPOptionVector = typed_fp_test_options(sview("-fvendor-math-mode", 0, -1))
+            return 130 if not fp_unknown.unknown_option_seen or fp_unknown.honor_nans != ClangFPBooleanSetting.Unknown or fp_unknown.contract != ClangFPContractSetting.Unknown
+            fp_link: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -shared", 0, -1))
+            return 131 if fp_link.driver_link_effect != ClangFPDriverLinkEffect.Suppressed
+            fp_no_startfiles_link: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -nostartfiles", 0, -1))
+            return 170 if fp_no_startfiles_link.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_no_stdlib_link: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -nostdlib", 0, -1))
+            return 171 if fp_no_stdlib_link.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_relocatable_link: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -r", 0, -1))
+            return 172 if fp_relocatable_link.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_explicit_no_startfiles: ClangFPOptionVector = typed_fp_test_options(sview("-mdaz-ftz -nostartfiles", 0, -1))
+            return 173 if fp_explicit_no_startfiles.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_nodefaultlibs: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -nodefaultlibs", 0, -1))
+            return 174 if fp_nodefaultlibs.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_forwarded_relocatable: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -Xlinker -r", 0, -1))
+            return 175 if fp_forwarded_relocatable.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_wl_relocatable: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -Wl,-r", 0, -1))
+            return 176 if fp_wl_relocatable.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_forwarded_linker_flag: ClangFPOptionVector = typed_fp_test_options(sview("-Xlinker -ffast-math", 0, -1))
+            return 178 if fp_forwarded_linker_flag.mode != ClangFloatingPointMode.Strict
+            fp_shared_forwarded: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -shared -Wl,-r", 0, -1))
+            return 179 if fp_shared_forwarded.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_shared_before_forwarded: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -Wl,-r -shared", 0, -1))
+            return 180 if fp_shared_before_forwarded.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_forwarded_compile_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -Xlinker -r -c", 0, -1))
+            return 181 if fp_forwarded_compile_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_wl_compile_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -Wl,-r -c", 0, -1))
+            return 182 if fp_wl_compile_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_link_context_without_fastmath: ClangFPOptionVector = typed_fp_test_options(sview("-Wl,-r", 0, -1))
+            return 183 if fp_link_context_without_fastmath.driver_link_effect != ClangFPDriverLinkEffect.TargetDefault
+            fp_reciprocal_machine_option: ClangFPOptionVector = typed_fp_test_options(sview("-mrecip=none", 0, -1))
+            return 184 if fp_reciprocal_machine_option.mode != ClangFloatingPointMode.Unknown or not fp_reciprocal_machine_option.unknown_option_seen
+            fp_forwarded_llvm_fp_option: ClangFPOptionVector = typed_fp_test_options(sview("-mllvm -enable-no-nans-fp-math", 0, -1))
+            return 185 if fp_forwarded_llvm_fp_option.mode != ClangFloatingPointMode.Unknown or not fp_forwarded_llvm_fp_option.unknown_option_seen or fp_forwarded_llvm_fp_option.honor_nans != ClangFPBooleanSetting.Unknown
+            fp_joined_llvm_fp_option: ClangFPOptionVector = typed_fp_test_options(sview("-mllvm=-enable-no-nans-fp-math", 0, -1))
+            return 188 if fp_joined_llvm_fp_option.mode != ClangFloatingPointMode.Unknown or not fp_joined_llvm_fp_option.unknown_option_seen
+            fp_unknown_fp_compile_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -fvendor-math-mode -c", 0, -1))
+            return 186 if fp_unknown_fp_compile_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_forwarded_llvm_compile_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -mllvm -enable-no-nans-fp-math -c", 0, -1))
+            return 187 if fp_forwarded_llvm_compile_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_joined_llvm_compile_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -mllvm=-enable-no-nans-fp-math -c", 0, -1))
+            return 189 if fp_joined_llvm_compile_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_compile_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -c", 0, -1))
+            return 132 if fp_compile_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_assembly_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -S", 0, -1))
+            return 166 if fp_assembly_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_preprocess_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -E", 0, -1))
+            return 167 if fp_preprocess_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_make_dependencies_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -M", 0, -1))
+            return 168 if fp_make_dependencies_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_compile_action_restored: ClangFPOptionVector = typed_fp_test_normalized_options(sview("-ffast-math", 0, -1), sview("-ffast-math -c", 0, -1))
+            return 158 if fp_compile_action_restored.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_output_named_action: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -o -c", 0, -1))
+            return 159 if fp_output_named_action.driver_link_effect != ClangFPDriverLinkEffect.AutomaticIfLinked
+            fp_forwarded_action: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -Xclang -c", 0, -1))
+            return 160 if fp_forwarded_action.driver_link_effect != ClangFPDriverLinkEffect.AutomaticIfLinked
+            fp_llvm_payload_action: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -mllvm -c", 0, -1))
+            return 164 if fp_llvm_payload_action.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_operand_named_action: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -- -c", 0, -1))
+            return 165 if fp_operand_named_action.driver_link_effect != ClangFPDriverLinkEffect.AutomaticIfLinked
+            fp_dependency_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -MM", 0, -1))
+            return 161 if fp_dependency_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_syntax_only: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -fsyntax-only", 0, -1))
+            return 162 if fp_syntax_only.driver_link_effect != ClangFPDriverLinkEffect.NotLinked
+            fp_dependency_generation: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -MMD", 0, -1))
+            return 163 if fp_dependency_generation.driver_link_effect != ClangFPDriverLinkEffect.AutomaticIfLinked
+            fp_dependency_generation_md: ClangFPOptionVector = typed_fp_test_options(sview("-ffast-math -MD", 0, -1))
+            return 169 if fp_dependency_generation_md.driver_link_effect != ClangFPDriverLinkEffect.AutomaticIfLinked
+            fp_explicit_ftz: ClangFPOptionVector = typed_fp_test_options(sview("-mdaz-ftz", 0, -1))
+            return 133 if fp_explicit_ftz.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_explicit_no_ftz: ClangFPOptionVector = typed_fp_test_options(sview("-mno-daz-ftz", 0, -1))
+            return 177 if fp_explicit_no_ftz.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            fp_unsafe_link: ClangFPOptionVector = typed_fp_test_options(sview("-funsafe-math-optimizations", 0, -1))
+            return 138 if fp_unsafe_link.driver_link_effect != ClangFPDriverLinkEffect.AutomaticIfLinked
+            fp_unsafe_reset: ClangFPOptionVector = typed_fp_test_options(sview("-funsafe-math-optimizations -fno-unsafe-math-optimizations", 0, -1))
+            return 139 if fp_unsafe_reset.driver_link_effect != ClangFPDriverLinkEffect.TargetDefault
+            fp_msvc_link: ClangFPOptionVector = typed_fp_test_options(sview("/fp:fast", 0, -1))
+            return 140 if fp_msvc_link.driver_link_effect != ClangFPDriverLinkEffect.Unknown
+            return 134 if not typed_dump_test_contains(first_dump, sview("fp_option contract=on\n", 0, -1))
 
             private_global_context: mutable TypedContext = test_context(root)
             private_global_context.exprs.push(TypedExpr{

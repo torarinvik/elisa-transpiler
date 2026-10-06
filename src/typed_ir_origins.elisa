@@ -13,9 +13,10 @@ extend CTranslator:
         end_offset: i64 = ast_range_origin_offset(node, end, origin_name, true)
         return TypedSourceRange{file: file, included_from: included_from, start_offset: start_offset, end_offset: end_offset}
 
-    def typed_ir_source_origin[@r](node: JsonValueHandle[r], synthesized_reason: sview) -> TypedIRSourceOrigin[r]:
+    def typed_ir_source_origin[@r](node: JsonValueHandle[r], synthesized_reason: sview, translation_unit: sview @r) -> TypedIRSourceOrigin[r]:
         return TypedIRSourceOrigin[r]{
             node: node,
+            translation_unit: translation_unit,
             source: typed_source_range(node, sview("", 0, 0)),
             spelling: typed_source_range(node, sview("spellingLoc", 0, -1)),
             expansion: typed_source_range(node, sview("expansionLoc", 0, -1)),

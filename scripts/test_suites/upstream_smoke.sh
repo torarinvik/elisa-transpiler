@@ -38,10 +38,11 @@ cmp build/ini_dump.missing.native.out build/ini_dump.missing.generated.out
 cmp build/ini_dump.missing.native.err build/ini_dump.missing.generated.err
 
 cjson_root=testdata/upstream/cJSON
+cjson_smoke=testdata/fixtures/cjson_smoke.c
 clang -std=c11 -I "$cjson_root" \
-    "$cjson_root/cjson_smoke.c" -lm -o build/cjson.native
+    "$cjson_smoke" -lm -o build/cjson.native
 
-test_translator_bounded "$cjson_root/cjson_smoke.c" > build/cjson.generated.elisa
+test_translator_bounded "$cjson_smoke" > build/cjson.generated.elisa
 rg -q '^struct Parse_buffer:$' build/cjson.generated.elisa
 # These C fields are `const unsigned char *`: their POINTER SLOTS and the other
 # parser-state fields are assigned during parsing. Elisa's field-level

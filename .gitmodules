@@ -1,0 +1,6 @@
+[submodule "testdata/upstream/cJSON"]
+	path = testdata/upstream/cJSON
+	url = https://github.com/DaveGamble/cJSON.git
+[submodule "testdata/upstream/wolf4sdl"]
+	path = testdata/upstream/wolf4sdl
+	url = https://github.com/fabiangreffrath/wolf4sdl.git

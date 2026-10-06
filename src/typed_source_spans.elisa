@@ -15,7 +15,7 @@ extend CTranslator:
         text_cache: mutable darray[TypedSourceMapText[target]] @target = []
         for index in 0..<spans.count |spans, copied, text_cache|:
             span: TypedGeneratedSourceSpan[source] = spans[index]
-            copied.push(TypedGeneratedSourceSpan[target]{generated_start: span.generated_start, generated_end: span.generated_end, source: typed_copy_source_range(span.source, &text_cache), spelling: typed_copy_source_range(span.spelling, &text_cache), expansion: typed_copy_source_range(span.expansion, &text_cache), synthesized_reason: typed_intern_source_map_text(&text_cache, span.synthesized_reason)})
+            copied.push(TypedGeneratedSourceSpan[target]{generated_start: span.generated_start, generated_end: span.generated_end, translation_unit: typed_intern_source_map_text(&text_cache, span.translation_unit), source: typed_copy_source_range(span.source, &text_cache), spelling: typed_copy_source_range(span.spelling, &text_cache), expansion: typed_copy_source_range(span.expansion, &text_cache), synthesized_reason: typed_intern_source_map_text(&text_cache, span.synthesized_reason)})
         return copied
 
     def typed_copy_diagnostics[@source, @target](diagnostics: darray[TypedDiagnostic] @source) -> darray[TypedDiagnostic] @target can[Memory.Allocate, Abort.Panic]:
@@ -27,16 +27,23 @@ extend CTranslator:
                 kind: typed_copy_view_to_region(diagnostic.kind),
                 subject_type: typed_copy_view_to_region(diagnostic.subject_type),
                 required_capability: typed_copy_view_to_region(diagnostic.required_capability),
+                translation_unit: typed_copy_view_to_region(diagnostic.translation_unit),
+                translation_unit_content_hash: diagnostic.translation_unit_content_hash,
                 source: typed_copy_view_to_region(diagnostic.source),
                 canonical_source: typed_copy_view_to_region(diagnostic.canonical_source),
+                source_content_hash: diagnostic.source_content_hash,
                 spelling_source: typed_copy_view_to_region(diagnostic.spelling_source),
                 spelling_canonical_source: typed_copy_view_to_region(diagnostic.spelling_canonical_source),
+                spelling_source_content_hash: diagnostic.spelling_source_content_hash,
                 spelling_included_from: typed_copy_view_to_region(diagnostic.spelling_included_from),
                 spelling_included_from_canonical: typed_copy_view_to_region(diagnostic.spelling_included_from_canonical),
+                spelling_included_from_content_hash: diagnostic.spelling_included_from_content_hash,
                 expansion_source: typed_copy_view_to_region(diagnostic.expansion_source),
                 expansion_canonical_source: typed_copy_view_to_region(diagnostic.expansion_canonical_source),
+                expansion_source_content_hash: diagnostic.expansion_source_content_hash,
                 expansion_included_from: typed_copy_view_to_region(diagnostic.expansion_included_from),
                 expansion_included_from_canonical: typed_copy_view_to_region(diagnostic.expansion_included_from_canonical),
+                expansion_included_from_content_hash: diagnostic.expansion_included_from_content_hash,
                 range_start_offset: diagnostic.range_start_offset,
                 range_end_offset: diagnostic.range_end_offset,
                 line: diagnostic.line,
@@ -60,7 +67,7 @@ extend CTranslator:
         spelling: TypedOwnedSourceRange[r] = typed_owned_source_range(origin.spelling) can Memory.Allocate, Abort.Panic
         expansion: TypedOwnedSourceRange[r] = typed_owned_source_range(origin.expansion) can Memory.Allocate, Abort.Panic
         reason: sview @r = origin.synthesized_reason
-        ctx.generated_source_spans.push(TypedGeneratedSourceSpan[r]{generated_start: out.count.i64(), generated_end: -1, source: source, spelling: spelling, expansion: expansion, synthesized_reason: reason})
+        ctx.generated_source_spans.push(TypedGeneratedSourceSpan[r]{generated_start: out.count.i64(), generated_end: -1, translation_unit: origin.translation_unit, source: source, spelling: spelling, expansion: expansion, synthesized_reason: reason})
         return span_index
 
     def typed_finish_statement_source_span[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, span_index: i64) -> void can[Memory.Allocate, Abort.Panic]:

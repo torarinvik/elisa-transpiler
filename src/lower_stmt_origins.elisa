@@ -7,5 +7,5 @@ extend CTranslator:
         for index in start..<end |ctx, node, start, end|:
             origin: TypedIRSourceOrigin[r] = ctx.stmt_source_origins[index.usize()]
             reason: sview = sview("synthesized while lowering parent Clang statement", 0, -1) if index != result else sview("", 0, 0)
-            ctx.stmt_source_origins[index.usize()] <- typed_ir_source_origin(node, reason) if json_handle_is_null(origin.node)
+            ctx.stmt_source_origins[index.usize()] <- typed_ir_source_origin(node, reason, ctx.canonical_source) if json_handle_is_null(origin.node)
         return result

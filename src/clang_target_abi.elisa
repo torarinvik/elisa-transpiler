@@ -3,7 +3,7 @@ extend CTranslator:
     # running the translator. Integer widths are stored in bits; floating
     # sizes are stored in target bytes for safe sizeof constant evaluation.
     def clang_target_abi_unknown() -> ClangTargetABI:
-        return ClangTargetABI{char_bits: 0, short_bits: 0, int_bits: 0, long_bits: 0, long_long_bits: 0, float_bytes: 0, double_bytes: 0, long_double_bytes: 0, pointer_bits: 0, size_type_bits: 0, char_unsigned: false, short_enums: false, valid: false}
+        return ClangTargetABI{char_bits: 0, short_bits: 0, int_bits: 0, long_bits: 0, long_long_bits: 0, float_bytes: 0, double_bytes: 0, long_double_bytes: 0, float_is_binary32: false, double_is_binary64: false, pointer_bits: 0, size_type_bits: 0, char_unsigned: false, short_enums: false, valid: false}
 
     def clang_target_abi_load(macros: darray[u8], succeeded: bool) -> ClangTargetABI:
         return clang_target_abi_load_with_options(macros, succeeded, false)
@@ -50,6 +50,29 @@ extend CTranslator:
             number <- number * 10 + digit
         return number
 
+    def clang_target_macro_signed_decimal(macros: darray[u8], name: sview) -> i64:
+        value: sview = clang_target_macro_value(macros, name)
+        start: mutable i64 = 0
+        stop: mutable i64 = value.len
+        while start < stop and (string_view_index(value, start) == 32 or string_view_index(value, start) == 9):
+            start <- start + 1
+        while stop > start and (string_view_index(value, stop - 1) == 32 or string_view_index(value, stop - 1) == 9):
+            stop <- stop - 1
+        if stop - start >= 2 and string_view_index(value, start) == 40 and string_view_index(value, stop - 1) == 41:
+            start <- start + 1
+            stop <- stop - 1
+        negative: mutable bool = false
+        if start < stop and (string_view_index(value, start) == 45 or string_view_index(value, start) == 43):
+            negative <- string_view_index(value, start) == 45
+            start <- start + 1
+        return -9223372036854775807 if start >= stop
+        number: mutable i64 = 0
+        for index in start..<stop |value, number|:
+            digit: i64 = string_view_index(value, index) - 48
+            return -9223372036854775807 if digit < 0 or digit > 9 or number > (9223372036854775807 - digit) / 10
+            number <- number * 10 + digit
+        return -number if negative else number
+
     def clang_target_size_type_bits(macros: darray[u8], char_bits: i64, short_bits: i64, int_bits: i64, long_bits: i64, long_long_bits: i64) -> i64:
         type_name: sview = clang_target_macro_value(macros, sview("__SIZE_TYPE__", 0, -1))
         if sview_eq(type_name, sview("unsigned int", 0, -1)) or sview_eq(type_name, sview("unsigned", 0, -1)):
@@ -79,6 +102,8 @@ extend CTranslator:
         float_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_FLOAT__", 0, -1))
         double_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_DOUBLE__", 0, -1))
         long_double_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_LONG_DOUBLE__", 0, -1))
+        float_is_binary32: bool = float_bytes == 4 and clang_target_macro_decimal(macros, sview("__FLT_RADIX__", 0, -1)) == 2 and clang_target_macro_decimal(macros, sview("__FLT_MANT_DIG__", 0, -1)) == 24 and clang_target_macro_signed_decimal(macros, sview("__FLT_MAX_EXP__", 0, -1)) == 128 and clang_target_macro_signed_decimal(macros, sview("__FLT_MIN_EXP__", 0, -1)) == -125 and clang_target_macro_decimal(macros, sview("__FLT_HAS_DENORM__", 0, -1)) == 1 and clang_target_macro_decimal(macros, sview("__FLT_HAS_INFINITY__", 0, -1)) == 1 and clang_target_macro_decimal(macros, sview("__FLT_HAS_QUIET_NAN__", 0, -1)) == 1
+        double_is_binary64: bool = double_bytes == 8 and clang_target_macro_decimal(macros, sview("__FLT_RADIX__", 0, -1)) == 2 and clang_target_macro_decimal(macros, sview("__DBL_MANT_DIG__", 0, -1)) == 53 and clang_target_macro_signed_decimal(macros, sview("__DBL_MAX_EXP__", 0, -1)) == 1024 and clang_target_macro_signed_decimal(macros, sview("__DBL_MIN_EXP__", 0, -1)) == -1021 and clang_target_macro_decimal(macros, sview("__DBL_HAS_DENORM__", 0, -1)) == 1 and clang_target_macro_decimal(macros, sview("__DBL_HAS_INFINITY__", 0, -1)) == 1 and clang_target_macro_decimal(macros, sview("__DBL_HAS_QUIET_NAN__", 0, -1)) == 1
         pointer_bytes: i64 = clang_target_macro_decimal(macros, sview("__SIZEOF_POINTER__", 0, -1))
         return clang_target_abi_unknown() if char_bits_per_byte <= 0 or char_bytes <= 0 or short_bytes <= 0 or int_bytes <= 0 or long_bytes <= 0 or long_long_bytes <= 0 or pointer_bytes <= 0
         return clang_target_abi_unknown() if char_bits_per_byte != 8 or short_bytes > 8 or int_bytes > 8 or long_bytes > 8 or long_long_bytes > 8 or pointer_bytes > 8
@@ -95,4 +120,4 @@ extend CTranslator:
         # and a 32-bit int. Other widths are intentionally rejected rather
         # than silently routed through the host's i32 arithmetic rules.
         valid: bool = char_bits == 8 and int_bits == 32 and clang_target_width_supported(short_bits) and clang_target_width_supported(long_bits) and clang_target_width_supported(long_long_bits) and clang_target_width_supported(pointer_bits) and pointer_bits == host_pointer_bits and clang_target_width_supported(size_type_bits)
-        return ClangTargetABI{char_bits: char_bits, short_bits: short_bits, int_bits: int_bits, long_bits: long_bits, long_long_bits: long_long_bits, float_bytes: float_bytes, double_bytes: double_bytes, long_double_bytes: long_double_bytes, pointer_bits: pointer_bits, size_type_bits: size_type_bits, char_unsigned: char_unsigned, short_enums: short_enums, valid: valid} if valid else clang_target_abi_unknown()
+        return ClangTargetABI{char_bits: char_bits, short_bits: short_bits, int_bits: int_bits, long_bits: long_bits, long_long_bits: long_long_bits, float_bytes: float_bytes, double_bytes: double_bytes, long_double_bytes: long_double_bytes, float_is_binary32: float_is_binary32, double_is_binary64: double_is_binary64, pointer_bits: pointer_bits, size_type_bits: size_type_bits, char_unsigned: char_unsigned, short_enums: short_enums, valid: valid} if valid else clang_target_abi_unknown()

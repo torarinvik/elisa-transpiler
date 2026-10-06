@@ -415,7 +415,9 @@ extend CTranslator:
             append_view(out, sview("\n", 0, -1)) if index + 1 < ctx.functions.count
     def typed_emit_program[@r](out: mutable darray[u8]&, ctx: mutable TypedContext[r]&, with_prelude: bool, project_mode: bool, collect_frontend_stats: bool, arena_bytes: usize, needs_runtime_nonnull: mutable bool&, needs_runtime_readonly_nonnull: mutable bool&, needs_runtime_varargs: mutable bool&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         body: mutable darray[u8] = []
+        typed_reset_cpp_unordered_map_dependency_emission()
         typed_emit_program_body(&body, ctx, project_mode, collect_frontend_stats, arena_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        ctx.needs_cpp_unordered_map <- typed_cpp_unordered_map_dependency_emitted
         typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("program-body-emitted", 0, -1), sview("", 0, 0), arena_bytes, body.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
         increment_helpers: i64 = typed_increment_helper_mask(ctx)
         # Emitter markers record the exact helper calls present in the body,
@@ -425,11 +427,15 @@ extend CTranslator:
         needs_readonly_nonnull: mutable bool = false
         needs_assignment_value: mutable bool = false
         needs_compound_assignment_value: mutable bool = false
-        for index in 0..<body.count |body, needs_nonnull, needs_readonly_nonnull, needs_assignment_value, needs_compound_assignment_value|:
+        needs_compound_literal_mutable: mutable bool = false
+        needs_compound_literal_readonly: mutable bool = false
+        for index in 0..<body.count |body, needs_nonnull, needs_readonly_nonnull, needs_assignment_value, needs_compound_assignment_value, needs_compound_literal_mutable, needs_compound_literal_readonly|:
             needs_nonnull <- true if body[index] == 0
             needs_readonly_nonnull <- true if body[index] == 1
             needs_assignment_value <- true if body[index] == 2
             needs_compound_assignment_value <- true if body[index] == 3
+            needs_compound_literal_mutable <- true if body[index] == 4
+            needs_compound_literal_readonly <- true if body[index] == 5
         needs_runtime_nonnull <- needs_nonnull
         needs_runtime_readonly_nonnull <- needs_readonly_nonnull
         needs_runtime_varargs <- typed_context_needs_varargs(ctx)
@@ -443,18 +449,20 @@ extend CTranslator:
         typed_emit_assignment_value_helper(out, ctx) if needs_assignment_value
         if needs_compound_assignment_value:
             typed_emit_compound_assignment_value_helpers(out, ctx) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        typed_emit_compound_literal_helper(out, ctx, false) if needs_compound_literal_mutable
+        typed_emit_compound_literal_helper(out, ctx, true) if needs_compound_literal_readonly
         typed_emit_increment_helpers(out, ctx, increment_helpers)
         typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("support-helpers-emitted", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
         body_base_offset: i64 = out.count.i64()
         removed_marker_offsets: mutable darray[i64] = []
         for index in 0..<body.count |out, body, removed_marker_offsets|:
             byte: u8 = body[index]
-            removed_marker_offsets.push(index.i64()) if ctx.source_mapping_enabled and (byte == 0 or byte == 1 or byte == 2 or byte == 3)
-            out.push(byte) if byte != 0 and byte != 1 and byte != 2 and byte != 3
+            removed_marker_offsets.push(index.i64()) if ctx.source_mapping_enabled and (byte == 0 or byte == 1 or byte == 2 or byte == 3 or byte == 4 or byte == 5)
+            out.push(byte) if byte != 0 and byte != 1 and byte != 2 and byte != 3 and byte != 4 and byte != 5
         typed_rebase_generated_source_spans(ctx.generated_source_spans, body_base_offset, removed_marker_offsets) if ctx.source_mapping_enabled
         typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("body-appended", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
 
-    def translate_ast_mode_with_options[@r](translation: mutable TypedTranslation[r]&, ast_bytes: darray[u8] @r, record_layout_dump: darray[u8] @r, source: cstr @r, with_prelude: bool, mode: TypedTranslationMode, project_mode: bool, max_frontend_json_values: usize, collect_frontend_stats: bool, dump_typed_ir: bool, capture_source_map: bool, source_working_directory: sview @r, requested_project_initializer_name: sview @r, target_abi: ClangTargetABI, source_language_is_cxx: bool) -> void can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
+    def translate_ast_mode_with_options[@r](translation: mutable TypedTranslation[r]&, ast_bytes: darray[u8] @r, record_layout_dump: darray[u8] @r, source: cstr @r, with_prelude: bool, mode: TypedTranslationMode, floating_point_options: ClangFPOptionVector, project_mode: bool, max_frontend_json_values: usize, collect_frontend_stats: bool, dump_typed_ir: bool, capture_source_map: bool, source_working_directory: sview @r, requested_project_initializer_name: sview @r, target_abi: ClangTargetABI, source_language_is_cxx: bool) -> void can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
         translation.output.count <- 0.usize()
         translation.source_map.count <- 0.usize()
         translation.typed_ir_dump.count <- 0.usize()
@@ -481,11 +489,9 @@ extend CTranslator:
         ast_arena: mutable Arena = zeroed
         parsed: JsonParseResult[ast_arena] = json_parse_checked(&ast_arena, bytes_view(ast_bytes))
         if parsed.code != JsonErrorCode.OK:
-            diagnostics: mutable darray[TypedDiagnostic] = []
-            diagnostics.push(TypedDiagnostic{category: sview("AST", 0, -1), kind: sview("invalid-json", 0, -1), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0), source: source_view, canonical_source: canonical_source, spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), range_start_offset: -1, range_end_offset: -1, line: 0, column: parsed.pos, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0})
+            source_content_hash: TypedContentHash = typed_source_content_hash(source_view, source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_push_ast_parse_diagnostic(&translation, sview("AST", 0, -1), sview("invalid-json", 0, -1), source_view, canonical_source, source_content_hash, parsed.pos) can Memory.Allocate, Abort.Panic
             ast_arena_used_bytes: usize = arena_used_bytes(&ast_arena) if collect_frontend_stats else 0.usize()
-            for index in 0..<diagnostics.count |diagnostics, translation|:
-                translation.diagnostics.push(diagnostics[index])
             translation.failed <- true
             translation.ast_arena_used_bytes <- ast_arena_used_bytes
         else:
@@ -493,13 +499,14 @@ extend CTranslator:
             initializer_name: mutable sview = sview("initialize_globals", 0, -1)
             initializer_name <- requested_project_initializer_name if project_mode and requested_project_initializer_name.len > 0
             initializer_name <- typed_project_initializer_name(source) can Memory.Allocate, Abort.Panic if project_mode and requested_project_initializer_name.len == 0
-            context: mutable TypedContext[ast_arena] = typed_new_context(root, project_mode, initializer_name, mode, target_abi, source_language_is_cxx, capture_source_map, source, source_working_directory, canonical_source)
+            context: mutable TypedContext[ast_arena] = typed_new_context(root, project_mode, initializer_name, mode, floating_point_options, target_abi, source_language_is_cxx, capture_source_map, source, source_working_directory, canonical_source)
             ast_json_values: i64 = preflight_value_count if collect_frontend_stats else -1
             ast_arena_used_bytes: usize = arena_used_bytes(&ast_arena) if collect_frontend_stats else 0.usize()
             typed_emit_frontend_phase_stats(source_view, sview("json-parsed", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
             schema_issue: sview = ast_root_schema_issue(root)
             if schema_issue.len > 0:
-                translation.diagnostics.push(TypedDiagnostic{category: sview("AST schema", 0, -1), kind: typed_copy_view_to_region(schema_issue), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0), source: source_view, canonical_source: canonical_source, spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), range_start_offset: -1, range_end_offset: -1, line: 0, column: 0, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0})
+                source_content_hash: TypedContentHash = typed_source_content_hash(source_view, source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_push_ast_parse_diagnostic(&translation, sview("AST schema", 0, -1), schema_issue, source_view, canonical_source, source_content_hash, 0) can Memory.Allocate, Abort.Panic
                 translation.failed <- true
                 translation.ast_json_values <- ast_json_values
                 translation.ast_arena_used_bytes <- ast_arena_used_bytes
@@ -509,6 +516,7 @@ extend CTranslator:
                 typed_collect_types(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 typed_emit_frontend_phase_stats(source_view, sview("types-collected", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
                 typed_parse_clang_record_layouts(&context, bytes_view(record_layout_dump)) can Memory.Allocate
+                typed_scan_unsupported_target_types(&context, root, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 typed_scan_cpp_features(&context, root, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 typed_collect_external_globals(&context, root, false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 typed_collect_user_functions(&context, root, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -524,17 +532,16 @@ extend CTranslator:
                 issue: mutable TypedIRIssue[ast_arena] = TypedIRIssue[ast_arena]{kind: sview("", 0, 0), index: -1}
                 if context.diagnostics.count == 0:
                     issue <- typed_verify_ir(context) can Memory.Allocate, Abort.Panic
-                    typed_record_ir_issue(&context, issue) can Memory.Allocate, Abort.Panic if issue.kind.len > 0
+                    typed_record_ir_issue(&context, issue) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if issue.kind.len > 0
                 if context.diagnostics.count == 0:
                     typed_mark_record_field_mutability(&context)
                     issue <- typed_verify_ir(context) can Memory.Allocate, Abort.Panic
-                    typed_record_ir_issue(&context, issue) can Memory.Allocate, Abort.Panic if issue.kind.len > 0
+                    typed_record_ir_issue(&context, issue) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if issue.kind.len > 0
                 typed_emit_frontend_phase_stats(source_view, sview("ir-verified", 0, -1), sview("", 0, 0), ast_arena_used_bytes, 0.usize(), &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
-                # When explicitly requested, retain the IR dump on verifier and
-                # lowering diagnostics too; failed IR is often the most useful case
-                # for this debugging view. Successful translations still dump the
-                # final post-verification form.
-                if dump_typed_ir:
+                # Failed translations still retain the verified/diagnostic IR.
+                # On success, dump after emission so dependency facts reflect the
+                # exact types that survived into generated Elisa.
+                if dump_typed_ir and context.diagnostics.count > 0:
                     generated_ir_dump: darray[u8] = typed_dump_ir(context) can Memory.Allocate, Abort.Panic
                     for index in 0..<generated_ir_dump.count |generated_ir_dump, translation|:
                         translation.typed_ir_dump.push(generated_ir_dump[index])
@@ -557,6 +564,10 @@ extend CTranslator:
                         for index in 0..<formatted_output.count |formatted_output, translation|:
                             translation.output.push(formatted_output[index])
                     typed_emit_frontend_phase_stats(source_view, sview("output-formatted", 0, -1), sview("", 0, 0), ast_arena_used_bytes, translation.output.count, &context) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
+                if dump_typed_ir and context.diagnostics.count == 0:
+                    generated_ir_dump: darray[u8] = typed_dump_ir(context) can Memory.Allocate, Abort.Panic
+                    for index in 0..<generated_ir_dump.count |generated_ir_dump, translation|:
+                        translation.typed_ir_dump.push(generated_ir_dump[index])
                 copied_source_map: darray[TypedGeneratedSourceSpan[r]] @r = typed_copy_generated_source_spans(context.generated_source_spans) can Memory.Allocate, Abort.Panic
                 copied_diagnostics: darray[TypedDiagnostic] @r = typed_copy_diagnostics(context.diagnostics) can Memory.Allocate, Abort.Panic
                 for index in 0..<copied_source_map.count |copied_source_map, translation|:
@@ -575,8 +586,8 @@ extend CTranslator:
 
     def translate_ast_mode[@r](translation: mutable TypedTranslation[r]&, ast_bytes: darray[u8] @r, source: cstr @r, with_prelude: bool) -> void can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
         empty_layout_dump: mutable darray[u8] @r = []
-        translate_ast_mode_with_options(translation, ast_bytes, empty_layout_dump, source, with_prelude, TypedTranslationMode.Idiomatic, false, 1000000.usize(), false, false, false, sview("", 0, 0), sview("", 0, 0), clang_target_abi_unknown(), source_is_cxx(source)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
+        translate_ast_mode_with_options(translation, ast_bytes, empty_layout_dump, source, with_prelude, TypedTranslationMode.Idiomatic, clang_fp_options_default(), false, 1000000.usize(), false, false, false, sview("", 0, 0), sview("", 0, 0), clang_target_abi_unknown(), source_is_cxx(source)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
 
     def translate_ast[@r](translation: mutable TypedTranslation[r]&, ast_bytes: darray[u8] @r, source: cstr @r) -> void can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console]:
         empty_layout_dump: mutable darray[u8] @r = []
-        translate_ast_mode_with_options(translation, ast_bytes, empty_layout_dump, source, true, TypedTranslationMode.Idiomatic, false, 1000000.usize(), false, false, false, sview("", 0, 0), sview("", 0, 0), clang_target_abi_unknown(), source_is_cxx(source)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
+        translate_ast_mode_with_options(translation, ast_bytes, empty_layout_dump, source, true, TypedTranslationMode.Idiomatic, clang_fp_options_default(), false, 1000000.usize(), false, false, false, sview("", 0, 0), sview("", 0, 0), clang_target_abi_unknown(), source_is_cxx(source)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console

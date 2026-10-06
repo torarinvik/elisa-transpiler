@@ -17,10 +17,12 @@ extend CTranslator:
             value_start: mutable i64 = cursor + 1 if cursor < text.len and string_view_index(text, cursor) == 58 else cursor
             value_start <- ast_json_skip_space(text, value_start)
             value_stop: i64 = ast_json_skip_value(text, value_start)
-            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)) and not kind_seen:
+            if ast_json_key_is(text, key_start, key_stop, sview("kind", 0, -1)):
+                return sview("duplicate-field:root.kind", 0, -1) if kind_seen
                 kind_seen <- true
                 kind_is_valid <- string_view_index(text, value_start) == 34 and ast_json_key_is(text, value_start, value_stop, sview("TranslationUnitDecl", 0, -1))
-            elif ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1)) and not inner_seen:
+            elif ast_json_key_is(text, key_start, key_stop, sview("inner", 0, -1)):
+                return sview("duplicate-field:root.inner", 0, -1) if inner_seen
                 inner_seen <- true
                 inner_is_valid <- string_view_index(text, value_start) == 91
             cursor <- ast_json_skip_space(text, value_stop)

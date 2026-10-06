@@ -21,6 +21,39 @@ extend CTranslator:
         append_view(&output, sview("\n", 0, -1))
         emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
 
+    def cli_emit_compile_database_json_value_limit_error(path: sview, max_values: usize) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("elisa-c-transpiler: compilation database exceeded --max-frontend-json-values ", 0, -1))
+        append_i64(&output, max_values.i64())
+        append_view(&output, sview(" while reading ", 0, -1))
+        append_view(&output, path)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
+
+    def cli_emit_input_source_limit_error(source: sview, max_sources: usize) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("elisa-c-transpiler: input source count exceeded --max-input-sources ", 0, -1))
+        append_i64(&output, max_sources.i64())
+        append_view(&output, sview(" while processing ", 0, -1))
+        append_view(&output, source)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
+
+    def cli_emit_invalid_compilation_database(path: sview) -> void can[Console, Unsafe.PointerCast]:
+        output: mutable darray[u8] = []
+        append_view(&output, sview("elisa-c-transpiler: invalid or malformed compilation database while reading ", 0, -1))
+        append_view(&output, path)
+        append_view(&output, sview("\n", 0, -1))
+        emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
+
+    def cli_emit_invalid_compile_command(source: sview, command_is_text: bool) -> void can[Console, Unsafe.PointerCast]:
+        if command_is_text:
+            emit_view_fd(sview("elisa-c-transpiler: unsupported or malformed syntax in compilation command for ", 0, -1), 2)
+        else:
+            emit_view_fd(sview("elisa-c-transpiler: invalid compilation command for ", 0, -1), 2)
+        emit_view_fd(source, 2)
+        emit_view_fd(sview("\n", 0, -1), 2)
+
     def cli_emit_malformed_clang_ast(source: sview) -> void can[Console, Unsafe.PointerCast]:
         output: mutable darray[u8] = []
         append_view(&output, sview("elisa-c-transpiler: Clang emitted invalid or over-depth AST JSON while processing ", 0, -1))
@@ -40,147 +73,6 @@ extend CTranslator:
 
     def cli_is_option(value: sview, wanted: sview) -> bool:
         return sview_eq(value, wanted)
-
-    # Keep compile_commands.json's `arguments` as an array of decoded strings.
-    # Do not flatten it into command text: argv boundaries are semantic data.
-    def cli_compile_arguments_valid[@r](arguments: JsonValueHandle[r]) -> bool:
-        return false if not json_handle_is_array(arguments)
-        count: i64 = json_handle_array_len(arguments)
-        return false if count <= 0
-        for index in 0..<count |arguments|:
-            argument_value: JsonValueHandle[r] = ast_array_item(arguments, index)
-            return false if not json_handle_is_string(argument_value)
-            argument: sview = ast_string(argument_value)
-            return false if index == 0 and argument.len == 0
-            for byte_index in 0..<argument.len:
-                return false if string_view_index(argument, byte_index) == 0
-        return true
-    def cli_compile_command[@r](entry: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic]:
-        arguments: JsonValueHandle[r] = ast_field(entry, sview("arguments", 0, -1))
-        return sview("", 0, 0) if cli_compile_arguments_valid(arguments)
-        return ast_string(ast_field(entry, sview("command", 0, -1)))
-    def cli_compile_arguments_copy[@r](arguments: JsonValueHandle[r]) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
-        copied: mutable darray[sview] = []
-        count: i64 = json_handle_array_len(arguments)
-        return copied if count <= 0
-        for index in 0..<count |copied, arguments|:
-            view: sview = ast_string(ast_array_item(arguments, index))
-            owned: cstr = string_view_copy(view) can Memory.Allocate, Abort.Panic
-            copied.push(sview(owned, 0, -1))
-        return copied
-    def cli_owned_compile_view(view: sview) -> sview can[Memory.Allocate, Abort.Panic]:
-        return sview("", 0, 0) if view.len == 0
-        owned: cstr = string_view_copy(view) can Memory.Allocate, Abort.Panic
-        return sview(owned, 0, -1)
-    def cli_compile_argument_at(arguments: darray[sview], argument_index: i64) -> sview:
-        return sview("", 0, 0) if argument_index < 0 or argument_index.usize() >= arguments.count
-        return arguments[argument_index.usize()]
-    def cli_compile_arguments_equal(left: darray[sview], right: darray[sview]) -> bool:
-        left_count: i64 = left.count.i64()
-        right_count: i64 = right.count.i64()
-        return false if left_count != right_count
-        for index in 0..<left_count |left, right|:
-            return false if not sview_eq(left[index.usize()], right[index.usize()])
-        return true
-
-    # Canonical identities collapse aliases (including symlinks) when the
-    # source exists. Retain lexical comparison as a deterministic fallback for
-    # malformed or not-yet-created paths.
-    def cli_same_compile_source(left: CliSource, right: CliSource) -> bool:
-        return sview_eq(left.canonical_path, right.canonical_path) if left.canonical_path.len > 0 and right.canonical_path.len > 0
-        return false if not sview_eq(left.path, right.path)
-        return true if left.path.len > 0 and string_view_index(left.path, 0) == 47
-        return sview_eq(left.directory, right.directory)
-
-    def cli_same_compile_settings(left: CliSource, right: CliSource) -> bool:
-        return false if not sview_eq(left.directory, right.directory)
-        return false if left.command_valid != right.command_valid
-        if left.argv_signature.len > 0 or right.argv_signature.len > 0:
-            return false if left.argv_signature.len == 0 or right.argv_signature.len == 0
-            return sview_eq(left.argv_signature, right.argv_signature)
-        return false if left.has_arguments != right.has_arguments
-        return cli_compile_arguments_equal(left.arguments, right.arguments) if left.has_arguments
-        return sview_eq(left.command, right.command)
-
-    def cli_compile_command_sources(raw: darray[u8], max_response_bytes: usize, duplicate_conflict: mutable bool&, conflicting_source: mutable sview&, source_operand_mismatch: mutable bool&, mismatched_source: mutable sview&, response_failure: mutable ClangResponseFailure&, response_failure_source: mutable sview&, response_failure_path: mutable darray[u8]&) -> darray[CliSource] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        sources: mutable darray[CliSource] = []
-        duplicate_conflict <- false
-        conflicting_source <- sview("", 0, 0)
-        source_operand_mismatch <- false
-        mismatched_source <- sview("", 0, 0)
-        response_failure <- ClangResponseFailure.None
-        response_failure_source <- sview("", 0, 0)
-        response_failure_path.count <- 0.usize()
-        parsed: JsonParseResult[perm_arena] = json_parse_checked(&perm_arena, bytes_view(raw))
-        return sources if parsed.code != JsonErrorCode.OK
-        count: i64 = json_handle_array_len(parsed.value)
-        return sources if count < 0
-        entry_index: mutable i64 = 0
-        while entry_index < count |sources, parsed, entry_index|:
-            entry: JsonValueHandle[perm_arena] = ast_array_item(parsed.value, entry_index)
-            file_node: JsonValueHandle[perm_arena] = ast_field(entry, sview("file", 0, -1))
-            directory_node: JsonValueHandle[perm_arena] = ast_field(entry, sview("directory", 0, -1))
-            file: sview = ast_string(file_node)
-            directory: sview = ast_string(directory_node)
-            argument_nodes: JsonValueHandle[perm_arena] = ast_field(entry, sview("arguments", 0, -1))
-            has_arguments: bool = cli_compile_arguments_valid(argument_nodes)
-            arguments: darray[sview] = cli_compile_arguments_copy(argument_nodes) can Memory.Allocate, Abort.Panic if has_arguments else []
-            command: sview = cli_compile_command(entry) can Memory.Allocate, Abort.Panic
-            owned_command: sview = cli_owned_compile_view(command) can Memory.Allocate, Abort.Panic
-            command_valid: bool = has_arguments or command.len > 0
-            candidate_path: mutable sview = file
-            # The compile command runs from `directory`, so Clang records a
-            # relative file spelling relative to that directory. Preserve that
-            # spelling for AST provenance; only synthesize a cwd-relative path
-            # when an entry has no command and must use the simple frontend.
-            if file.len > 0 and not (command_valid or directory.len == 0 or string_view_index(file, 0) == 47):
-                joined: mutable darray[u8] = []
-                append_view(&joined, directory)
-                append_view(&joined, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
-                append_view(&joined, file)
-                candidate_path <- sview(ctx_string_from_view(bytes_view(joined)), 0, -1)
-            if file.len > 0:
-                canonical_path_bytes: mutable darray[u8] = []
-                canonical_path_directory: sview = directory if command_valid else sview("", 0, 0)
-                canonical_path_valid: bool = ast_json_resolve_path(candidate_path, canonical_path_directory, &canonical_path_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
-                canonical_path: sview = sview(ctx_string_from_view(bytes_view(canonical_path_bytes)), 0, -1) if canonical_path_valid else sview("", 0, 0)
-                argv_signature: mutable sview = sview("", 0, 0)
-                short_enums: mutable bool = false
-                if command_valid:
-                    source_operand_checked: mutable bool = false
-                    source_operand_matches: mutable bool = false
-                    argv_signature <- clang_compile_argv_signature(directory, owned_command, arguments, has_arguments, canonical_path, max_response_bytes, &source_operand_checked, &source_operand_matches, &short_enums, response_failure, response_failure_path) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
-                    if response_failure[0] != ClangResponseFailure.None:
-                        response_failure_source <- candidate_path
-                        return sources
-                    if source_operand_checked and not source_operand_matches:
-                        source_operand_mismatch <- true
-                        mismatched_source <- candidate_path
-                        return sources
-                owned_candidate_path: sview = cli_owned_compile_view(candidate_path) can Memory.Allocate, Abort.Panic
-                owned_canonical_path: sview = cli_owned_compile_view(canonical_path) can Memory.Allocate, Abort.Panic
-                owned_directory: sview = cli_owned_compile_view(directory) can Memory.Allocate, Abort.Panic
-                owned_argv_signature: sview = cli_owned_compile_view(argv_signature) can Memory.Allocate, Abort.Panic
-                candidate: CliSource = CliSource{path: owned_candidate_path, canonical_path: owned_canonical_path, directory: owned_directory, command: owned_command, argv_signature: owned_argv_signature, arguments: arguments, has_arguments: has_arguments, command_valid: command_valid, short_enums: short_enums}
-                duplicate_found: mutable bool = false
-                conflict_found: mutable bool = false
-                source_index: mutable i64 = 0
-                while source_index < sources.count.i64() |sources, candidate, duplicate_found, conflict_found, source_index|:
-                    existing: CliSource = sources[source_index.usize()]
-                    if cli_same_compile_source(existing, candidate):
-                        if cli_same_compile_settings(existing, candidate):
-                            duplicate_found <- true
-                        else:
-                            conflict_found <- true
-                        break
-                    source_index <- source_index + 1
-                if conflict_found:
-                    duplicate_conflict <- true
-                    conflicting_source <- candidate.path
-                    return sources
-                sources.push(candidate) if not duplicate_found
-            entry_index <- entry_index + 1
-        return sources
 
     def cli_write_bytes(path: sview, bytes: darray[u8]) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         path_cstr: cstr = ctx_string_from_view(path) can Memory.Allocate, Abort.Panic
@@ -226,40 +118,10 @@ extend CTranslator:
         cli_append_initializer_stem(out, source.path)
         cli_module_disambiguator(out, sources, source_index)
 
-    def cli_emit_project_initializer(manifest: mutable darray[u8]&, sources: darray[CliSource]) -> void:
-        append_view(manifest, sview("\ndef elisa_init_project() -> void can[Abort.Panic, Global, Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef]:\n", 0, -1))
-        append_view(manifest, sview("    can Abort.Panic, Global, Unsafe.PointerCast, Unsafe.BufferReinterpret, Unsafe.StaleRef:\n", 0, -1))
-        if sources.count == 0.usize():
-            append_view(manifest, sview("        pass\n", 0, -1))
-            return
-        for index in 0..<sources.count |manifest, sources|:
-            append_view(manifest, sview("        ", 0, -1))
-            cli_append_initializer_name_for_sources(manifest, sources, index)
-            append_view(manifest, sview("()\n", 0, -1))
-
-    def cli_emit_project_manifest(directory: sview, sources: darray[CliSource], needs_cpp_unordered_map: bool, needs_runtime_nonnull: bool, needs_runtime_readonly_nonnull: bool, needs_runtime_varargs: bool, transaction_id: i64) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        manifest: mutable darray[u8] = []
-        append_view(&manifest, sview("# Generated by the Elisa C translator.\n", 0, -1))
-        # The manifest is shared by all generated modules, so retain both
-        # optional runtime fragments even when an individual module does not
-        # use them.
-        typed_emit_runtime_prelude(&manifest, needs_runtime_nonnull, needs_runtime_readonly_nonnull, needs_runtime_varargs)
-        typed_emit_cpp_compatibility(&manifest, needs_cpp_unordered_map)
-        for index in 0..<sources.count |manifest, sources|:
-            module: mutable darray[u8] = []
-            cli_module_name_for_sources(&module, sources, index)
-            append_view(&manifest, sview("include \"", 0, -1))
-            append_view(&manifest, bytes_view(module))
-            append_view(&manifest, sview("\"\n", 0, -1))
-        cli_emit_project_initializer(&manifest, sources)
-        manifest_path: mutable darray[u8] = []
-        cli_staged_manifest_path(&manifest_path, directory, transaction_id)
-        return cli_write_bytes(bytes_view(manifest_path), manifest)
-
     def run(argc: i64, argv: mutable void&) -> i64 can[Abort.Panic, Memory.Allocate, Memory.Release, Unsafe.PointerCast, Console]:
         region translation:
             if argc < 2:
-                emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--frontend-stats] [--explain-rewrites] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...".cast[cstr])
+                emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--frontend-stats] [--explain-rewrites] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--max-input-sources N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...".cast[cstr])
                 emit_cstr("\n".cast[cstr])
                 return 2
 
@@ -308,7 +170,7 @@ extend CTranslator:
                 return 1 if not target_abi.valid
                 region source_translation:
                     translation: mutable TypedTranslation[source_translation] = TypedTranslation[source_translation]{output: [], source_map: [], typed_ir_dump: [], diagnostics: [], ast_json_values: -1, ast_arena_used_bytes: 0.usize(), needs_cpp_unordered_map: false, needs_runtime_nonnull: false, needs_runtime_readonly_nonnull: false, needs_runtime_varargs: false, failed: false, frontend_json_value_limit_exceeded: false}
-                    translate_ast_mode_with_options(&translation, ast_bytes, record_layout_dump, input, true, TypedTranslationMode.Idiomatic, false, cli_default_frontend_json_value_limit(), false, false, false, sview("", 0, 0), sview("", 0, 0), target_abi, clang_target_language_is_cxx(target_macros, target_macros_succeeded)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
+                    translate_ast_mode_with_options(&translation, ast_bytes, record_layout_dump, input, true, TypedTranslationMode.Idiomatic, clang_fp_options_default(), false, cli_default_frontend_json_value_limit(), false, false, false, sview("", 0, 0), sview("", 0, 0), target_abi, clang_target_language_is_cxx(target_macros, target_macros_succeeded)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
                     if translation.frontend_json_value_limit_exceeded:
                         cli_emit_json_value_limit_error(sview(input, 0, -1), cli_default_frontend_json_value_limit()) can Console, Unsafe.PointerCast
                         return 1
@@ -324,6 +186,7 @@ extend CTranslator:
             source_map_project_state: mutable CliSourceMapProjectState = CliSourceMapProjectState{output: [], source_bytes_hashed: 0.usize(), json_bytes: 0.usize(), units: []}
             max_frontend_output_bytes: mutable usize = cli_default_frontend_output_limit()
             max_frontend_json_values: mutable usize = cli_default_frontend_json_value_limit()
+            max_input_sources: mutable usize = cli_default_input_source_limit()
             max_frontend_timeout_seconds: mutable usize = cli_default_frontend_timeout_seconds()
             mode: mutable TypedTranslationMode = TypedTranslationMode.Idiomatic
             frontend_stats: mutable bool = false
@@ -333,7 +196,7 @@ extend CTranslator:
             cpp_compatibility_library_directory <- ""
             cpp_compatibility_std_directory <- ""
             index: mutable i64 = 1
-            while index < argc |argv_slots, sources, output_directory, compile_commands, source_map_path, max_frontend_output_bytes, max_frontend_json_values, max_frontend_timeout_seconds, mode, frontend_stats, dump_typed_ir, diagnostics_json, index|:
+            while index < argc |argv_slots, sources, output_directory, compile_commands, source_map_path, max_frontend_output_bytes, max_frontend_json_values, max_input_sources, max_frontend_timeout_seconds, mode, frontend_stats, dump_typed_ir, diagnostics_json, index|:
                 argument: sview = sview(argv_slots[index.usize()].cast[cstr], 0, -1)
                 if cli_is_option(argument, sview("--output-dir", 0, -1)) and index + 1 < argc:
                     output_directory <- sview(argv_slots[(index + 1).usize()].cast[cstr], 0, -1)
@@ -371,6 +234,16 @@ extend CTranslator:
                         return 2
                     max_frontend_json_values <- requested_limit
                     index <- index + 2
+                elif cli_is_option(argument, sview("--max-input-sources", 0, -1)) and index + 1 < argc:
+                    requested_limit: mutable usize = 0.usize()
+                    if not cli_parse_input_source_limit(sview(argv_slots[(index + 1).usize()].cast[cstr], 0, -1), &requested_limit):
+                        emit_view_fd(sview("elisa-c-transpiler: --max-input-sources requires a positive decimal integer no greater than 4096\n", 0, -1), 2)
+                        return 2
+                    max_input_sources <- requested_limit
+                    index <- index + 2
+                elif cli_is_option(argument, sview("--max-input-sources", 0, -1)):
+                    emit_view_fd(sview("elisa-c-transpiler: --max-input-sources requires a value\n", 0, -1), 2)
+                    return 2
                 elif cli_is_option(argument, sview("--frontend-stats", 0, -1)):
                     frontend_stats <- true
                     index <- index + 1
@@ -396,7 +269,7 @@ extend CTranslator:
                     mode <- TypedTranslationMode.Idiomatic
                     index <- index + 1
                 elif cli_is_option(argument, sview("--help", 0, -1)):
-                    emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--frontend-stats] [--explain-rewrites] [--dump-typed-ir] [--diagnostics-json] [--source-map-json PATH] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...\n".cast[cstr])
+                    emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--frontend-stats] [--explain-rewrites] [--dump-typed-ir] [--diagnostics-json] [--source-map-json PATH] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--max-input-sources N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...\n".cast[cstr])
                     return 0
                 elif argument.len > 0 and string_view_index(argument, 0) == 45:
                     emit_cstr("elisa-c-transpiler: unknown option\n".cast[cstr])
@@ -405,8 +278,11 @@ extend CTranslator:
                     canonical_path_bytes: mutable darray[u8] = []
                     canonical_path_valid: bool = ast_json_resolve_path(argument, sview("", 0, 0), &canonical_path_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
                     canonical_path: sview = sview(ctx_string_from_view(bytes_view(canonical_path_bytes)), 0, -1) if canonical_path_valid else sview("", 0, 0)
-                    sources.push(CliSource{path: argument, canonical_path: canonical_path, directory: sview("", 0, 0), command: sview("", 0, 0), argv_signature: sview("", 0, 0), arguments: [], has_arguments: false, command_valid: true, short_enums: false})
+                    sources.push(CliSource{path: argument, canonical_path: canonical_path, directory: sview("", 0, 0), command: sview("", 0, 0), argv_signature: sview("", 0, 0), arguments: [], has_arguments: false, command_valid: true, short_enums: false, floating_point_options: clang_fp_options_default()})
                     index <- index + 1
+            if sources.count > max_input_sources:
+                cli_emit_input_source_limit_error(sview("command line", 0, -1), max_input_sources) can Console, Unsafe.PointerCast
+                return 2
             if (sview(cpp_compatibility_library_directory, 0, -1).len > 0) != (sview(cpp_compatibility_std_directory, 0, -1).len > 0):
                 emit_view_fd(sview("elisa-c-transpiler: --cpp-lib-dir and --elisa-std-dir must be provided together\n", 0, -1), 2)
                 return 2
@@ -424,14 +300,33 @@ extend CTranslator:
                     return 1
                 duplicate_conflict: mutable bool = false
                 conflicting_source: mutable sview = sview("", 0, 0)
+                commands_json_value_limit_exceeded: mutable bool = false
+                source_entry_limit_exceeded: mutable bool = false
+                invalid_database: mutable bool = false
+                invalid_compile_command: mutable bool = false
+                invalid_compile_command_is_text: mutable bool = false
+                invalid_compile_command_source: mutable sview = sview("", 0, 0)
                 source_operand_mismatch: mutable bool = false
                 mismatched_source: mutable sview = sview("", 0, 0)
                 response_failure: mutable ClangResponseFailure = ClangResponseFailure.None
                 response_failure_source: mutable sview = sview("", 0, 0)
                 response_failure_path: mutable darray[u8] = []
-                compile_sources: darray[CliSource] = cli_compile_command_sources(commands_bytes, max_frontend_output_bytes, &duplicate_conflict, &conflicting_source, &source_operand_mismatch, &mismatched_source, &response_failure, &response_failure_source, &response_failure_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                remaining_input_sources: usize = (max_input_sources.i64() - sources.count.i64()).usize()
+                compile_sources: darray[CliSource] = cli_compile_command_sources(commands_bytes, max_frontend_output_bytes, max_frontend_json_values, remaining_input_sources, &commands_json_value_limit_exceeded, &source_entry_limit_exceeded, &invalid_database, &invalid_compile_command, &invalid_compile_command_is_text, &invalid_compile_command_source, &duplicate_conflict, &conflicting_source, &source_operand_mismatch, &mismatched_source, &response_failure, &response_failure_source, &response_failure_path) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if commands_json_value_limit_exceeded:
+                    cli_emit_compile_database_json_value_limit_error(compile_commands, max_frontend_json_values) can Console, Unsafe.PointerCast
+                    return 1
+                if source_entry_limit_exceeded:
+                    cli_emit_input_source_limit_error(compile_commands, max_input_sources) can Console, Unsafe.PointerCast
+                    return 1
+                if invalid_database:
+                    cli_emit_invalid_compilation_database(compile_commands) can Console, Unsafe.PointerCast
+                    return 1
                 if response_failure != ClangResponseFailure.None:
                     cli_emit_response_file_failure(response_failure_source, response_failure_path, response_failure) can Console, Unsafe.PointerCast
+                    return 1
+                if invalid_compile_command:
+                    cli_emit_invalid_compile_command(invalid_compile_command_source, invalid_compile_command_is_text) can Console, Unsafe.PointerCast
                     return 1
                 if source_operand_mismatch:
                     emit_view_fd(sview("elisa-c-transpiler: compilation database file is not an input operand in its compile command: ", 0, -1), 2)
@@ -470,7 +365,7 @@ extend CTranslator:
             # region. Per-unit AST/lowering regions may then append without
             # reallocating a buffer that outlives those regions.
             manifest_sources.reserve(sources.count) if project_mode
-            manifest_source_for_append: mutable CliSource = CliSource{path: sview("", 0, 0), canonical_path: sview("", 0, 0), directory: sview("", 0, 0), command: sview("", 0, 0), argv_signature: sview("", 0, 0), arguments: [], has_arguments: false, command_valid: false, short_enums: false}
+            manifest_source_for_append: mutable CliSource = CliSource{path: sview("", 0, 0), canonical_path: sview("", 0, 0), directory: sview("", 0, 0), command: sview("", 0, 0), argv_signature: sview("", 0, 0), arguments: [], has_arguments: false, command_valid: false, short_enums: false, floating_point_options: clang_fp_options_default()}
             project_needs_cpp_unordered_map: mutable bool = false
             project_needs_runtime_nonnull: mutable bool = false
             project_needs_runtime_readonly_nonnull: mutable bool = false
@@ -560,7 +455,7 @@ extend CTranslator:
                     requested_initializer_name: sview = bytes_view(requested_initializer_bytes)
                     typed_reset_rewrite_stats(explain_rewrites)
                     translation: mutable TypedTranslation[source_translation] = TypedTranslation[source_translation]{output: [], source_map: [], typed_ir_dump: [], diagnostics: [], ast_json_values: -1, ast_arena_used_bytes: 0.usize(), needs_cpp_unordered_map: false, needs_runtime_nonnull: false, needs_runtime_readonly_nonnull: false, needs_runtime_varargs: false, failed: false, frontend_json_value_limit_exceeded: false}
-                    translate_ast_mode_with_options(&translation, ast_bytes, record_layout_dump, input, output_directory.len == 0, mode, project_mode, max_frontend_json_values, frontend_stats, dump_typed_ir, source_map_path.len > 0 or explain_rewrites, source_entry.directory, requested_initializer_name, target_abi, clang_target_language_is_cxx(target_macros, target_macros_succeeded)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
+                    translate_ast_mode_with_options(&translation, ast_bytes, record_layout_dump, input, output_directory.len == 0, mode, source_entry.floating_point_options, project_mode, max_frontend_json_values, frontend_stats, dump_typed_ir, source_map_path.len > 0 or explain_rewrites, source_entry.directory, requested_initializer_name, target_abi, clang_target_language_is_cxx(target_macros, target_macros_succeeded)) can Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console
                     cli_emit_frontend_stats(source, raw_output_bytes, ast_bytes.count, translation.ast_arena_used_bytes, translation.ast_json_values) can Console, Unsafe.PointerCast if frontend_stats
                     if translation.frontend_json_value_limit_exceeded:
                         cli_emit_json_value_limit_error(source, max_frontend_json_values) can Console, Unsafe.PointerCast

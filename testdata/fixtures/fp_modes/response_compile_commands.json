@@ -1,0 +1,10 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/simple.c",
+    "arguments": [
+      "clang",
+      "@testdata/fixtures/fp_modes/outer.rsp"
+    ]
+  }
+]

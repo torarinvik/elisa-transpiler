@@ -1,4 +1,7 @@
 extend CTranslator:
+    def typed_field_is_bitfield_node[@r](field: JsonValueHandle[r]) -> bool:
+        return ast_bool(ast_field(field, sview("isBitfield", 0, -1)))
+
     def typed_record_layout_is_unsupported_node[@r](node: JsonValueHandle[r]) -> bool:
         return true if ast_has_child_kind(node, sview("PackedAttr", 0, -1)) or ast_has_child_kind(node, sview("MaxFieldAlignmentAttr", 0, -1)) or ast_has_child_kind(node, sview("AlignedAttr", 0, -1)) or ast_has_child_kind(node, sview("MSStructAttr", 0, -1)) or ast_has_child_kind(node, sview("RandomizeLayoutAttr", 0, -1)) or ast_has_child_kind(node, sview("CXXBaseSpecifier", 0, -1))
         if sview_eq(ast_kind(node), sview("CXXRecordDecl", 0, -1)):
@@ -14,7 +17,7 @@ extend CTranslator:
             for index in 0..<count |node|:
                 field: JsonValueHandle[r] = ast_child(node, index)
                 if sview_eq(ast_kind(field), sview("FieldDecl", 0, -1)):
-                    return true if ast_bool(ast_field(field, sview("isBitfield", 0, -1))) or ast_has_child_kind(field, sview("PackedAttr", 0, -1)) or ast_has_child_kind(field, sview("AlignedAttr", 0, -1)) or ast_has_child_kind(field, sview("NoUniqueAddressAttr", 0, -1))
+                    return true if typed_field_is_bitfield_node(field) or ast_has_child_kind(field, sview("PackedAttr", 0, -1)) or ast_has_child_kind(field, sview("AlignedAttr", 0, -1)) or ast_has_child_kind(field, sview("NoUniqueAddressAttr", 0, -1))
         return false
 
     def typed_mark_record_layout_unsupported[@r](ctx: mutable TypedContext[r]&, record_name: sview) -> void can[Memory.Allocate]:

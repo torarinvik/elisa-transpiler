@@ -1,12 +1,12 @@
 {
   "schema": "elisa-transpiler-compiler-compatibility-v1",
-  "recorded_at": "2026-10-05",
+  "recorded_at": "2026-10-06",
   "target": "arm64-apple-darwin27.0.0",
   "compiler_pair": {
     "stage0": {
       "repository": "Elisa-core",
       "worktree": "../elisa-transpiler-worktrees/stage0-latest",
-      "source_revision": "11858f2e6347b63cb4e9bf674f299471d2f3404f",
+      "source_revision": "f84b9c1034f708f69d048bd6cafb813e88c8210f",
       "source_worktree_clean": true,
       "source_freshness_verified": false,
       "executable": {
@@ -18,7 +18,7 @@
     "stage1": {
       "repository": "Elisa-compiler",
       "worktree": "../elisa-transpiler-worktrees/transpiler",
-      "source_revision": "2691a64c7522c94eee0d5b0b930d1995c7376a3c",
+      "source_revision": "6b475d894331f0a81c3112167ef7fcf5c642a424",
       "source_worktree_clean": false,
       "source_freshness_verified": false,
       "artifact_build_recipe_sha256": "e0967a96814e4810869032da1a65cc190868ea4c9e65ca5cf52da989cdd04a16",
@@ -40,8 +40,8 @@
     "status": "pending",
     "current_translator_sources_verified": false,
     "compiler_products_current": false,
-    "compiler_product_state": "Stage0 source is at 11858f2e while its executable is from 6a0628cc; Stage1 source is at 2691a64c while its executable and runtime are from 8e08cd33.",
-    "reason": "The current translator worktree contains uncommitted changes, including the signed-64-bit integer formatter fix. It has not yet been rebuilt and its fixture behavior has not been rerun against this compiler pair.",
+    "compiler_product_state": "Stage0 source is at f84b9c10 while its executable is from 6a0628cc; Stage1 source is at 6b475d89 while its executable and runtime are from 8e08cd33. Both compiler products remain stale.",
+    "reason": "The isolated Stage0 source is synchronized to the clean Stage0 main-worktree revision f84b9c10. The isolated Stage1 source is at 6b475d89 and now also contains the uncommitted initializer-shadowing semantic fix and regression-fixture comment from the Stage1 main worktree; the source and fixture files match byte-for-byte. The current translator worktree also contains uncommitted changes, including the signed-64-bit integer formatter fix. Neither compiler pair nor translator has been rebuilt from current sources, and fixture behavior has not been rerun against a fresh pair.",
     "required_checks": [
       "Rebuild Stage0 and Stage1 from the current isolated source revisions and update artifact provenance only after successful bounded builds.",
       "Build the translator from the current source with the pinned local compiler and matching runtime.",

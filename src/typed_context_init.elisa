@@ -1,17 +1,18 @@
 extend CTranslator:
-    def typed_new_context[@r](root: JsonValueHandle[r], project_mode: bool, initializer_name: sview, mode: TypedTranslationMode, target_abi: ClangTargetABI, source_language_is_cxx: bool, capture_source_map: bool, source: cstr, source_working_directory: sview, canonical_source: sview) -> TypedContext[r]:
+    def typed_new_context[@r](root: JsonValueHandle[r], project_mode: bool, initializer_name: sview, mode: TypedTranslationMode, floating_point_options: ClangFPOptionVector, target_abi: ClangTargetABI, source_language_is_cxx: bool, capture_source_map: bool, source: cstr, source_working_directory: sview, canonical_source: sview) -> TypedContext[r]:
         return TypedContext[r]{
             exprs: [], expr_source_origins: [], expr_children: [], effect_expr_seen: [], effect_expr_pending: [], effect_expr_generation: 0,
             stmts: [], stmt_source_origins: [], generated_source_spans: [], stmt_children: [], params: [],
             current_name_aliases: [], type_aliases: [], current_declared_names: [], current_declared_scope_starts: [], current_nonnull_names: [], current_nonnull_exprs: [],
             extern_params: [], globals: [], functions: [], user_function_names: [], user_function_signatures: [], externs: [], extern_globals: [],
             fields: [], records: [], record_layouts: [], record_layout_field_offsets: [], specialized_types: [], packed_record_names: [], layout_unsupported_record_names: [],
-            enums: [], enum_consts: [], labels: [], switch_cases: [], decl_infos: [], declaration_index: [], declaration_index_count: 0,
-            break_scopes: [], switch_depth: 0, current_for_increment: -1, current_return_type: sview("", 0, 0), current_function_name: sview("", 0, 0),
+            enums: [], enum_consts: [], labels: [], switch_cases: [], decl_infos: [], declaration_index: [], declaration_index_count: 0, source_hashes: [],
+            break_scopes: [], switch_depth: 0, current_for_increment: -1, current_return_type: sview("", 0, 0), current_function_name: sview("", 0, 0), current_function_source: sview("", 0, 0),
             current_has_goto: false, current_emit_has_goto: false, current_structured_break_label: -1, current_emit_goto_name: sview("", 0, 0),
             current_switch_done_name: sview("", 0, 0), current_switch_done_index: -1, current_function_body: -1, current_trusted_depth: 0,
-            needs_cpp_unordered_map: false, source_mapping_enabled: capture_source_map, project_mode: project_mode, initializer_name: initializer_name,
-            mode: mode, target_abi: target_abi, source_language_is_cxx: source_language_is_cxx, source: source,
+            needs_cpp_unordered_map: false, compound_literals: [], unsupported_target_float_seen: false, source_mapping_enabled: capture_source_map, project_mode: project_mode, initializer_name: initializer_name,
+            current_function_id: sview("", 0, 0),
+            mode: mode, floating_point_options: floating_point_options, target_abi: target_abi, source_language_is_cxx: source_language_is_cxx, source: source,
             source_working_directory: source_working_directory, canonical_source: canonical_source,
             diagnostic_line_scan_path: sview("", 0, 0), diagnostic_line_scan_offset: -1, diagnostic_line_scan_number: 1, diagnostic_line_scan_previous_cr: false,
             root: root, diagnostics: []

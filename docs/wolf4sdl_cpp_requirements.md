@@ -6,10 +6,12 @@ complete Clang AST or runtime inventory. The upstream checkout is
 `a51c229ed89cab1904d68abb8938def3cf456725` from
 `https://github.com/fabiangreffrath/wolf4sdl`. Its top level contains 27
 `.cpp` files and one `.c` file, and 41,236 lines across C/C++ source and
-headers. The default Makefile selects 25 `.cpp` files plus `opl3.c`; it does
-not list `wl_dir3dspr.cpp` or `wl_shade.cpp`, whose build roles still need
-investigation. The checkout is pinned locally, but its source tree is
-gitignored and must not be edited as part of translator implementation.
+headers. The default Makefile selects 25 `.cpp` files plus `opl3.c` (26 units);
+it does not list `wl_dir3dspr.cpp` or `wl_shade.cpp`, whose build roles still
+need investigation. A compiler-independent provenance test now verifies the
+Makefile's `SRCS` entries against all 28 tracked translation units and the two
+default-build exclusions. The checkout is pinned as a Git submodule and must
+not be edited as part of translator implementation.
 
 ## Build context
 
@@ -42,13 +44,25 @@ select any adapter from Clang's resolved canonical template identity and emit
 the generic `cpp` adapter; it must not special-case these Wolf4SDL names,
 files, or call sites.
 
+A source-level include/token scan of the pinned checkout found no other active
+C++ standard-library header or `std::` API beyond these map uses, and no
+source-level class, template definition, namespace declaration, virtual
+member, exception, or explicit `new`/`delete` construct in the default build
+units. The sources do include C/POSIX headers and SDL headers, with some
+platform-conditional headers (`io.h`, `direct.h`, `unistd.h`). This narrows the
+initial Wolf adapter target, but it is only a lexical scan: it does not account
+for macro-expanded constructs, every inactive configuration, compiler-inserted
+AST nodes, or ABI behavior, and is not a complete C++ support claim.
+
 Existing generic regressions already cover integer and enum keys, scalar and
 nullable `const char *` mapped values, bracket insertion, map growth, clear,
-and `find`/`end`/iterator access in separate focused fixtures. They do not yet
-combine Wolf's exact `int`/`int8_t` typedef specialization with the
-cross-translation-unit global plus macro access pattern, nor do they exercise
-`find`/iterator reads on the pointer-valued specialization. Those are the
-smallest useful adapter-level additions before attempting the full project.
+and `find`/`end`/iterator access in separate focused fixtures. A new generic
+two-unit regression now combines the `int`/`int8_t` specialization with an
+external map global and macro-expanded bracket reads/writes, and reverses
+compile-database order. A separate generic pointer-valued `find`/`end`/iterator
+fixture now covers a missing key, a hit, key projection and nullable mapped
+value reads. Both fixtures are wired to native/generated parity checks, but
+their current-tree execution remains pending a safe compiler window.
 
 ## C++-looking but C-style scope
 
@@ -69,11 +83,10 @@ and uncommon functions still need a compilation-database-backed Clang audit.
    node kinds, canonical type families, declaration/linkage families, macro
    origins, calls/operators and global initialization. Retain per-unit counts
    and identify rare constructs as well as aggregate totals.
-3. Extend the existing isolated generic C++ fixtures to cover both exact Wolf
-   map specializations, including `Keyboard`-like signed 8-bit mapped values
-   across translation units and macro-expanded reads/writes, plus pointer-map
-   `find`/`end`/iterator reads. Compile, link and execute native and translated
-   fixtures for parity before claiming this adapter surface complete.
+3. Run the new cross-unit signed-8-bit/macro regression through native and
+   translated compile/link/execution with both database orders; run the
+   pointer-map `find`/`end`/iterator-read fixture with native/generated parity;
+   then attempt full Wolf units incrementally.
 4. Translate and compile the real units incrementally, using the exact Clang
    commands and reporting translator, Elisa compiler, SDL ABI/link and runtime
    failures separately. The interactive gameplay/data-file path is a later

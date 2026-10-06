@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Compute per-function structural metrics from the typed-IR v13 dump."""
+"""Compute per-function structural metrics from the typed-IR v16 dump."""
 
 import sys
+from collections import Counter
 from pathlib import Path
+import re
 
-
-def _integer(fields, name, default=None):
-    value = fields.get(name)
-    if value is None:
-        if default is not None:
-            return default
-        raise ValueError("missing %s field" % name)
-    try:
-        return int(value, 10)
-    except ValueError as error:
-        raise ValueError("invalid integer field %s=%r" % (name, value)) from error
+from quality_ir_graph import (
+    _decode_hex,
+    _expression_edges,
+    _field_range,
+    _integer,
+    expression_fingerprints as _expression_fingerprints,
+    statement_fingerprints as _statement_fingerprints,
+    unreferenced_local_declarations as _unreferenced_local_declarations,
+)
 
 
 def _parse_record(line, prefix):
@@ -55,70 +55,13 @@ def _indexed_records(lines, prefix, expected):
     return records
 
 
-def _field_range(fields, start_name, count_name, upper_bound, label):
-    start = _integer(fields, start_name, -1)
-    count = _integer(fields, count_name, 0)
-    if start < -1 or count < 0 or start > upper_bound:
-        raise ValueError("%s range is outside its child table" % label)
-    if count and (start < 0 or start + count > upper_bound):
-        raise ValueError("%s range is outside its child table" % label)
-    return range(start, start + count) if count else range(0)
-
-
-def _decode_hex(value, label):
-    try:
-        return bytes.fromhex(value).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as error:
-        raise ValueError("invalid %s hex field" % label) from error
-
-
-def _expression_edges(index, expression, expression_count):
-    kind = expression["kind"]
-    edge_fields = {
-        "Binary": ("lhs", "rhs"),
-        "Sequence": ("lhs", "rhs"),
-        "Unary": ("lhs",),
-        "Cast": ("lhs",),
-        "ArrayIndex": ("lhs", "rhs"),
-        "Conditional": ("lhs", "rhs", "third"),
-        "Member": ("lhs",),
-        "Call": ("lhs",),
-        "Name": (),
-        "Integer": (),
-        "Floating": (),
-        "String": (),
-        "Character": (),
-        "Sizeof": (),
-        "ObjectSizeRemaining": (),
-        "Aggregate": (),
-        "Null": (),
-        "Zeroed": (),
-    }
-    if kind not in edge_fields:
-        raise ValueError("expression %d has unknown kind %r" % (index, kind))
-
-    edges = []
-    for field in edge_fields[kind]:
-        reference = _integer(expression, field, -1)
-        if reference == -1 and kind == "Call" and field == "lhs":
-            continue
-        if reference < 0 or reference >= expression_count:
-            raise ValueError("expression %d has an invalid %s edge" % (index, field))
-        edges.append(reference)
-
-    if kind == "ArrayIndex":
-        side_effect = _integer(expression, "value", -1)
-        if side_effect < -1 or side_effect >= expression_count:
-            raise ValueError("array-index expression %d has an invalid side-effect edge" % index)
-        if side_effect >= 0:
-            edges.append(side_effect)
-    return edges
-
-
 def _parse_dump(text):
     lines = text.splitlines()
-    if not lines or lines[0] != "typed-ir-v13":
-        raise ValueError("expected typed-ir-v13 dump")
+    headers = [index for index, line in enumerate(lines) if line.startswith("typed-ir-v")]
+    if len(headers) != 1:
+        raise ValueError("expected exactly one typed-IR version header")
+    if lines[headers[0]] != "typed-ir-v16":
+        raise ValueError("expected typed-ir-v16 dump")
     count_lines = [line for line in lines if line.startswith("counts ")]
     if len(count_lines) != 1:
         raise ValueError("expected exactly one counts record")
@@ -250,6 +193,108 @@ def _parse_dump(text):
     return exprs, stmts, functions, expr_children, stmt_children, switch_cases
 
 
+def _rewrite_events(lines):
+    event_pattern = re.compile(
+        r"^rewrite-event source=.* range-start=-?[0-9]+ range-end=-?[0-9]+ "
+        r"expression=-?[0-9]+ rule=([a-z][a-z0-9-]*) "
+        r"decision=(applied|declined)(?: proof=| reason=).*$"
+    )
+    events = Counter()
+    for line_number, line in enumerate(lines, 1):
+        if not line.startswith("rewrite-event "):
+            continue
+        match = event_pattern.fullmatch(line)
+        if not match:
+            raise ValueError("malformed rewrite-event record on line %d" % line_number)
+        events[(match.group(1), match.group(2))] += 1
+    return events
+
+
+def _statement_children(statement, stmt_children, switch_cases):
+    """Return structural statement edges, excluding jump-target guesses."""
+    kind = statement["kind"]
+    if kind == "Block":
+        start = _integer(statement, "children_start", -1)
+        count = _integer(statement, "children_count", 0)
+        return [
+            _integer(stmt_children[child_index], "value")
+            for child_index in range(start, start + count)
+        ]
+    if kind == "If":
+        return [
+            child for child in (_integer(statement, "aux", -1),
+                                _integer(statement, "aux2", -1))
+            if child >= 0
+        ]
+    if kind == "For":
+        return [
+            child for child in (_integer(statement, "children_start", -1),
+                                _integer(statement, "aux", -1),
+                                _integer(statement, "aux2", -1))
+            if child >= 0
+        ]
+    if kind in ("While", "DoWhile"):
+        return [
+            child for child in (_integer(statement, "aux", -1),
+                                _integer(statement, "aux2", -1))
+            if child >= 0
+        ]
+    if kind == "Continue":
+        child = _integer(statement, "aux", -1)
+        return [child] if child >= 0 else []
+    if kind == "Label":
+        child = _integer(statement, "expr", -1)
+        return [child] if child >= 0 else []
+    if kind == "Switch":
+        start = _integer(statement, "children_start", -1)
+        count = _integer(statement, "children_count", 0)
+        return [
+            body for case_index in range(start, start + count)
+            if (body := _integer(switch_cases[case_index], "body", -1)) >= 0
+        ]
+    return []
+
+
+def _switches_nested_in_loops(body, stmts, stmt_children, switch_cases):
+    """Find reachable switches under a loop in linear graph time."""
+    loop_kinds = {"For", "While", "DoWhile"}
+    visited = set()
+    switches = set()
+    stack = [(body, False)]
+    while stack:
+        index, inside_loop = stack.pop()
+        state = (index, inside_loop)
+        if state in visited:
+            continue
+        visited.add(state)
+        statement = stmts[index]
+        kind = statement["kind"]
+        nested = inside_loop or kind in loop_kinds
+        if kind == "Switch" and inside_loop:
+            switches.add(index)
+        stack.extend(
+            (child, nested)
+            for child in _statement_children(statement, stmt_children, switch_cases)
+        )
+    return switches
+
+
+def _case_body_goto_targets(body, stmts, stmt_children):
+    """Collect direct goto target IDs from a case or its immediate block."""
+    statement = stmts[body]
+    if statement["kind"] == "Goto":
+        return {_integer(statement, "aux", -1)}
+    if statement["kind"] != "Block":
+        return set()
+    start = _integer(statement, "children_start", -1)
+    count = _integer(statement, "children_count", 0)
+    return {
+        _integer(child, "aux", -1)
+        for child_index in range(start, start + count)
+        if (child := stmts[_integer(stmt_children[child_index], "value")])["kind"] == "Goto"
+    }
+
+
 def _function_metrics(exprs, stmts, functions, expr_children, stmt_children, switch_cases):
     rows = []
     for function_index, function in functions.items():
@@ -271,48 +316,16 @@ def _function_metrics(exprs, stmts, functions, expr_children, stmt_children, swi
             if expression >= 0 and kind != "Label":
                 expression_roots.add(expression)
 
-            if kind == "Block":
-                start = _integer(statement, "children_start", -1)
-                count = _integer(statement, "children_count", 0)
-                statement_stack.extend(
-                    _integer(stmt_children[child_index], "value")
-                    for child_index in range(start, start + count)
-                )
-            elif kind == "If":
-                statement_stack.extend(
-                    child for child in (_integer(statement, "aux", -1),
-                                        _integer(statement, "aux2", -1)) if child >= 0
-                )
-            elif kind == "For":
-                statement_stack.extend(
-                    child for child in (_integer(statement, "children_start", -1),
-                                        _integer(statement, "aux", -1),
-                                        _integer(statement, "aux2", -1)) if child >= 0
-                )
-            elif kind in ("While", "DoWhile"):
-                statement_stack.extend(
-                    child for child in (_integer(statement, "aux", -1),
-                                        _integer(statement, "aux2", -1)) if child >= 0
-                )
-            elif kind == "Continue":
-                child = _integer(statement, "aux", -1)
-                if child >= 0:
-                    statement_stack.append(child)
-            elif kind == "Label":
-                child = _integer(statement, "expr", -1)
-                if child >= 0:
-                    statement_stack.append(child)
-            elif kind == "Switch":
+            if kind == "Switch":
                 start = _integer(statement, "children_start", -1)
                 count = _integer(statement, "children_count", 0)
                 for case_index in range(start, start + count):
-                    case = switch_cases[case_index]
-                    case_value = _integer(case, "value", -1)
-                    case_body = _integer(case, "body", -1)
+                    case_value = _integer(switch_cases[case_index], "value", -1)
                     if case_value >= 0:
                         expression_roots.add(case_value)
-                    if case_body >= 0:
-                        statement_stack.append(case_body)
+            statement_stack.extend(
+                _statement_children(statement, stmt_children, switch_cases)
+            )
 
         expression_ids = set()
         expression_stack = list(expression_roots)
@@ -331,9 +344,12 @@ def _function_metrics(exprs, stmts, functions, expr_children, stmt_children, swi
             )
 
         decisions = 0
+        declarations = 0
         for index in statement_ids:
             statement = stmts[index]
             kind = statement["kind"]
+            if kind == "Declaration":
+                declarations += 1
             if kind in ("If", "For", "While", "DoWhile"):
                 decisions += 1
             elif kind == "Switch":
@@ -348,12 +364,103 @@ def _function_metrics(exprs, stmts, functions, expr_children, stmt_children, swi
                 if _decode_hex(opcode_hex, "expression operator") in ("and", "or"):
                     decisions += 1
 
+        unreferenced_declarations = _unreferenced_local_declarations(
+            exprs, stmts, expr_children, stmt_children, switch_cases, body
+        )
+        goto_nodes = sum(1 for index in statement_ids if stmts[index]["kind"] == "Goto")
+        label_nodes = sum(1 for index in statement_ids if stmts[index]["kind"] == "Label")
+        dispatch_switches = set()
+        dispatch_case_arms = 0
+        dispatch_nondefault_arms = 0
+        dispatch_state_label_targets = 0
+        dispatch_max_state_label_targets = 0
+        dispatch_switches_with_multiple_state_targets = 0
+        reachable_label_ids = {
+            _integer(stmts[index], "aux", -1)
+            for index in statement_ids
+            if stmts[index]["kind"] == "Label"
+        }
+        if goto_nodes and reachable_label_ids:
+            for switch_index in _switches_nested_in_loops(
+                body, stmts, stmt_children, switch_cases
+            ):
+                switch = stmts[switch_index]
+                start = _integer(switch, "children_start", -1)
+                count = _integer(switch, "children_count", 0)
+                goto_arms = 0
+                nondefault_goto_arms = 0
+                switch_state_label_targets = set()
+                for case_index in range(start, start + count):
+                    case = switch_cases[case_index]
+                    case_body = _integer(case, "body", -1)
+                    case_targets = (
+                        _case_body_goto_targets(case_body, stmts, stmt_children)
+                        if case_body >= 0 else set()
+                    )
+                    matched_targets = case_targets & reachable_label_ids
+                    if matched_targets:
+                        goto_arms += 1
+                        nondefault_goto_arms += _integer(case, "value", -1) >= 0
+                        switch_state_label_targets.update(matched_targets)
+                if goto_arms:
+                    dispatch_switches.add(switch_index)
+                    dispatch_case_arms += goto_arms
+                    dispatch_nondefault_arms += nondefault_goto_arms
+                    # Count distinct destination labels, not case arms. This is
+                    # still only a structural state-label proxy: equal labels
+                    # may merge source states, and not every label is a state.
+                    target_count = len(switch_state_label_targets)
+                    dispatch_state_label_targets += target_count
+                    dispatch_max_state_label_targets = max(
+                        dispatch_max_state_label_targets, target_count
+                    )
+                    dispatch_switches_with_multiple_state_targets += target_count > 1
+
         rows.append({
             "function": function_index,
             "expressions": len(expression_ids),
             "statements": len(statement_ids),
             "decisions": decisions,
+            "declarations": declarations,
+            "unreferenced_declarations": unreferenced_declarations,
+            "goto_nodes": goto_nodes,
+            "label_nodes": label_nodes,
+            "dispatch_switches": len(dispatch_switches),
+            "dispatch_case_arms": dispatch_case_arms,
+            "dispatch_nondefault_arms": dispatch_nondefault_arms,
+            "dispatch_state_label_targets": dispatch_state_label_targets,
+            "dispatch_max_state_label_targets": dispatch_max_state_label_targets,
+            "dispatch_switches_with_multiple_state_targets": dispatch_switches_with_multiple_state_targets,
+            "statement_ids": statement_ids,
+            "expression_ids": expression_ids,
         })
+
+    reachable_statements = set().union(*(row["statement_ids"] for row in rows)) if rows else set()
+    reachable_expressions = set().union(*(row["expression_ids"] for row in rows)) if rows else set()
+    expression_fingerprints = _expression_fingerprints(
+        exprs, expr_children, reachable_expressions
+    )
+    statement_fingerprints = _statement_fingerprints(
+        stmts, expression_fingerprints, stmt_children, switch_cases, reachable_statements
+    )
+    for row in rows:
+        statement_shape_counts = Counter(
+            statement_fingerprints[index]
+            for index in row["statement_ids"]
+            if stmts[index]["kind"] not in ("Break", "Continue", "SwitchBreak", "Null")
+        )
+        row["duplicate_statement_shapes"] = sum(
+            count > 1 for count in statement_shape_counts.values()
+        )
+        row["duplicate_statement_excess"] = sum(
+            count - 1 for count in statement_shape_counts.values()
+        )
+        row.pop("statement_ids")
+        row.pop("expression_ids")
+    expression_fingerprints.clear()
+    statement_fingerprints.clear()
+    reachable_statements.clear()
+    reachable_expressions.clear()
     return rows
 
 
@@ -370,14 +477,71 @@ def _p90(values):
 
 def summarize(text):
     parsed = _parse_dump(text)
+    rewrite_events = _rewrite_events(text.splitlines())
     rows = _function_metrics(*parsed)
     expressions = [row["expressions"] for row in rows]
     statements = [row["statements"] for row in rows]
     decisions = [row["decisions"] for row in rows]
+    declarations = [row["declarations"] for row in rows]
+    unreferenced_declarations = [row["unreferenced_declarations"] for row in rows]
     normalized_expressions = [
         row["expressions"] / (1 + row["decisions"]) for row in rows
     ]
+    normalized_declarations = [
+        row["declarations"] / (1 + row["decisions"]) for row in rows
+    ]
+    normalized_unreferenced_declarations = [
+        row["unreferenced_declarations"] / (1 + row["decisions"]) for row in rows
+    ]
+    duplicate_shapes = [row["duplicate_statement_shapes"] for row in rows]
+    duplicate_excess = [row["duplicate_statement_excess"] for row in rows]
+    goto_nodes = [row["goto_nodes"] for row in rows]
+    label_nodes = [row["label_nodes"] for row in rows]
+    goto_label_nodes = [row["goto_nodes"] + row["label_nodes"] for row in rows]
+    dispatch_switches = [row["dispatch_switches"] for row in rows]
+    dispatch_case_arms = [row["dispatch_case_arms"] for row in rows]
+    dispatch_nondefault_arms = [row["dispatch_nondefault_arms"] for row in rows]
+    dispatch_state_label_targets = [row["dispatch_state_label_targets"] for row in rows]
+    dispatch_max_state_label_targets = [row["dispatch_max_state_label_targets"] for row in rows]
+    dispatch_switches_with_multiple_state_targets = [
+        row["dispatch_switches_with_multiple_state_targets"] for row in rows
+    ]
+    normalized_dispatch_state_label_targets = [
+        row["dispatch_state_label_targets"] / (1 + row["decisions"])
+        for row in rows
+    ]
+    dispatch_switch_count = sum(dispatch_switches)
+    dispatch_functions = sum(value > 0 for value in dispatch_switches)
+    normalized_dispatch_nondefault_arms = [
+        row["dispatch_nondefault_arms"] / (1 + row["decisions"])
+        for row in rows
+    ]
+    normalized_goto_label_nodes = [
+        (row["goto_nodes"] + row["label_nodes"]) / (1 + row["decisions"])
+        for row in rows
+    ]
+    functions_with_jumps = sum(nodes > 0 for nodes in goto_label_nodes)
+    normalized_duplicate_excess = [
+        row["duplicate_statement_excess"] / (1 + row["decisions"]) for row in rows
+    ]
+    total_statements = sum(statements)
     result = [
+        ("ir_rewrite_events_total", str(sum(rewrite_events.values()))),
+        (
+            "ir_rewrite_events_applied",
+            str(sum(count for (rule, decision), count in rewrite_events.items()
+                    if decision == "applied")),
+        ),
+        (
+            "ir_rewrite_events_declined",
+            str(sum(count for (rule, decision), count in rewrite_events.items()
+                    if decision == "declined")),
+        ),
+        (
+            "ir_rewrite_events_per_1000_ir_exprs",
+            "%.3f" % (1000 * sum(rewrite_events.values()) / len(parsed[0]))
+            if parsed[0] else "n/a",
+        ),
         ("ir_functions_with_bodies", str(len(rows))),
         ("ir_expr_nodes_per_function_mean", _mean(expressions)),
         ("ir_expr_nodes_per_function_p90", _p90(expressions)),
@@ -388,8 +552,88 @@ def summarize(text):
         ("ir_decision_nodes_per_function_mean", _mean(decisions)),
         ("ir_decision_nodes_per_function_p90", _p90(decisions)),
         ("ir_decision_nodes_per_function_max", str(max(decisions)) if decisions else "n/a"),
+        ("ir_declaration_nodes_per_function_mean", _mean(declarations)),
+        ("ir_declaration_nodes_per_function_p90", _p90(declarations)),
+        ("ir_declaration_nodes_per_function_max", str(max(declarations)) if declarations else "n/a"),
+        ("ir_reachable_goto_nodes_per_function_mean", _mean(goto_nodes)),
+        ("ir_reachable_goto_nodes_per_function_p90", _p90(goto_nodes)),
+        ("ir_reachable_goto_nodes_per_function_max", str(max(goto_nodes)) if goto_nodes else "n/a"),
+        ("ir_reachable_label_nodes_per_function_mean", _mean(label_nodes)),
+        ("ir_reachable_label_nodes_per_function_p90", _p90(label_nodes)),
+        ("ir_reachable_label_nodes_per_function_max", str(max(label_nodes)) if label_nodes else "n/a"),
+        ("ir_functions_with_reachable_goto_or_label", str(functions_with_jumps)),
+        (
+            "ir_functions_with_reachable_goto_or_label_fraction",
+            "%.4f" % (functions_with_jumps / len(rows)) if rows else "n/a",
+        ),
+        ("ir_goto_label_nodes_per_decision_unit_mean", _mean(normalized_goto_label_nodes)),
+        ("ir_loop_switch_goto_candidate_functions", str(sum(value > 0 for value in dispatch_switches))),
+        (
+            "ir_loop_switch_goto_candidate_function_fraction",
+            "%.4f" % (dispatch_functions / len(rows)) if rows else "n/a",
+        ),
+        ("ir_loop_switch_goto_candidate_switches", str(sum(dispatch_switches))),
+        ("ir_loop_switch_goto_candidate_switches_per_function_mean", _mean(dispatch_switches)),
+        ("ir_loop_switch_goto_candidate_case_arms", str(sum(dispatch_case_arms))),
+        ("ir_loop_switch_goto_candidate_nondefault_arms", str(sum(dispatch_nondefault_arms))),
+        (
+            "ir_loop_switch_goto_candidate_state_label_targets",
+            str(sum(dispatch_state_label_targets)),
+        ),
+        (
+            "ir_loop_switch_goto_candidate_state_label_targets_per_function_mean",
+            _mean(dispatch_state_label_targets),
+        ),
+        (
+            "ir_loop_switch_goto_candidate_state_label_targets_per_decision_unit_mean",
+            _mean(normalized_dispatch_state_label_targets),
+        ),
+        (
+            "ir_loop_switch_goto_candidate_state_label_targets_per_switch_mean",
+            "%.3f" % (sum(dispatch_state_label_targets) / dispatch_switch_count)
+            if dispatch_switch_count else "n/a",
+        ),
+        (
+            "ir_loop_switch_goto_candidate_max_state_label_targets_per_switch",
+            str(max(dispatch_max_state_label_targets)) if rows else "n/a",
+        ),
+        (
+            "ir_loop_switch_goto_candidate_switches_with_multiple_state_targets",
+            str(sum(dispatch_switches_with_multiple_state_targets)),
+        ),
+        (
+            "ir_loop_switch_goto_candidate_nondefault_arms_per_decision_unit_mean",
+            _mean(normalized_dispatch_nondefault_arms),
+        ),
         ("ir_expr_nodes_per_decision_unit_mean", _mean(normalized_expressions)),
+        ("ir_declaration_nodes_per_decision_unit_mean", _mean(normalized_declarations)),
+        (
+            "ir_unreferenced_local_declarations_per_function_mean",
+            _mean(unreferenced_declarations),
+        ),
+        (
+            "ir_unreferenced_local_declarations_per_decision_unit_mean",
+            _mean(normalized_unreferenced_declarations),
+        ),
+        (
+            "ir_unreferenced_local_declarations_per_1000_declarations",
+            "%.3f" % (1000 * sum(unreferenced_declarations) / sum(declarations))
+            if sum(declarations) else "n/a",
+        ),
+        ("ir_repeated_statement_shapes_per_function_mean", _mean(duplicate_shapes)),
+        ("ir_duplicate_statement_shape_excess", str(sum(duplicate_excess))),
+        (
+            "ir_duplicate_statement_excess_per_decision_unit_mean",
+            _mean(normalized_duplicate_excess),
+        ),
+        (
+            "ir_duplicate_statement_excess_per_1000_statements",
+            "%.3f" % (1000 * sum(duplicate_excess) / total_statements)
+            if total_statements else "n/a",
+        ),
     ]
+    for (rule, decision), count in sorted(rewrite_events.items()):
+        result.append(("ir_rewrite_rule_%s_%s" % (rule, decision), str(count)))
     return "".join("%s: %s\n" % row for row in result)
 
 

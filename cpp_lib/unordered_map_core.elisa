@@ -5,18 +5,38 @@
 # directories are selected.
 
 module cpp:
-    struct unordered_map_entry[V]:
+    struct unordered_map_value_slot[V]:
         value: mutable V
+        next: mutable heap unordered_map_value_slot[V]&?
+
+    struct unordered_map_entry[V]:
+        # Dictionary buckets move when the table grows. Keep mapped objects in
+        # arena-owned storage so operator[] references survive rehashing, as
+        # required by std::unordered_map.
+        slot: mutable heap unordered_map_value_slot[V]&
 
     struct unordered_map[K, V]:
         storage: mutable dict[K, unordered_map_entry[V]]
+        value_arena: mutable Arena
+        free_values: mutable heap unordered_map_value_slot[V]&?
 
     struct unordered_map_iterator[K, V]:
         owner: mutable unordered_map[K, V]&
         key_value: K?
         is_end: bool
 
+    struct unordered_map_const_iterator[K, V]:
+        owner: unordered_map[K, V]&
+        key_value: K?
+        is_end: bool
+
     def nonnull[T](value: mutable T&?) -> mutable T&:
+        if value == null:
+            can Abort.Panic:
+                panic("unordered_map: expected an existing entry")
+        return value
+
+    def nonnull_readonly[T](value: T&?) -> T&:
         if value == null:
             can Abort.Panic:
                 panic("unordered_map: expected an existing entry")
@@ -34,19 +54,25 @@ module cpp:
             existing: mutable unordered_map_entry[V]&? = arena_dict_get_mut(self.storage, key)
             return nonnull(existing) if existing != null
             can Memory.Allocate, Abort.Panic:
-                # The C++ frontend only instantiates operator[] for mapped types
-                # whose value-initialized representation is all-zero. Read the
-                # value from the zeroed heap slot: arena_box_zeroed[V] returns a
-                # reference to storage, not a zero-valued V. Keeping the index
-                # operation explicit also prevents a niche optional V from being
-                # mistaken for that storage pointer by reference-return lowering.
-                initial_value: V = arena_box_zeroed[V](&perm_arena)[0]
-                initial_entry: unordered_map_entry[V] = unordered_map_entry[V]{value: initial_value}
+                # `operator[]` returns V&, and that address must remain stable
+                # when dictionary buckets rehash. Reuse erased slots before
+                # growing this map's arena.
+                initial_value: mutable heap unordered_map_value_slot[V]&
+                if self.free_values != null:
+                    initial_value <- self.free_values
+                    self.free_values <- initial_value.next
+                    initial_value.next <- null
+                    initial_value.value <- zeroed
+                else:
+                    initial_value <- arena_box_zeroed[unordered_map_value_slot[V]](&self.value_arena)
+                initial_entry: unordered_map_entry[V] = unordered_map_entry[V]{slot: initial_value}
                 entry: mutable unordered_map_entry[V]&? = arena_dict_put_or_panic(&perm_arena, self.storage, key, initial_entry)
                 return nonnull(entry)
 
     def clear[K, V](self: mutable unordered_map[K, V]&):
         self.storage.clear()
+        self.free_values <- null
+        arena_reset(&self.value_arena)
 
     def size[K, V](self: unordered_map[K, V]&) -> usize:
         return self.storage.count
@@ -61,7 +87,14 @@ module cpp:
         return 1.usize() if contains(self, key) else 0.usize()
 
     def erase[K, V](self: mutable unordered_map[K, V]&, key: K) -> usize:
-        return 1.usize() if arena_dict_remove(self.storage, key) else 0.usize()
+        entry: mutable unordered_map_entry[V]&? = arena_dict_get_mut(self.storage, key)
+        return 0.usize() if entry == null
+        slot: mutable heap unordered_map_value_slot[V]& = nonnull(entry).slot
+        slot.value <- zeroed
+        slot.next <- self.free_values
+        self.free_values <- slot
+        arena_dict_remove(self.storage, key)
+        return 1.usize()
 
     # The adapter keeps the map and key, rather than an address into the
     # dictionary's open-addressed storage. A dictionary growth can therefore
@@ -73,6 +106,15 @@ module cpp:
 
     def end[K, V](self: mutable unordered_map[K, V]&) -> unordered_map_iterator[K, V]:
         return unordered_map_iterator[K, V]{owner: self, key_value: null, is_end: true}
+
+    # Read-only overloads preserve std::unordered_map's const_iterator result
+    # instead of weakening a const receiver into the mutable iterator above.
+    def find[K, V](self: unordered_map[K, V]&, key: K) -> unordered_map_const_iterator[K, V]:
+        found: bool = contains(self, key)
+        return unordered_map_const_iterator[K, V]{owner: self, key_value: key, is_end: not found}
+
+    def end[K, V](self: unordered_map[K, V]&) -> unordered_map_const_iterator[K, V]:
+        return unordered_map_const_iterator[K, V]{owner: self, key_value: null, is_end: true}
 
     def first[K, V](self: unordered_map_iterator[K, V]&) -> K:
         match self.key_value:
@@ -89,16 +131,54 @@ module cpp:
     def second[K, V](self: unordered_map_iterator[K, V]&) -> V:
         key: K = first(self)
         entry: unordered_map_entry[V]&? = arena_dict_get(self.owner.storage, key)
-        return nonnull(entry).value
+        return nonnull(entry).slot.value
+
+    def first[K, V](self: unordered_map_const_iterator[K, V]&) -> K:
+        match self.key_value:
+            null:
+                can Abort.Panic:
+                    panic("unordered_map: dereferenced end iterator")
+            key:
+                return key
+
+    def second[K, V](self: unordered_map_const_iterator[K, V]&) -> V:
+        key: K = first(self)
+        entry: unordered_map_entry[V]&? = arena_dict_get(self.owner.storage, key)
+        return nonnull_readonly(entry).slot.value
 
     def set_second[K, V](self: mutable unordered_map_iterator[K, V]&, value: V) -> V:
         key: K = first(self)
         entry: mutable unordered_map_entry[V]& = nonnull(arena_dict_get_mut(self.owner.storage, key))
-        entry.value <- value
+        entry.slot.value <- value
         return value
 
     impl[K, V] Eq for unordered_map_iterator[K, V]:
         def __eq__(self: unordered_map_iterator[K, V], other: unordered_map_iterator[K, V]) -> bool:
+            if self.is_end or other.is_end:
+                return self.is_end and other.is_end
+            self_key: K = first(self)
+            other_key: K = first(other)
+            return self_key == other_key
+
+        # C++ permits comparing iterator and const_iterator values from the
+        # same container. Keep both operand orders explicit because Elisa
+        # overload resolution does not synthesize a converting constructor.
+        def __eq__(self: unordered_map_iterator[K, V], other: unordered_map_const_iterator[K, V]) -> bool:
+            if self.is_end or other.is_end:
+                return self.is_end and other.is_end
+            self_key: K = first(self)
+            other_key: K = first(other)
+            return self_key == other_key
+
+    impl[K, V] Eq for unordered_map_const_iterator[K, V]:
+        def __eq__(self: unordered_map_const_iterator[K, V], other: unordered_map_const_iterator[K, V]) -> bool:
+            if self.is_end or other.is_end:
+                return self.is_end and other.is_end
+            self_key: K = first(self)
+            other_key: K = first(other)
+            return self_key == other_key
+
+        def __eq__(self: unordered_map_const_iterator[K, V], other: unordered_map_iterator[K, V]) -> bool:
             if self.is_end or other.is_end:
                 return self.is_end and other.is_end
             self_key: K = first(self)

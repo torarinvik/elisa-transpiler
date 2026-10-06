@@ -1,0 +1,61 @@
+extend CTranslator:
+    def clang_argv_option_word_equals(text: darray[u8], offset: usize, spelling: sview) -> bool:
+        cursor: mutable usize = offset
+        for index in 0..<spelling.len |text, cursor, spelling|:
+            return false if cursor >= text.count or text[cursor] != string_view_index(spelling, index).u8()
+            cursor <- cursor + 1.usize()
+        return cursor < text.count and text[cursor] == 0
+
+    def clang_argv_option_word_starts_with(text: darray[u8], offset: usize, prefix: sview) -> bool:
+        cursor: mutable usize = offset
+        for index in 0..<prefix.len |text, cursor, prefix|:
+            return false if cursor >= text.count or text[cursor] != string_view_index(prefix, index).u8()
+            cursor <- cursor + 1.usize()
+        return cursor < text.count and text[cursor] != 0
+
+    # These Clang driver options consume the next argv word as data rather
+    # than interpreting it as another option. Keep this shared by semantic
+    # argv readers so filenames, macro values, and include paths cannot be
+    # mistaken for compiler switches.
+    def clang_argv_option_takes_value(text: darray[u8], offset: usize) -> bool:
+        return clang_argv_option_word_equals(text, offset, sview("-I", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-isystem", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-iquote", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-idirafter", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-iframework", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-iframeworkwithsysroot", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-include", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-include-pch", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-include-pth", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-imacros", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-iprefix", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-iwithprefix", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-iwithprefixbefore", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-isysroot", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("--sysroot", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-target", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("--target", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-arch", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-x", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-std", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-D", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-U", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-Xclang", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-Xlinker", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-Xpreprocessor", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-Xassembler", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-mllvm", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-fplugin", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-load", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-plugin", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-fmodule-map-file", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-fmodule-file", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-fmodule-output", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-fmodule-name", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-fmodules-cache-path", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-fmodule-user-build-path", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-resource-dir", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-working-directory", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-ivfsoverlay", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-B", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-F", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-L", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-l", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-o", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-MF", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-MT", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-MQ", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-MJ", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-dependency-file", 0, -1))
+        return true if clang_argv_option_word_equals(text, offset, sview("-serialize-diagnostics", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("--serialize-diagnostics", 0, -1))
+        return false
+
+    # Detect actions that never invoke a linker. Do not inspect forwarded
+    # values, option payloads, or positional operands as top-level actions.
+    def clang_argv_has_no_link_action(text: darray[u8], offsets: darray[usize]) -> bool:
+        index: mutable usize = 1.usize()
+        while index < offsets.count |text, offsets, index|:
+            offset: usize = offsets[index]
+            if clang_argv_option_word_equals(text, offset, sview("--", 0, -1)):
+                break
+            elif clang_argv_option_word_equals(text, offset, sview("-Xclang", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-Xlinker", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-Xpreprocessor", 0, -1)):
+                index <- index + 2.usize() if index + 1.usize() < offsets.count else offsets.count
+            elif clang_argv_option_takes_value(text, offset):
+                index <- index + 2.usize() if index + 1.usize() < offsets.count else offsets.count
+            elif clang_argv_option_word_equals(text, offset, sview("-c", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-S", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-E", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-M", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-MM", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-fsyntax-only", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-analyze", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("--analyze", 0, -1)) or clang_argv_option_word_equals(text, offset, sview("-emit-ast", 0, -1)):
+                return true
+            else:
+                index <- index + 1.usize()
+        return false
+
+    # Joined driver forms such as -DNAME=value and -I/path are single argv
+    # words, but their payloads still are not compiler switches. Exclude these
+    # before the conservative FP-name heuristic inspects unknown -f/-m flags.
+    def clang_argv_option_has_attached_value(text: darray[u8], offset: usize) -> bool:
+        return clang_argv_option_word_starts_with(text, offset, sview("-D", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-U", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-I", 0, -1))
+        return true if clang_argv_option_word_starts_with(text, offset, sview("-isystem", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-iquote", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-idirafter", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-iframework", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-iframeworkwithsysroot", 0, -1))
+        return true if clang_argv_option_word_starts_with(text, offset, sview("-iprefix", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-iwithprefix", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-iwithprefixbefore", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-isysroot", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("--sysroot=", 0, -1))
+        return true if clang_argv_option_word_starts_with(text, offset, sview("-target=", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("--target=", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-arch=", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-x", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-std=", 0, -1))
+        return true if clang_argv_option_word_starts_with(text, offset, sview("-F", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-L", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-l", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("-B", 0, -1))
+        return true if clang_argv_option_word_starts_with(text, offset, sview("/D", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("/I", 0, -1)) or clang_argv_option_word_starts_with(text, offset, sview("/FI", 0, -1))
+        return false

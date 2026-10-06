@@ -1,9 +1,937 @@
 # Translator implementation evidence
 
+## Scoped floating-point fact collector bounded prototype — compiler verification pending — 2026-10-06
+
+The optional Clang AST plugin prototype now caps retained facts at 250,000
+records and 32 MiB of compact serialized record payload. It reports a Clang
+error and writes no complete facts file if either ceiling is exceeded; successful
+output records the schema, Clang version, translation-unit defaults and active
+limits. The generic source/header fixture covers nested reassociation controls
+and restoration, file-scope `float_control` push/pop, macro
+spelling/expansion, an included header, an integer-result floating comparison,
+and an inactive preprocessor branch. The visitor considers floating-point
+result types as well as binary/unary/cast/call nodes with direct floating
+operands, so a comparison is not lost merely because C gives it `int` type.
+Clang 23.1 documentation confirms that `#pragma clang fp` applies at file
+scope or compound-statement scope, while the `float_control` stack forms are
+file-scope controls; the fixture tests the documented stack syntax rather than
+assuming `clang fp` itself accepts push/pop tokens.
+An opt-in driver builds the plugin against the `llvm-config`-matched Clang,
+uses the translator's JSON AST action, and bounds compiler RSS, wall time and
+host memory (initial free memory must exceed 80%, live free memory must remain
+above 60%). Once permitted to run, it compares baseline/plugin process-group
+RSS on the generic fixture or a caller-selected `--profile-source` (with
+repeatable `--clang-arg` values), and probes both fail-closed budgets with
+deliberately tiny limits.
+
+The driver was run only through its resource preflight: it safely skipped at
+44% and most recently 43% host free memory while unrelated Elisa/Stage0/Stage1
+builds were active.
+No plugin compilation or Clang integration run occurred. The C++ source has
+only been checked against locally installed Clang/LLVM 23.1.1 headers; record
+matching, output caps, Clang plugin compatibility and incremental RSS remain
+unverified, and no Elisa integration has been added.
+
+## Translator C++ tool genericity guard — compiler-independent verification — 2026-10-06
+
+Extended `scripts/test_translator_genericity.py` to scan translator-owned C++
+tools as well as Elisa production modules. Its small lexical filter now ignores
+Elisa `#` comments and C++ line/block comments, while still detecting
+corpus-specific identifiers and ordinary/raw string/character literals in
+maintained tool sources. Focused regressions prove C++ comments are ignored but
+a corpus mapping in code or a literal is found, including raw strings containing
+embedded quotes and comment markers. All twelve genericity tests pass, as do the
+600-line Elisa source gate and `git diff --check`. This is a name-based source
+guard, not evidence of semantic genericity; no compiler or Clang plugin build
+was started.
+
+## Stage1 initializer-shadowing fix synchronized — compiler verification pending — 2026-10-06
+
+The Stage1 main checkout at `6b475d89` contained an uncommitted semantic fix
+not present in the isolated Stage1 source tree: validate a local declaration's
+initializer against the enclosing scope, then install the new lexical and
+structural type bindings. This preserves outer-name resolution in shadowing
+initializers such as `value: i64& = &value`. The corresponding branch-shadow
+diagnostic fixture was synchronized too. Both isolated files now compare
+byte-for-byte equal to the main-worktree versions; only those source/test files
+were copied, not the main checkout's environment-specific `.gitignore` change.
+`git diff --check` passes. The isolated Stage1 executable/runtime and Stage0
+executable remain stale, so this semantic fix is not verified; no compiler was
+started while host free memory was 48% and an unrelated test process used over
+3 GiB RSS.
+
+## Integer identity rewrite ABI-type guard — source-level verification only — 2026-10-06
+
+The idiomatic integer identity pass previously required pure operands and an
+integer result, then emitted the retained operand without checking that its
+target ABI representation matched the expression result. It now compares both
+through Clang's target-aware integer representation helper (preserving width
+and signedness), with a narrow exception for direct `sizeof` nodes whose IR
+type stores the measured object type while emission returns `size_t`. Mismatches
+are declined and reported as `operand-result-abi-type-mismatch`. A
+compiler-independent structural regression covers this gate. Behavior and the
+`sizeof` exception have not been revalidated through a fresh translator because
+the host is under the memory floor with unrelated Elisa compiler jobs active.
+The same audit also found that deleting signed `<< 0` can erase possible
+undefined behavior for a negative operand. Such rewrites are now declined
+unless the result type is unsigned; the acceptance fixture requires signed
+shift syntax to remain and unsigned shift-by-zero to simplify. These generated
+shape and native/generated checks remain pending a fresh local compiler pair.
+The same proof audit now covers signed `>> 0`: C leaves a negative signed
+right shift implementation-defined, so the identity rewrite declines signed
+right-shift-by-zero and records `signed-right-shift-is-implementation-defined`.
+The generic fixture includes signed and unsigned right-shift cases, including a
+negative signed runtime operand; manifest shape assertions and execution remain
+pending a fresh translator/compiler pair.
+
+The adjacent cast-elision audit confirms that the readability pass only drops
+exactly typed casts or scalar casts whose spellings differ solely by leading
+qualifiers; it refuses pointer-shaped conversions and differently spelled
+numeric types. Added `cast_representation.c` to require explicit i32→i64
+sign-extension and u64→u32 truncation in emitted Elisa and verify runtime
+parity. The compiler-independent structural test passes, but generated-shape,
+compile, and runtime gates await a fresh translator/compiler pair.
+
+Extended `rewrite_explanation.c` with `next_value() * 0` and
+`next_value() ? 6 : 6`. Generated-shape assertions require both calls to
+remain, while the native/generated runtime oracle checks their values and the
+incremented call count. This covers effect erasure under a constant-looking
+product and equal-arm conditional in I06; the manifest self-test validates its
+schema/regex, but translation and execution await the refreshed toolchain.
+
+## Forwarded linker-option effect classification — staged, compiler verification pending — 2026-10-06
+
+Fixed the `-Xlinker` scan order: the shared argv helper treats it as an
+option-with-value, so checking for it afterward had skipped the forwarded
+linker argument without marking link context uncertain. The floating-point
+scanner now records opaque linker context before generic value consumption and
+does not reinterpret the forwarded value as a compiler FP option. A follow-up
+also ensures that this uncertainty overrides a tentative `-shared`
+suppression regardless of option order, while preserving `TargetDefault` when
+no FTZ/DAZ runtime effect was requested and `NotLinked` for compile-only
+actions. To keep the production module below its 600-line budget, the FP enums
+and effective-option record now live in `clang_fp_option_types.elisa`, included
+before the scanner; the include/extend split is not yet compiler-verified.
+
+Added verifier regressions for a forwarded `-ffast-math` payload, for `-shared`
+combined with `-Wl,-r` in both orders, for no-link precedence over forwarded
+linker flags, and for link-context uncertainty without a requested FP runtime
+effect. The structural source-order check and nine translator-genericity tests,
+including a permanent FP type-owner/include-order regression, pass, as do the
+source line limit, whitespace, and `git diff --check`. The Elisa verifier has
+not been compiled or run: a separate Stage1 seed (PID 81212) was live and
+system-wide free memory was 46%, below the configured 60% floor. These changes
+remain compiler-unverified.
+
+The FP-option audit also covered target reciprocal instructions and backend
+forwarding. Clang documents `-mrecip` as controlling approximate reciprocal
+and reciprocal-square-root instructions; such a target option now invalidates
+the mode/vector instead of looking strict. Arbitrary `-mllvm` payloads are
+likewise marked unknown because they can set LLVM FP assumptions that the
+driver-level parser cannot see. The unknown-vector path previously overwrote
+the separately detected no-link effect; it now reapplies `NotLinked` last, so
+`-c` remains authoritative even alongside an unknown FP or backend option.
+Verifier cases cover `-mrecip=none`, separate and joined `-mllvm` forms,
+unknown FP options combined with `-c`, and `-mllvm` payloads that resemble
+actions. These are source-level assertions only; the Elisa verifier remains
+unrun. See Clang's [command-line reference](https://clang.llvm.org/docs/ClangCommandLineReference.html)
+for reciprocal controls and [floating-point manual](https://clang.llvm.org/docs/UsersManual.html#controlling-floating-point-behavior)
+for unsafe-math runtime-link effects. A compiler-free parser-order check now
+also verifies that opaque `-mllvm` payloads are skipped in both argv scanners
+and that `NotLinked` is restored after unknown-vector invalidation.
+
+After the FP backend-option guard and no-link precedence regressions, the
+compiler-independent suite again passed 114 tests across AST minimization, the
+property corpus, quality metrics/provenance, bounded execution, translator
+genericity, fixture-manifest validation, metamorphic normalization, and Wolf
+compile-command handling. The focused source-order check passed; the AST
+mutation self-test also passed its malformed JSON, root-schema,
+projection-preserving, and UTF-8 seeds. The 600-line source gate and diff
+checks pass. These results do not execute the Elisa verifier.
+During this test run, system memory was 55% free with unrelated Stage0/Stage1
+compiler builds active. At the later resource recheck, system memory was 64%
+free, but unrelated Stage0 compiles remained active (PIDs 67077 and 68658); no
+fresh Stage1 seed or translator build has been started.
+The subsequent poll was still busy: system memory was 59% free, with unrelated
+Stage0 and Stage1 compiles active (PIDs 69961, 75485, 68997, and 70273).
+The latest poll shows 52% free with another unrelated Stage0/Stage1 pair
+active (PIDs 2414 and 98193); compiler work remains deferred.
+At the most recent check, memory was 53% free with Stage0/Stage1 compiles still
+active (PIDs 2414, 6861, and 9715); no translator build was launched.
+
+## Property corpus artifact integrity — 2026-10-06
+
+The deterministic property runner now publishes each content-addressed C
+source snapshot through a fully written temporary file in the destination
+directory followed by an atomic no-replace hard link. A racing invocation can
+only observe the complete file; a conflicting existing snapshot fails closed
+without overwriting it, and temporary files are removed after either outcome.
+Run output directories are also keyed by resolved paths and SHA-256 hashes for
+Clang, the translator, the Elisa compiler, and the optional runtime. Re-running
+the same seed after a toolchain change therefore preserves the earlier outputs
+instead of overwriting them. The compiler-free tests exercise 32 concurrent
+same-content publishers, collision preservation, same-tool identity stability,
+binary/path identity changes, and distinct run directories across different
+Elisa compiler binaries. All ten `scripts/test_property_corpus.py` tests pass.
+No Clang translation or Elisa compilation was started; native/generated
+property execution remains open pending a fresh compiler window.
+
+## Pointer-index safe-renaming check staged — 2026-10-06
+
+Removed an expression-emitter branch that emitted extra parentheses only when
+the pointer variable's source spelling was `argv`. Added a metamorphic C pair
+that indexes through `int *argv` and the equivalent renamed `int *cursor`,
+then compares generated Elisa after normalizing that one identifier. A
+compiler-independent genericity regression also forbids reintroducing the
+literal-name branch. The normalizer now replaces whole identifiers in code
+while preserving quoted strings, character literals, comments and adjacent
+Unicode identifier characters; four compiler-free normalization regressions
+cover those boundaries and are wired into the standard test preflight. The
+translator-backed metamorphic test remains unrun:
+the latest host sample showed 46% free system memory, below the repository's
+60% build floor, with an unrelated Stage0 Elisa-LSP build active. This is
+staged source and test coverage, not yet compiler-verified behavior.
+
+## Expanded raw AST root-schema mutation seeds — 2026-10-06
+
+Expanded the deterministic AST robustness corpus from one schema-invalid JSON
+root to seven valid-JSON root failures: non-object root, missing/wrong/duplicate
+`kind`, and missing/wrong/duplicate `inner`. The existing
+nine malformed-JSON cases remain, each with a stable case name and expected
+diagnostic. Conflicting duplicate top-level keys now produce explicit
+`duplicate-field` issues rather than silently accepting the first occurrence.
+The compiler-free self-test verifies all seven schema seeds parse as JSON and
+is wired into the canonical test preflight; it passes along with the test-driver
+support checks. The bounded translator probe checks every failure for empty
+generated stdout and its specific expected diagnostic.
+That translator-backed probe remains unrun until a fresh translator is
+available under the memory safety gate.
+
+## Valid AST projection mutation cases staged — 2026-10-06
+
+Added three syntax-valid `TranslationUnitDecl` variants that should produce the
+same Elisa as an empty translation unit: recursive projection of nested JSON
+scalars/arrays/objects and escaped strings; removal of `definitionData` and
+non-semantic location fields; and preservation of a macro-origin location on
+an otherwise unknown declaration-like object. The compiler-free self-test
+checks their JSON/root-envelope validity. The bounded integration probe
+compares each output byte-for-byte against a plain empty translation unit.
+The self-test passes, but those translator-backed equivalence assertions are
+not yet run: system free memory was 54%, below the 60% compiler launch floor.
+
 This ledger records fresh results for work in `IMPLEMENTATION_PLAN.md`. A
 feature is not complete merely because a handler exists or translation exits
 successfully; generated Elisa must also be compiled, linked, and exercised
 where applicable.
+
+## Read-only C++ unordered_map iterators — implementation staged, compiler verification pending — 2026-10-06
+
+Added `cpp::unordered_map_const_iterator[K, V]` and immutable `find`/`end`
+overloads so a C++ const-map receiver does not get lowered to the adapter's
+mutable iterator. The emitted iterator type is selected from the receiver's
+preserved const qualification; key/value projections remain read-only. Added a
+generic C++11 acceptance case that compares a const-reference lookup against
+native behavior and checks the generated type/read projections. The manifest's
+feature taxonomy now includes container, iterator and const-correctness tags.
+
+The compiler-free checks passed: all 20 fixture-manifest unit tests, all six
+translator-genericity tests, JSON parsing, shell syntax, source line limits and
+`git diff --check`. No Clang translation or Elisa compilation was run: at the
+resource snapshot, a Stage0 compiler was active and system memory free was
+43%, below the configured 60% build floor. The emitted code and native/generated
+parity remain unverified until a fresh compiler pair is available.
+
+## Emitted-use-driven C++ adapter dependency — implementation staged, translator verification pending — 2026-10-06
+
+Changed the C++ `unordered_map` adapter requirement from an AST-discovery flag
+to an emission fact: the map and iterator type renderers record a dependency
+only when they actually write those adapter types into generated Elisa. The
+program emitter derives the include requirement after producing the body, and
+successful optional typed-IR dumps now happen afterward so their dependency
+metadata agrees with emitted output. Added a generic C++ fixture containing an
+unused `std::unordered_map` function prototype; the core fixture suite requires
+that it emit neither the adapter include nor an adapter type, while the
+existing live-map fixture continues to require the include. That live-map
+fixture now also declares its global through a source `using` alias while
+keeping direct map spellings in local declarations. These source and test
+changes have not yet been compiler-verified or run. The same unsupported-policy
+fixture now calls `reserve()` on a supported map so the new fail-closed member
+operation diagnostic is exercised alongside custom-policy diagnostics. At the
+latest check, compiler activity and host pressure were below the configured
+test gate; compiler-backed work remains deferred.
+`git diff --check` and shell syntax validation pass.
+
+## Project source-count budget — implementation staged, translator verification pending — 2026-10-06
+
+Added `--max-input-sources N` with a default of 256 and an upper bound of
+4096. Direct paths and raw compilation-database rows consume one shared source
+budget. The strict JSON preflight now counts top-level array entries and can
+reject an over-limit database before DOM allocation; parsed row count is checked
+again before path normalization, response-file expansion, or the duplicate-
+conflict scan. This caps source table growth and the quadratic duplicate
+check, while separate byte and JSON-value limits bound the database text and
+DOM. Project regressions cover direct paths, compilation-database rows, a
+combined direct/database budget, invalid zero, empty stdout, and no output-
+directory creation. `cli.elisa`, the preflight extension, and the regressions
+are not yet compiler-verified. The separate Stage1 seed (PIDs 80638/80729) was
+live during the initial check and absent at the final process check, but its
+exit result is unavailable. Host memory then showed 65% free, below the
+configured >80% initial headroom threshold for a fresh Stage1 seed. No compiler
+build was started; only source-level checks were run.
+
+The same project parser now fails closed on strict-preflight/JSON parse errors,
+non-array roots, non-object rows, rows without a string `directory`, and entries
+without a nonempty string `file`.
+This prevents malformed database content from being ignored when direct source
+paths were also supplied. Regressions combine a valid direct C input with a
+non-array document and with rows missing `file` or `directory`; each expects a
+database-path diagnostic with no stdout or output directory. This addition is
+also awaiting a fresh translator build and project-suite run.
+
+Compilation-database path and selected command strings now reject embedded NUL
+bytes before path resolution or argv normalization. Such JSON values cannot be
+represented by the NUL-terminated filesystem and process APIs used downstream;
+accepting them could silently target a truncated path or compiler argument.
+Three project-generation cases exercise NUL-bearing `file`, `directory`, and
+`command` fields alongside a valid direct input and require a preflight failure
+with no stdout or output directory. The JSON fixtures parse and the shell suite
+passes syntax validation. Source-line limits and `git diff --check` pass;
+translator-genericity (6 tests), compiler-manifest (3 tests), and fixture-runner
+(20 tests) Python checks pass. These are harness/static checks and do not compile
+the changed Elisa parser. The changed parser has not yet been compiled;
+an earlier resource sample showed a Stage1 seed and an unrelated Stage0 compile
+active at 51% free memory. At the subsequent process check both compiler
+children had exited, but the seed result was unavailable and free memory was
+52%, below both the 60% live build floor and the >80% initial Stage1-seed
+headroom requirement. Compiler-backed verification remains deferred.
+
+Compilation-command tokenization/normalization failures are now surfaced during
+database preflight instead of waiting for that unit's position in the project
+translation loop. This preserves the established source diagnostic while
+preventing unrelated earlier units from launching Clang first. The regression
+places a malformed command beside a direct source known to fail Clang; it must
+report the malformed database command, not the direct source failure. Elisa
+compiler and integration verification are pending.
+
+## Strict UTF-8 validation for raw frontend JSON — implementation staged, translator verification pending — 2026-10-06
+
+Extended the shared allocation-free JSON string preflight for Clang ASTs and
+compilation databases to validate raw UTF-8 scalar sequences before
+parsing/projection. It rejects isolated continuation bytes,
+overlong encodings, UTF-8 encodings of surrogate code points, values above
+U+10FFFF and truncated sequences, while leaving valid two-, three-, and
+four-byte Unicode text accepted.
+The fake-Clang integration suite now injects each malformed class in a field
+that projection would discard, and a valid UTF-8 schema fixture requires the
+normal schema diagnostic instead of the malformed-JSON diagnostic. Project
+generation also supplies malformed UTF-8 to a discarded compilation-database
+field alongside a valid direct input and requires rejection before output. The
+latest source change has not been compiled. Shell syntax checks for both
+affected suites, fixture JSON parsing, the source-length gate and `git diff
+--check` pass; the five malformed byte vectors were confirmed invalid with a
+strict reference UTF-8 decoder. `python3 scripts/test_ast_depth.py --self-test`
+also passes its nine malformed-JSON seeds and schema seed. These checks do not
+exercise the Elisa code or run its bounded fake-Clang mutation corpus.
+During implementation, Stage1 seed and Stage0 probe processes were active at
+40% free memory; at the later audit the Stage1 seed was still active and free
+memory was 48%, below the configured build floor.
+
+## Bounded-process deadline under a long polling interval — verified 2026-10-06
+
+The process runner previously slept for the full configured polling interval,
+even when that interval exceeded the command's remaining monotonic deadline;
+process-list sampling could also block without a timeout, and macOS resource
+samplers used fixed timeouts. It now caps each process-list, footprint and
+host-memory sample to the remaining command time, rechecks expiry after
+sampling, and sleeps for no longer than the remaining time. Regressions run a
+30-second child with a 0.25-second deadline and (a) a 10-second poll interval
+or (b) a fake `ps` that sleeps for five seconds. Both require deadline exit
+status 124 and bounded return. `python3 scripts/test_run_bounded_process.py`
+passes all 17 tests. Sampling cannot intentionally extend the execution
+deadline; owned-group termination/reaping happens afterward and can add cleanup
+time beyond it. No Elisa compiler or translator build was involved.
+
+## Isolated compiler source refresh — source-only, 2026-10-06
+
+The dedicated Stage0 worktree was clean and directly behind its `main` head;
+after confirming no live process used that checkout, it was fast-forwarded from
+`11858f2e` to `370110bc` (three region-provenance fixes). The isolated Stage1
+worktree is at `6b475d89`, with its existing `.DS_Store` modification
+preserved. `docs/compiler_compatibility.json` now records these source
+revisions, while retaining the old Stage0 executable (`6a0628cc`) and Stage1
+executable/runtime (`8e08cd33`) provenance and marking both products stale.
+No compiler build was started: active compiler jobs were present and the last
+host-memory sample was below the configured 60% free-memory floor. Fresh seed,
+translator build, and compiler-backed fixture evidence remain pending.
+
+## Compilation-database JSON value budget — implementation staged, translator verification pending — 2026-10-06
+
+The CLI already capped compilation-database bytes, but then parsed the entire
+document into the persistent JSON arena before applying any value-count bound.
+`cli_compile_command_sources` now invokes the existing strict JSON value
+preflight first, using the configured `--max-frontend-json-values` limit. If a
+valid document exceeds the cap, parsing stops before DOM allocation and the
+CLI reports a compilation-database-specific diagnostic; malformed JSON still
+falls through to the normal parser diagnostic path. The project-generation
+suite now checks a deliberately low value limit, empty stdout, and absence of
+the requested output directory. README and F02 describe the expanded limit.
+The Elisa change and integration regression have not yet been compiled or run:
+the host remains at 33% free memory and a separate Stage1 seed is actively
+using the shared compiler resources. Compiler-backed verification is pending.
+
+## Per-translation-unit floating-point option plumbing — source changes pending compiler verification — 2026-10-06
+
+Added a conservative `Strict` / `Relaxed` / `Unknown` classifier over
+normalized Clang argv after nested response-file expansion. Whole-profile
+options (`-Ofast`, `-ffast-math`, `-fno-fast-math`, recognized `-ffp-model`
+profiles and MSVC `/fp:` profiles) honor command-line order. Independent or
+not-yet-modeled FP switches become `Unknown` rather than being assumed strict;
+that uncertainty stays sticky because settings such as denormal handling are
+orthogonal. A later optimization-level switch after `-Ofast` is also treated
+as unknown. This matches Clang's documented distinction between FP models and
+denormal mode, and the fact that a later `-O*` can make `-Ofast` ineffective
+([Clang User's Manual](https://clang.llvm.org/docs/UsersManual.html#controlling-floating-point-behavior),
+[Clang command guide](https://clang.llvm.org/docs/CommandGuide/clang.html)). The resulting per-source mode is
+stored on `CliSource`, passed into `TypedContext`, and exposed as
+`floating_point_mode=` in typed-IR v14. A rewrite-policy predicate is available
+for future algebraic transformations that require relaxed IEEE semantics;
+current arithmetic identity rewrites remain restricted to integer results.
+
+Added Elisa verifier cases for strict defaults, relaxed profiles, ordered
+overrides, unknown partial options, and typed-IR reporting, plus project
+compile-database fixtures covering nested response-file argv and command-string
+override forms. These source changes and fixtures have not yet been compiled or
+run with Elisa: concurrent compiler workloads remain active and the latest
+system free-memory reading was 40%, below the configured 60% build floor. No
+compiler or translator build was started. Exact per-feature FP-option state,
+scoped source pragmas, Clang's `crtfastmath.o`/FTZ-DAZ link side effects, and
+native/generated behavior comparisons remain open. The compiler-backed gate
+was intentionally deferred rather than run alongside the active builds.
+
+## Floating-point link-action preservation through argv normalization — source changes pending compiler verification — 2026-10-06
+
+Found that `normalize_compile_argv` removes action switches before
+`clang_compile_argv_signature` classified FP settings. As a result, a
+compilation-database command such as `clang -ffast-math -c file.c` could lose
+the fact that it does not link, leaving the recorded driver FTZ/DAZ effect as
+`automatic-if-linked`. FP arithmetic options are still classified from the
+normalized command, while no-link action context is now separately overlaid
+from the response-file-expanded original argv. The action scanner skips
+`--`-terminated operands, forwarded `-Xclang`/`-Xlinker`/`-Xpreprocessor`
+values, and values consumed by driver options (including output-file flags).
+It distinguishes no-link actions (`-c`, `-S`, `-E`, `-M`, `-MM`,
+`-fsyntax-only`, analysis, and AST output) from dependency-generation modifiers
+such as `-MD`/`-MMD`, which do not themselves suppress linking.
+
+Added verifier cases for the normalized/original argv combination, output
+payloads named `-c`, forwarded `-c`, compile/assembly/preprocess/dependency-only
+actions (`-c`, `-S`, `-E`, `-M`, `-MM`), syntax-only mode, and the link-capable
+dependency modifiers `-MD`/`-MMD`. The project-generation suite now also checks
+`driver_link_effect=not-linked` through both a nested response-file argv entry
+and a command-string entry, while retaining the conservative `unknown` result
+for the conflicting `-Ofast`/`-ffp-model=precise` combination. These are
+source-level regressions only: the Elisa test has not been compiled or run. At the latest observation,
+`memory_pressure` reported 47% free (below the 60% build floor), and multiple
+compiler jobs were active, so no compiler or translator build was started.
+Driver-runtime insertion and actual FTZ/DAZ process state remain open; this
+change only fixes the lost action metadata.
+
+An initial generic suppression classification was too broad: local Homebrew
+Clang 23.1.1 `-###` plans on Apple ARM kept a link command under `-nostartfiles`,
+`-nostdlib`, and `-r`, while the GNU toolchain path has different start-file
+guards. Clang's toolchain separately checks whether `crtfastmath.o` exists
+before adding it ([toolchain check](https://clang.llvm.org/doxygen/ToolChain_8cpp_source.html),
+[GNU insertion path](https://clang.llvm.org/doxygen/Gnu_8cpp_source.html)). The
+parser now marks target-specific `-m[no-]daz-ftz`, no-start/no-default-library
+flags, relocatable mode, and forwarded linker options `Unknown`; verifier cases
+cover direct and forwarded spellings. The local Clang reports the bare
+`crtfastmath.o` name as unavailable, and warns that `-mdaz-ftz` is unused on
+Apple ARM. This is a conservative classification, not runtime-effect support.
+The Elisa verifier and target/runtime matrix remain unverified; memory was 55%
+free with multiple unrelated compiler builds active during this revision.
+
+## Compiler-independent roadmap regression recheck — 2026-10-06
+
+Re-ran the compiler-free safeguards against the current worktree:
+`scripts/check_source_line_limits.sh` passed (all maintained translator Elisa
+sources remain at or below 600 lines); `scripts/test_translator_genericity.py`
+passed 6 tests, including injected cJSON/Kilo/Wolf and Wolf4SDL map-name
+examples that ensure no such corpus-specific identifiers appear in translator
+production sources; `scripts/test_quality_ir_metrics.py` passed 17 tests;
+`scripts/test_quality_provenance.py` passed 10 tests;
+`scripts/test_upstream_provenance.py` passed 9 tests;
+`scripts/test_fixture_manifest.py` passed 20 tests;
+`scripts/test_run_bounded_process.py` passed 15 tests;
+`scripts/test_wolf_compile_commands.py` passed 8 tests;
+`scripts/test_setup_local_compilers.sh` passed its resource/lock checks; and
+`scripts/test_ast_depth.py --self-test` validated all ten malformed/schema
+seeds. Core-fixture shell syntax and `git diff --check` also passed. These
+checks verify static policy, harness behavior, and corpus/build-context data;
+they do not validate current Elisa source by compiling or running the
+translator.
+
+The earlier seed process exited, but the latest poll found multiple concurrent
+Stage0/Stage1 compiler jobs; macOS `memory_pressure` reported 33% system-wide
+free memory, below the configured 60% live build floor. This session started
+no compiler, Clang, or translator build and interrupted no unrelated process.
+Compiler-backed acceptance for pending Elisa source changes remains open until
+a safe build window.
+
+## Target floating-format fail-closed gate — implementation pending compiler verification — 2026-10-05
+
+Removed the assumption from the translation decision path by adding a generic
+AST scan for by-value `long double` in declarations, expressions, and function
+signatures. The scan resolves project typedefs, strips array dimensions to
+inspect element types, and follows typed expressions under source-owned
+declarations, so an opaque pointer remains permitted only while it is not used
+to materialize a `long double` value. Unsupported uses receive a dedicated
+`long double floating-point format and ABI` diagnostic before output is
+emitted. Target `float` and `double` are considered supported only when Clang's
+size, radix, mantissa, exponent, denormal, infinity and quiet-NaN macros prove
+binary32/binary64 respectively. The same source gate diagnoses C complex and
+known extended-float types rather than letting them fall through to opaque or
+`f64` lowering. Negative fixtures cover a typedef/cast/function result/local/
+literal, fixed-array storage, an included project-header record field, pointer
+arithmetic/dereference, and C complex storage; a positive fixture retains an
+opaque long-double pointer comparison. Synthetic ABI cases exercise ordinary
+LP64/LLP64 and non-binary float/double macro combinations. Negative
+translation checks require empty Elisa stdout. The scanner stops after its
+first diagnostic.
+
+The generic `floating_edge_values.c` acceptance fixture has since been extended
+to exercise a decimal binary32 literal just above a rounding midpoint, its
+hexadecimal exact-value counterpart, decimal/hexadecimal binary64 equivalence,
+and the smallest binary32/binary64 subnormals. It is already in the acceptance
+manifest, whose generated-source checks now require typed `f32`/`f64`
+declarations for all four values. Those emitted-shape checks and native/generated
+comparisons are not yet verified against a fresh translator/compiler pair.
+The lowering comment now records the key contract: Clang JSON's floating
+literal `value` is already rounded to the AST node's target type and must not
+be replaced by the original token, which could double-round binary32 values.
+
+Compiler-free checks for the source update passed: core-suite shell syntax,
+the 600-line Elisa source gate, six translator-genericity tests and
+`git diff --check`. No Elisa compiler, translator or Clang run was started:
+the Stage1 seed has ended, but a self-host gen2 compiler remains active and
+host free memory is 39%, below the configured build floor. Fresh translation
+diagnostics and compiler-backed acceptance remain pending.
+
+## C++ unordered_map mapped-value address stability — implementation pending compiler verification — 2026-10-05
+
+The adapter previously stored mapped values inline in dictionary entries, so
+dictionary rehash could relocate the object even though C++ `operator[]`
+returns a reference whose address must survive rehash. The current source
+revision stores mapped values in stable slots allocated from a per-map arena;
+dictionary entries hold slot references. Erase returns the slot to a map-local
+free list, and clear resets the value arena so capacity can be reused. This
+also keeps nullable pointer values inside a non-null wrapper rather than using
+optional dictionary elements.
+
+Added `testdata/fixtures/cpp_unordered_map_reference_stability.cpp`, which
+binds a C++ reference and pointer to `values[7]`, inserts 256 other keys, then
+writes and reads through both aliases. The main map fixture also exercises a
+deterministic collision chain across tombstones, erase→default reinsertion and
+clear→reuse. Both fixtures are wired for generated-shape, native compilation,
+and native/generated runtime parity in
+`scripts/test_suites/core_fixtures.sh`.
+The L02 acceptance item remains open: at this entry, an unrelated Stage1 seed
+and several compiler jobs were live while host free memory was 32%, so no
+Elisa compiler, Clang, or translator invocation was started. Compilation,
+generated output, runtime parity, and slot-reuse behavior are unverified.
+Nontrivial mapped-value destructors remain unsupported.
+
+## Loop/switch/goto dispatcher-shape quality signal — compiler-independent verification — 2026-10-05
+
+Extended the typed-IR quality metrics with a conservative candidate signal for
+reachable loop→switch shapes whose case (or immediate case block) contains a
+goto to a reachable label. The report separates candidate switch count,
+case-arm count and non-default-arm count from the existing raw goto/label
+metrics, and normalizes candidate prevalence by function count and non-default
+arms by decision units. Traversal is iterative and bounded by visited graph
+states; jump targets are matched by typed-IR label ID. It is deliberately a
+shape heuristic: it does not prove that a region was generated by the
+translator's CFG fallback or that each non-default case is a distinct
+semantic state.
+
+`python3 scripts/test_quality_ir_metrics.py` passed all 17 tests, including a
+positive candidate, unrelated-jump and mismatched-label-target negatives,
+including zero-function denominator handling and normalized candidate rates.
+`sh scripts/test_quality_report.sh` passed the 17 metrics tests, all 10 quality
+provenance tests and fake-translator report integration. Python bytecode
+compilation, the 600-line source gate and `git diff --check` passed. These tests
+use synthetic typed-IR and do not measure dispatcher recovery in a fresh
+translation. No Elisa compiler, Clang or translator build ran: host memory
+pressure was still elevated (32% free), with unrelated Stage0/Stage1 jobs
+active.
+
+## Deterministic raw-AST mutation probe — seed-generation verification — 2026-10-05
+
+Extended `scripts/test_ast_depth.py` with replayable raw-JSON mutations for
+truncation, delimiter, escape, number/literal grammar and trailing-data errors,
+plus a syntax-valid invalid-root-schema case. The integration probe requires
+the correct failure class and empty stdout for each seed, and adds a valid
+4-KiB AST payload that must be rejected by a 512-byte frontend-output cap. Each
+new translator invocation has a 10-second deadline; the canonical driver
+already bounds the whole probe's process group, RSS/footprint and host-memory
+floor.
+
+`python3 scripts/test_ast_depth.py --self-test` passed and independently
+verified the nine malformed seeds are rejected by Python's strict JSON parser.
+Python bytecode compilation and `git diff --check` passed. The translator-backed
+mutation integration was not run because the host remains at 32% free memory
+with a live Stage1 seed and unrelated Stage0/Stage1 jobs; no compiler or
+translator build was started. Therefore these are implemented regression
+seeds, not yet evidence that the current translator rejects every mutation as
+intended.
+
+## Rewrite-event-aware quality metrics — compiler-independent verification — 2026-10-05
+
+Fixed the quality-report reader's assumption that `typed-ir-v13` is the first
+stderr line. With `--explain-rewrites`, the translator emits structured
+`rewrite-event` rows during lowering/emission, before the buffered typed-IR
+dump; the report's old first-line check rejected that valid ordering. The
+report now locates and uniquely validates the version header, and the IR
+metrics parser counts applied/declined events overall and by rewrite rule,
+including a rate per 1,000 IR expressions. Event parsing accepts paths with
+spaces but rejects malformed event records. This is reporting infrastructure,
+not evidence that a rewrite itself is semantically correct.
+
+`python3 scripts/test_quality_ir_metrics.py` passed all 15 tests.
+`sh scripts/test_quality_report.sh` passed, including its quality-provenance
+tests and a fake-translator integration that places a rewrite event with a
+space-containing path before the IR header. Python bytecode compilation,
+shell syntax checks and `git diff --check` passed. No Elisa compiler, Clang,
+translator build or compiler-backed fixture was started because unrelated
+Stage0/Stage1 sessions remain active.
+
+A subsequent host snapshot found only 4,653 of 1,572,864 pages free (about
+0.30%) and no purgeable pages, with substantial swap activity. An unrelated
+Stage0 build and Stage1 self-host process were live, alongside a session
+waiting on the shared Stage1 seed lock. This is below the configured build
+headroom; no process was interrupted and no compiler-backed translator work
+was started.
+
+## Corpus provenance preflight and cJSON harness — compiler-independent verification — 2026-10-05
+
+Added `testdata/upstream/corpus_manifest.json` to record vendored tree IDs,
+nested checkout commits, licenses, native compile argv, translation inputs,
+and current behavioral checks. `scripts/test_upstream_provenance.py` checks
+those identities and required files before the canonical `all` or `upstream`
+suite reaches compiler work. Eight tests pass, including tampered-hash,
+missing-file, malformed-revision, and path-traversal cases. The preflight
+passed against the current inih, Kilo, cJSON, and Wolf4SDL checkouts.
+
+The inih upstream release `r62` was independently cloned at the official Git
+tag. Commit `26254ee9de7681f8825433415443e7116ff24b98` has root tree
+`33787047c04375515565b09f2bbf7f9116e96291`, exactly matching the vendored
+inih tree. The official `antirez/kilo` HEAD was also cloned; commit
+`323d93b29bd89a2cb446de90c4ed4fea1764176e` has root tree
+`a51e102d34c15cacb4ec931761a40d139cf2962a`, exactly matching the vendored
+Kilo tree. Both upstream source revision identities are now recoverable and
+machine-recorded.
+
+Moved the translator-owned cJSON smoke harness into the repository's
+`testdata/fixtures/cjson_smoke.c` and registered cJSON and Wolf4SDL as
+submodules at their verified commits. The old nested untracked harness and
+Wolf `.DS_Store` were deliberately left untouched. A normal clone must run
+`git submodule update --init --recursive`; cJSON is required by the upstream
+suite, while Wolf remains exploratory/optional rather than a verified game
+build. No Elisa compiler or Clang build was run for this slice.
+
+The same manifest test now compares Wolf's tracked source inventory against
+the pinned Makefile: there are 28 checked-in C/C++ files, while the default
+`SRCS` list contains 26 (25 `.cpp` plus `opl3.c`) and omits
+`wl_dir3dspr.cpp` and `wl_shade.cpp`. It also checks the recorded GNU99 C mode,
+host-default C++ mode, SDL2/SDL2_mixer pkg-config context, and Makefile warning
+flags. All eight provenance tests pass. `pkg-config --exists sdl2 SDL2_mixer`
+currently fails because `SDL2_mixer.pc` is unavailable, so no faithful native
+Wolf compilation database can be generated in this environment yet; no build
+was attempted. Added `scripts/wolf_compile_commands.py`, which checks the
+pinned nested commit and ordered Makefile source inventory, captures a forced
+Make dry-run using Clang drivers, verifies C GNU99 versus C++ host-default
+language modes, and emits a host-local database with compiler/target, package,
+configuration and content-hash provenance. Eight offline tests cover parsing,
+inventory completeness, mode drift, the actual pinned 26-unit compiler-free
+`make -n` run with stubbed SDL package metadata,
+output-path safety, and generated provenance; nine corpus provenance tests
+now require the generator path to be safe and present. The actual generator
+was attempted and correctly stopped at
+the missing SDL2/SDL2_mixer package check before creating output. Translation
+with a generated database, and the portable native link/runtime gate, remain
+open.
+
+During a parallel compiler-independent regression batch, the fixture-runner
+descendant-timeout test failed once while unrelated Elisa compiler jobs were
+active. Its assertion used a fixed 600 ms delay; it now polls for a bounded
+three-second observation window so scheduling delay cannot masquerade as a
+surviving child. The full 20-test fixture-manifest suite then passed serially,
+and the timeout case passed five consecutive serial repetitions. This is
+test-harness reliability evidence only; no compiler-backed translator test
+was started.
+
+Added `project_unordered_map_macro`, a generic C++11 two-translation-unit
+fixture reproducing the Wolf adapter shape: an external `unordered_map<int,
+int8_t>`, an out-of-line definition and mutation, and macros that expand to
+bracket reads/writes in another TU. The project-generation suite now checks
+both compile-command orders, native/generated exit status, and adapter output
+shape. JSON and shell syntax checks pass, but the integration itself has not
+run: active unrelated Stage0/Stage1 builds keep the compiler window closed.
+
+Added `cpp_unordered_map_pointer_find.cpp`, a second generic C++11 fixture for
+pointer-valued mapped data. It covers `find`/`end` for hit and miss, iterator
+key projection, and nullable `const char *` mapped-value reads; the core suite
+checks the emitted adapter shape and wires native/generated exit-status parity.
+Neither this fixture nor the cross-unit macro project has been executed against
+the current translator/compiler pair yet. At the time of the initial check, an
+unrelated Stage0 compiler process was using about 2.4 GiB RSS, so
+compiler-backed work remained paused.
+
+Static review of the pointer-valued fixture caught an output assertion that
+expected `missing == end()` even though the source tests `missing != end()`;
+the assertion now matches the source miss check. Shell syntax and whitespace
+validation pass. This corrects a test expectation only and is not translator
+behavior evidence.
+
+Compiler-independent revalidation after these additions passed: the upstream
+provenance suite (8 tests), IR quality metrics (12), quality provenance (10),
+translator-genericity guard (5), and compiler-compatibility manifest checks
+(3). The quality-report integration wrapper also passed, including its metrics
+and provenance sub-suites. All three recorded JSON inputs parse; the affected
+shell suites pass `sh -n`; the 600-line source gate and staged/unstaged
+`git diff --check` pass. No Clang, Elisa compiler, translator build or
+compiler-backed fixture was launched in this revalidation.
+
+The pinned Wolf source inventory also received a lexical C++ scope pass. In
+the default build units, the only live `std::` API found is the two
+`unordered_map` objects; no class/template-definition, exception, virtual
+member or explicit allocation/deallocation syntax was found. The include scan
+shows C/POSIX and SDL dependencies plus platform-conditional headers. This is
+useful for prioritizing C++ adapter work, but does not replace the pending
+Clang projection audit or establish the behavior of macro/inactive paths.
+
+At the latest resource snapshot, system-wide free memory was 73%, but an
+unrelated Stage1 compilation was still active at roughly 960 MiB RSS. Per the
+chosen safe-build policy, no translator/compiler build was started; recheck for
+an idle compiler window before the Stage0/Stage1 refresh.
+
+A later snapshot showed 71% free memory, an unrelated Stage1 compile near
+1.0 GiB RSS, and a separate Stage1 seed command starting in a temporary
+worktree. The configured global seed-lock directory was absent at the exact
+sampling instant; no build was started from this task. This confirms that the
+80% seed preflight is needed in addition to the lock and 60% live guard.
+
+## Local compiler refresh behavior — compiler-independent verification — 2026-10-05
+
+`setup_local_compilers.sh` rebuilt Stage0 unconditionally but previously
+reseeded Stage1 and built its runtime only when the corresponding files were
+missing. That could silently pair a newly rebuilt Stage0 with an older Stage1,
+because the current Stage1 provenance record does not include the Stage0
+product hash. Setup now always performs the bounded Stage1 seed after Stage0
+and always invokes the runtime builder; the runtime builder's own full-input
+and product digest makes an unchanged runtime a safe no-op. The existing setup
+self-test now asserts these refresh steps are present. Because the historical
+Stage1 seed reached about 4.7 GiB physical footprint, its bounded launch now
+requires more than 80% initial free memory by default via
+`ELISA_SETUP_SEED_MIN_INITIAL_SYSTEM_FREE_PERCENT`, while retaining the 60%
+`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT` live floor. Tests reject invalid
+settings before creating worktrees and verify initial versus live thresholds
+independently. Setup also checks a live global seed-lock owner before creating
+worktrees or building Stage0; a self-test confirms it refuses with no worktree
+side effects. The 15 bounded-runner tests, setup self-test, shell syntax,
+600-line source gate and `git diff --check` all pass. No compiler was run. The
+refresh remains deferred until the host is idle and exceeds the stricter seed
+preflight threshold.
+
+The bounded-runner regression specifically confirms an initial sample above
+80% followed by a live sample below 80% but above 60% may continue; an initial
+sample at 80% refuses launch before the child starts. This keeps headroom
+preflight separate from the in-flight kill floor.
+
+A subsequent resource poll fell to 58% free memory while an unrelated Stage0
+compile used about 2.2 GiB RSS and several Stage1 compiles were also active.
+The global seed lock was absent at that instant, but the host was already below
+the 60% live floor; no compiler work was started by this translator task.
+
+At a later poll the shared Stage1 seed lock was held by another session while
+host free memory was 61%; another Stage0 and Stage1 compilation remained
+active. This task did not contend for the lock. The new setup command will
+refuse its Stage1 seed until initial free memory exceeds 80%, then keep the
+60% live floor throughout the owned process group.
+
+The next poll still found the global lock held and host free memory at 42%,
+with that seed and additional compiler processes active. On resumption, the
+same seed process was still live and host free memory was 33%. No processes
+were signaled or modified by this task; local Stage0/Stage1 refresh and all
+compiler-backed translator tests remain deferred.
+
+The same offline verification pass also reran `scripts/test_stage1_freshness.sh`
+(stale product rejected, freshly recorded fixture accepted),
+`scripts/test_build_cache.sh` (input fingerprint, executable hash and mode),
+and `scripts/test_fixture_manifest.py` (20 tests, including process/output
+limits, host-memory-floor enforcement, runtime-link selection and outcome
+classification); all passed. Their process-limit cases used small synthetic
+children and did not launch Elisa or Clang.
+
+## Reachable typed-IR duplicate-shape quality signal — compiler-independent verification — 2026-10-05
+
+The quality report now fingerprints exact statement-subtree shapes from typed
+IR reachable from function bodies. Signatures retain statement/expression
+kinds, operators, type spellings, names, literal contents, ordered children,
+and switch-case structure while excluding unstable IR node indices. It reports
+repeated shapes per function, excess repeated occurrences, and rates per
+decision unit and per 1,000 reachable statement nodes. Identical shapes in
+different functions do not count as within-function duplication.
+
+The report rejects cycles in reachable expression/statement graphs. Unreachable
+records are excluded from fingerprints, so dead or auxiliary dump records do
+not distort this readability signal. Synthetic tests verify repeated versus
+different names, cross-function isolation, reachable-cycle rejection, the
+unreachable-cycle case, a 1,500-node expression chain without Python recursion,
+and zero-body denominators. The iterative fingerprint pass uses per-node
+byte states rather than building a reverse-edge table. `python3
+scripts/test_quality_ir_metrics.py` and `sh scripts/test_quality_report.sh`
+pass; the latter also covers report integration and provenance. `git diff
+--check` and source-size checks pass. No Elisa compiler was invoked: the shared
+compiler window remains occupied, so this implementation has not yet been
+measured on a freshly translated cJSON or unrelated project.
+
+The same typed-IR graph pass reports local declaration nodes with no reachable
+`Name` reference resolving to that declaration, with declaration- and
+decision-unit normalizations. Its iterative walk reconstructs lexical
+environments from block/branch/loop/switch structure and declaration order;
+shadowed names resolve to the nearest visible local, and a name in a sibling
+block cannot mark another block's declaration as used. A `for` initializer's
+binding is visible to the condition/body/increment but does not leak after the
+loop. String literal contents cannot count as uses. This is a reference
+signal, not liveness or dead-store analysis: the IR has no explicit binding
+IDs, and reused expression nodes or unusual control-flow ownership may still
+require stronger identity data before interpreting a result as dead code.
+Nothing is automatically removed. Regression coverage includes inner shadowing,
+sibling scopes, separate outer/inner uses, `for` scope, malformed statement
+cycles, and 1,200 nested blocks without Python recursion.
+
+These are deliberately candidate metrics, not a proof that two regions are
+behaviorally interchangeable or that a declaration can be deleted. Lexical
+scope reconstruction reduces same-spelling collisions, but the IR still lacks
+explicit declaration identity on `Name` nodes, so this is not full binding or
+liveness analysis. Binding-aware duplicate analysis, dispatcher-state
+provenance and formal dispatcher-region recognition, structural
+assertion/unsafe metrics, and curated output comparisons remain open under
+V03. A separate follow-up now reports per-function body-graph
+`Goto`/`Label` counts and decision-normalized rates as explicitly approximate
+dispatch-pressure proxies; they do not prove CFG reachability or identify
+compiler-generated dispatch regions.
+
+The V03 report also includes mean/p90/max body-graph `Goto` and `Label` nodes
+per function, the fraction of body-bearing functions containing either, and a
+`Goto`/`Label`-per-decision-unit measure. Thirteen focused IR-metric tests and
+the fake-translator quality-report integration pass, including empty-function
+denominators. These remain structural proxies: the analyzer walks statement
+edges from each function body and does not establish that a node is reachable
+at runtime or that a jump is part of a synthesized state machine. No Elisa
+compiler was invoked for this change.
+
+## Lexical-scope-aware local-reference metric — compiler-independent verification — 2026-10-06
+
+The unreferenced-local quality signal previously compared declaration and
+`Name` spellings across an entire function. A same-spelled use in a nested or
+sibling scope could therefore hide a declaration with no references. The
+quality graph walker now attributes each name to the nearest reconstructed
+lexical binding, modeling sequential block declarations, branch scopes,
+`for`-initializer lifetime, loop bodies, switch cases, labels and continue
+increments. It remains a reference metric rather than liveness analysis
+because v16 typed IR does not attach a canonical binding ID to each `Name`.
+
+The first focused run exposed that malformed statement cycles could repeatedly
+create deeper synthetic scopes. The analyzer now detects active statement
+cycles before scope expansion and interns lexical-scope/declaration-environment
+states to constant-size tokens; the traversal stays iterative. `python3
+scripts/test_quality_ir_metrics.py` passes 24 tests, including nested
+shadowing, sibling-block isolation, outer and inner references, shared
+statement nodes reached before/after a declaration, `for` visibility and
+post-loop non-leakage, cycle rejection and 1,200 nested blocks.
+`sh scripts/test_quality_report.sh`, Python byte-compilation, source-line
+limits and `git diff --check` pass. No Elisa compiler was launched; current
+unrelated Stage1 compiler jobs keep the shared build window unsafe, so fresh
+translator-produced IR coverage remains pending.
+
+## Quality-report run provenance — implemented, compiler-independent verification — 2026-10-05
+
+Each successful `scripts/quality_report.sh` report now includes a versioned
+provenance record with SHA-256 identities for the source bytes snapshotted
+before translation (and rechecked afterward), emitted Elisa bytes, and
+resolved translator executable; the original/resolved executable paths,
+arguments and typed-IR schema; and the compiler-compatibility manifest's
+path/hash, target, Stage0/Stage1 revisions, source cleanliness,
+executable/runtime hashes and product freshness. Source/output and other
+free-form paths are JSON-encoded so newlines cannot spoof report entries. The report rejects output
+paths that canonically alias the source, translator, compiler manifest or
+acceptance-coverage inputs, including existing symlink aliases. The recorded translator-validation state remains explicit
+(`pending`, `verified`, or the manifest's actual state); the reporter does not
+infer compatibility from a successful translation. Free-form path/manifest
+strings are JSON-encoded so they cannot inject additional report records.
+
+The offline report integration recomputes the four hashes independently and
+checks that Stage0's matching artifact is fresh while a stale Stage1 runtime
+remains false and validation remains pending. Ten focused Python tests cover
+the checked-in manifest's direct artifact identities, stale/missing/malformed
+manifest handling, source-versus-artifact revision freshness, path permission,
+and report-line injection; it also rejects source or translator mutation
+between snapshot and report generation, retains symlink invocation identity,
+JSON-encodes newline paths, and rejects direct/symlink output aliases without
+changing protected file hashes.
+`sh -n`, Python byte-compilation,
+`sh scripts/test_quality_report.sh`, and `git diff --check` pass. This improves
+the reliability of later cJSON/unrelated before-and-after comparisons, but does
+not yet provide the curated examples or correctness evidence themselves. No
+Elisa compiler was invoked; a separate Stage1 build remains active and the
+shared compiler safety gate remains closed.
+
+## Bounded latest-Stage0 refresh attempt — safely stopped at host floor — 2026-10-05
+
+After the shared Stage1 seed lock became absent, the host sampled at 64% free
+memory and no Elisa/Clang compiler process was active. A current Stage0 Go
+compiler build was attempted through `scripts/run_bounded_process.py` with a
+1.5-GiB owned-process RSS limit, 600-second deadline, and 60% host-free floor.
+An unrelated Playwright workload was concurrently active. The runner stopped
+and reaped only the owned Go/Clang process group when host free memory reached
+60%; sampled peak owned-group RSS was 1,044,624 KiB and peak physical footprint
+was 1,014,130 KiB. This is a guard-triggered incomplete build, not a machine
+crash or a compiler result. The post-stop compiler compatibility test passed,
+confirming the previously recorded Stage0/Stage1 executable/runtime hashes
+remain intact and correctly stale relative to source. Do not retry while the
+competing workload keeps memory near the floor; source-only translator work and
+compiler-independent tests may continue.
+
+## Assignment-valued condition evaluation — pending compiler verification — 2026-10-05
+
+The historical generated Kilo snapshot at `build/kilo.generated.elisa` has
+`editorOpen` assign `getline(...)` to `linelen` and then emit another
+`getline(...)` call in the loop guard. The generic condition lowering now
+detects assignment operators within the condition and lowers the original
+expression as a value, preserving the assignment-value sequence helper instead
+of extracting a store and re-emitting its RHS. A fixture covers call-valued
+assignments in `if`, a nonzero-terminating `while`, and a zero-terminating
+empty-body `while`, plus a constant-false short-circuit and helper-backed
+dynamic `&&`/`||` paths that each run once with a skipping left operand and
+once with a taking left operand inside actual `if` conditions. Its
+generated-shape assertion requires one call in each logical helper and none in
+the constant-pruned case. Its integration path compares native/generated exit
+status.
+
+This fix is intentionally generic and does not contain Kilo/cJSON-specific
+logic. Assignment detection runs once on the whole condition, then recursive
+condition lowering skips redundant child-subtree scans, avoiding quadratic
+rescans of long assignment-free expressions. The old compound-assignment
+extraction block that had become unreachable after the existing
+value-preserving path was removed. Shell syntax validation,
+the 600-line source bound, `git diff --check`, and 15 offline process-bound and
+compiler-provenance tests pass. No translator build or compiler-backed fixture
+run is claimed: a contemporaneous host sample had 37% free memory while
+multiple unrelated Stage0/Stage1 compiler jobs were active, below the local
+60% safety floor. The S03 checklist item remains open until generation,
+compilation and native/generated comparison succeed against a current local
+compiler pair.
 
 ## Latest isolated compiler source synchronization — products pending safe rebuild — 2026-10-05
 
@@ -105,6 +1033,43 @@ pressure scans are still heuristic, and duplicate-code, unnecessary-local,
 null-assertion provenance, and unsafe-scope structural metrics are not yet
 implemented.
 
+An audit of candidate local cJSON outputs found that `build/cjson.generated.elisa`
+and `build/cjson.quality8.generated.elisa` are ignored build artifacts with no
+paired source/toolchain identity record; they also differ substantially in
+size (1,629 versus 2,546 lines). They are not a defensible before/after pair.
+The unrelated `idiomatic_patterns` output is also ignored. V03's curated
+example gallery therefore remains open until examples are regenerated from
+recorded translator/compiler identities, with a correctness result and a
+reviewer note for each pair.
+
+Extended `scripts/quality_ir_metrics.py` with reachable per-function local
+declaration counts (mean/p90/max) and declarations per `1 + decision nodes`.
+The metric follows the already-validated statement graph and does not use
+source-text searches; it is explicitly a declaration-pressure signal, not an
+unused-local detector. Synthetic coverage checks populated and empty function
+sets. The eight focused IR metric tests and the fake-translator quality-report
+integration pass; this does not close the remaining duplication, genuinely
+unnecessary-local, null-assertion-provenance, or unsafe-scope metrics.
+
+Added a deterministic 60-plus-case malformed-input mutation corpus to
+`scripts/test_quality_ir_metrics.py`, exercising the typed-IR quality parser's
+version/count validation, indexed-record closure and graph-edge checks through
+truncations, record deletion/duplication and malformed field mutations. The
+bounded synthetic mutations all fail closed with `ValueError`. This is parser
+hardening for the quality tooling, not fuzz evidence for the translator's
+Clang AST/projection path; that V02 requirement remains open.
+
+Added `scripts/test_translator_genericity.py` to the canonical driver's
+compiler-independent preflight. It scans active code and string literals in
+translator-owned Elisa modules under `src/` and `cpp_lib/` for known corpus
+identifiers, ignoring line comments while preserving `#` inside strings.
+Synthetic regressions catch both a `cJSON_Parse` string mapping and an
+identifier mapping. Removed the one matching cJSON-specific phrase from an
+emitter comment. This is a name-based guard, not proof of semantic genericity
+for arbitrary computed rules. All five tests pass; Python byte-compilation, shell syntax checks,
+the 600-line source check and `git diff --check` also pass. These checks require
+no translator/compiler invocation.
+
 The quality reporter now requires the exact `typed-ir-v13` dump header and
 exactly one counts record with each denominator it consumes (`exprs`, `stmts`,
 `switch_cases`, `functions`, and `globals`). Unknown dump versions and absent,
@@ -141,14 +1106,23 @@ On macOS, `scripts/run_bounded_process.py` can read the system-wide free-memory
 percentage before launch and while an owned process group is running. It
 refuses a preflight at or below the floor, terminates only its owned group if a
 live sample reaches the floor, and fails closed if monitoring is unavailable.
-The local compiler-setup default floor is 41%, while the canonical `test.sh`
-entry point defaults to 60%; both are configurable through
-`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`, and the bounded runner inherits that
-variable when no command-line floor is supplied. Local compiler setup applies
-the gate to Stage0 builds, Stage1 seeds and runtime builds; `test.sh` gates the
+The local compiler-setup default floor for Stage0/runtime work was 41%; it now
+matches the canonical `test.sh` entry point at 60% free memory. Both use
+`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`, which the bounded runner inherits when
+no command-line floor is supplied. The high-memory Stage1 seed has a separate
+80% initial-memory requirement, configurable with
+`ELISA_SETUP_SEED_MIN_INITIAL_SYSTEM_FREE_PERCENT`, while keeping the 60% live
+floor active during the seed.
+
+Stage0's Go build now defaults to one package worker (`go build -p 1`) with a
+validated 1–128 override. Invalid parallelism/floor settings fail before
+worktree creation. The setup regression passes without launching any compiler.
+Local compiler setup applies the respective gates to Stage0 builds, Stage1
+seeds and runtime builds; `test.sh` gates the
 translator object/link build and the manifest runner gates each fixture stage.
 These host limits supplement—not replace—per-process-group RSS,
-physical-footprint, output and deadline limits.
+physical-footprint, output and deadline limits. Translator total-input,
+concurrency and retained-unit/cache budgets remain open.
 
 ## Direct shell-suite process bounds — implementation in progress — 2026-10-05
 
@@ -2840,6 +3814,365 @@ compatibility guard for the current Elisa backend, whose inline match lowering
 can otherwise evaluate a selector once per arm. `switch_selector_once.c` now
 checks the generated temporary shape and passes native/generated parity, while
 the control-flow and fixture suites remain green.
+
+## Compiler-independent tooling regression run — 2026-10-06
+
+Ran the compiler-independent test modules against the current translator
+worktree: AST minimization (10), property corpus generation (10), typed-IR
+quality metrics (25), quality provenance (10), bounded process runner (17),
+translator genericity guards (8), fixture-manifest runner (21), metamorphic
+normalization (4), and Wolf compile-command generation (8). The quality-report
+integration also passed and reran its metric/provenance unit tests. The AST
+depth self-test passed with the expanded raw UTF-8 seed set (eight legal scalar
+boundaries and sixteen malformed sequences); shell syntax, `git diff --check`,
+and the maintained Elisa 600-line source limit also passed.
+
+These checks do not invoke the translator or Elisa compiler and do not verify
+current Elisa source changes. At the time of the run, system memory was 37%
+free and unrelated Stage1/compiler jobs were active, so compiler-backed tests
+remain deferred to a safe build window.
+
+The same nine test modules and quality-report integration were rerun on
+2026-10-06 after extending the mixed mutable/const iterator fixture; all 113
+unit cases and the AST-depth UTF-8 mutation self-test passed again. Shell/source
+limits and diff hygiene passed too. This repeat still avoids translator and
+Elisa compiler execution; system memory was 50–51% free with unrelated Elisa
+and Rust builds active.
+
+## Mixed unordered-map iterator equality — 2026-10-06
+
+The translator-owned `cpp::unordered_map` adapter now defines `Eq` overloads
+for mutable/const iterator pairs in both operand orders. The generic C++11
+const-iterator fixture exercises equality and inequality for mixed iterator
+types in both operand orders, including comparisons against each iterator
+flavor's `end()` and checks that equal iterators are not unequal. The acceptance
+manifest requires those source expressions to remain visible in generated
+Elisa. The fixture passes both
+`clang++ -std=gnu++11 -fsyntax-only` and a native C++11 compile/run (exit 0); the
+fixture-manifest unit tests, source-size gate and diff checks pass.
+Generated-Elisa compilation and native/generated runtime parity remain
+unverified until a fresh translator and compiler pair can be used safely.
+
+The native C++11 oracle fixtures for the same adapter family also pass on this
+checkout: `cpp_unordered_map.cpp` exits 45 as asserted by the differential
+harness, while `cpp_unordered_map_reference_stability.cpp` and
+`cpp_unordered_map_const_iterator.cpp` exit 0. Each was compiled with
+`clang++ -std=gnu++11`; these runs validate the source fixtures and expected
+native behavior, not the translator adapter.
+
+## Latest isolated compiler source synchronization — 2026-10-06
+
+An audit found the isolated Stage0 worktree had fallen four commits behind
+the current clean Stage0 main worktree. After confirming the isolated branch
+was clean and strictly behind, it was fast-forwarded from `370110bc` to
+`f84b9c10`; the Stage0 main checkout was not changed. Isolated Stage1 already
+matched its main worktree at `6b475d89`; its existing `.DS_Store` modification
+was preserved. No compiler binaries were rebuilt: Stage0 executable remains
+from `6a0628cc`, Stage1 executable/runtime remain from `8e08cd33`, and the
+compatibility manifest marks every product stale. Available memory was
+48–50%, below the configured build floors, so compilation is deferred.
+
+The canonical translator test wrapper and fixture-manifest runner now both use
+the same 60% macOS free-memory floor as local compiler setup (unless explicitly
+overridden with `ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`). Their prior 41% defaults
+could launch compiler-heavy suites while the host was already below the setup
+floor. Compiler-free tests assert the shared default; no Elisa build was started
+while host memory remained below 60%.
+
+## C compound-literal object identity — 2026-10-06
+
+Added an initial function-scope C lowering path for `CompoundLiteralExpr`.
+Each Clang expression receives collision-checked local storage, and each
+evaluation stores its initializer into that object and yields a mutable or
+read-only reference according to the source object's top-level `const`.
+The generic helper is emitted only when needed. The new
+`compound_literals.c` differential fixture checks distinct addresses, mutable
+record fields, by-value copies, fixed-array indexing, and repeated evaluation
+inside a loop. An earlier Clang C11 syntax/AST probe confirmed the initial
+record/array forms lower as `CompoundLiteralExpr` nodes with one initializer
+child and unique Clang ids. The final record/array, const-record, scalar, and
+union-array fixtures pass Clang C11 syntax checks with `-Wall -Wextra -Werror`.
+Native execution returns 0 for `compound_literals.c` and 7 for the union-array
+fixture (which is intended to be rejected by the translator). Compiler-free
+manifest (20 tests), genericity (8 tests), shell syntax, diff, and 600-line-limit
+checks pass.
+
+Source review found helper marker bytes 4/5 were recognized when selecting the
+mutable/readonly support functions but were not removed before writing Elisa.
+The emitter now strips these markers and includes them in generated-source-map
+offset rebasing; the manifest also asserts both helper families appear. This is
+not yet verified by a fresh translator run. Additional negative fixtures now
+cover file-scope static duration, volatile objects and the C++ compound-literal
+extension; Clang accepts all three source fixtures, while the control-flow suite
+requires each to fail translation with a capability diagnostic and no partial
+stdout. Those translator-backed assertions are pending as well.
+
+This slice is not yet compiler-verified. The union-layout guard now resolves
+the element type of fixed arrays as well as direct union objects, and
+`union_compound_literal_array_unsupported.c` asserts that such a form fails
+closed without partial output; that translator-backed regression is still
+pending. The host remained below the configured
+60% free-memory build floor (52% at inspection), while an unrelated Stage1 seed
+build was live, so no translator/compiler build or Elisa execution was started.
+File-scope compound literals, volatile objects, C++ extensions, and
+effectful-comma initializer sequencing currently fail closed or remain open;
+array assignment and reference-return behavior still require validation against
+the latest compiler before this slice can be considered supported.
+
+## Wolf4SDL manual-launch preflight — crash still undiagnosed — 2026-10-06
+
+Rechecked the user-reported run after the game data were copied. The inspected
+`build/wolf-pointerfix-verified/run-wolf-translated.command` changes the working
+directory to the executable's directory before launch. All eight required
+lowercase `.wl6` assets (`audiohed`, `audiot`, `gamemaps`, `maphead`, `vgadict`,
+`vgagraph`, `vgahead`, `vswap`) are present both beside that executable and in
+its `WOLF3D/` folder; Wolf4SDL's startup probe checks `vswap.wl6`. The
+user-provided macOS screenshot reports `EXC_BAD_ACCESS (SIGSEGV)` after the
+missing-data message was no longer the outcome, so this inspection rules out
+the earlier cwd/missing-asset setup for that build directory but does not
+identify the crash cause. The inspected executable is Mach-O arm64, SHA-256
+`17448232a2b1431fec0f3b05be221895047b85d20c12965c6293d491b817f3ae`, and
+`otool -L` shows SDL3/SDL3_mixer dependencies; the pinned Wolf Makefile instead
+requires SDL2. `pkg-config` currently cannot find `SDL2_mixer`, and the masked
+path in the screenshot does not prove it launched this exact binary. No
+matching `wolf-translated*.ips` or `.crash` file was found in local
+DiagnosticReports folders. I did not relaunch the game or build while host
+free memory was below the configured floor and another compile/link process
+was active. V04 crash diagnosis remains open pending a correct SDL2 build and
+a bounded debugger reproduction with backtrace/register state.
+
+## Bounded generated AST projection mutations — 2026-10-06
+
+The AST-depth probe now combines three fixed valid-root mutations with eight
+deterministically generated metadata shapes: null/boolean/scalar values,
+integer and floating-point edges, empty containers, escaped Unicode, a nested
+object, and a wide array. Compiler-free preflight enforces the
+`TranslationUnitDecl`/`inner` envelope, exact regeneration determinism, a 4 KiB
+per-seed serialized-byte limit, and a depth limit of 32. On a future
+zero-exit projection mismatch, the bounded structural reducer writes a
+content-addressed minimized JSON fixture under
+`testdata/fixtures/ast_projection_regressions/` after at most eight translator
+oracle probes and 64 candidate checks, and only if one of those probes confirms
+the exact minimized JSON still reproduces the mismatch. An unconfirmed or
+transient mismatch is reported without adding a saved fixture. Later runs
+automatically replay saved fixtures against the empty-translation baseline;
+persisted seeds are limited to 4 KiB, depth 32, and 64 corpus files. The ten
+reducer tests cover minimization budgets, collision-safe persistence, corpus
+bounds, replay loading, rejection of unconfirmed candidates, and the full
+AST-probe failure path with stable and transient fake-translator mismatches.
+Stable cases are saved and replayed; a mismatch that disappears on the
+confirmation probe is not persisted.
+
+The 2026-10-06 serial compiler-free preflight components all passed:
+upstream provenance (11 tests), Wolf compile-command generator (8), source
+line cap (600), translator genericity (8), metamorphic normalization (4), AST
+reducer (10), property corpus (7), AST corpus self-test, compiler setup/cache
+safety checks, quality report (10), test-support checks, fixture manifest
+(20), compiler compatibility (3), bounded process runner (17), and local
+stdlib-link checks. `git diff --check` passed. These checks used fake compiler/
+translator commands where needed; no Elisa compiler, native Clang frontend,
+or real translator process was started. At the post-batch process snapshot,
+system free memory was 43% and no compiler process was visible; the pinned
+Stage0/Stage1 products remain stale relative to their worktree sources.
+Generated ASTs have not yet been compared through a fresh translator, and no
+real mismatch has triggered the persistence path, so those integration gates
+remain open.
+
+## Seeded semantic property-program generator — 2026-10-06
+
+Added a deterministic generator for five small C program families: integer
+arithmetic/bitwise/shift cases, in-bounds pointer traversal and one-past
+comparison, aggregate copy and field reads, explicitly sequenced increment
+and compound-assignment expressions, and loop/continue/switch control flow.
+Inputs are constrained to defined ranges and each program checks its computed
+result against an independently calculated constant. The integer family also
+exercises conversion of a high-end sum back to `uint32_t` (modulo 2^32),
+high-bit logical right shifts and bitwise AND. The ten-test compiler-free
+suite passes; its 257-seed sweep checks these unsigned expectations along with
+divisors/shift counts, dereferenceable array positions, aggregate values,
+sequenced updates, and the calculated control-flow total for generated source.
+The signed multiplication operands are explicitly `int32_t`: using plain
+`int` with values up to 1,000 could overflow on a conforming 16-bit-`int`
+target, so the generator now avoids that target-dependent undefined behavior.
+The integer cases also include safe identity expressions (`+ 0`, `* 1`, `/ 1`,
+bitwise identities and unsigned shifts by zero), giving the later differential
+run varied operands through the readability-rewrite paths.
+
+Added `scripts/run_property_corpus.py` to route each generated case through the
+canonical differential-runner stages serially, with its per-stage process,
+output, time and host-memory safeguards. Generated inputs are retained in
+content-addressed source snapshots and included in the case artifact hashes,
+alongside generated Elisa, native and translated binaries plus stage logs.
+Compiler-free tests also verify all generated cases against that runner's
+manifest contract and check serial dispatch plus propagation of RSS, output,
+timeout and host-memory limits. All ten property-corpus tests pass, including
+a 257-seed case-count/source-size budget sweep.
+The unit suite is wired into canonical preflight, and the fixed-seed
+differential run is wired into `all`/`fixtures` after the fixed acceptance
+manifest. The property-corpus suite (10 tests), fixture-manifest suite (21),
+600-line source gate, and `git diff --check` pass on this revision. Generated C
+syntax/native behavior and Elisa differential parity have not yet been run
+under Clang and a fresh local Elisa compiler pair.
+
+## Safety-gated translator continuation — 2026-10-06
+
+No Elisa compiler, translator, or Clang integration build was launched in this
+check. The initial host-memory sample reported 47% free while an unrelated
+Stage0 Elisa-LSP build was active at approximately 1,020,960 KiB RSS. That
+process later exited, but a fresh sample reported 45% free, still below the
+repository's configured 60% launch floor. The compiler-backed translator and
+upstream suites therefore remain pending a safe window.
+
+After the lightweight checks below, a new Stage0 Elisa-LSP build was active
+again (about 2,354,016 KiB RSS), alongside an unrelated Rust build; host free
+memory was 44%. No build or translator process for this repository was started.
+
+Compiler-independent checks passed: `scripts/test_translator_genericity.py`
+(7 tests), `scripts/test_fixture_manifest.py` (20 tests),
+`scripts/check_source_line_limits.sh`, and POSIX shell syntax checks for
+`scripts/*.sh` and `scripts/test_suites/*.sh`. These checks do not establish
+current Elisa source typing, generated-code validity, or native/generated
+semantic parity. The saved `build/cpp_unordered_map.ast.json` artifact is dated
+2026-09-29 and was not treated as fresh evidence for the current translator
+sources.
+
+## Distinct dispatcher target labels — 2026-10-06
+
+The typed-IR quality analyzer now counts unique reachable label IDs targeted
+by goto-bearing arms of loop-nested switches, separately from the number of
+arms. Reports include the aggregate, per-function and decision-normalized
+target counts, the mean and maximum target count per candidate switch, and the
+number of candidate switches targeting multiple labels. Synthetic regressions
+cover three distinct destinations and two case arms converging on one label;
+the latter still counts as one destination. The focused IR-metrics suite (25
+tests), quality-report integration and quality-provenance suite pass.
+
+This remains a structural state-label proxy: labels are not guaranteed to be
+semantic states, and this analysis does not yet prove dispatch-loop back-edges,
+state-block boundaries or complete dispatcher regions. No Elisa compiler or
+Clang run was needed for this Python-only analyzer change.
+
+## Floating-point option-vector precedence audit — 2026-10-06
+
+Review against Clang's User's Manual caught and reversed an incorrect assumption:
+`-fprotect-parens` disables FP contraction, rather than being independent of
+`-ffp-contract`. Effective contraction is now resolved after argv scanning, so
+protection wins in either option order, while a later `-fno-protect-parens`
+restores the selected contract. Regressions cover the default, both orderings,
+and disable/restore behavior. The parser also reflects the Clang driver
+interaction where `-ffp-exception-behavior=ignore|maytrap` clears trapping math,
+`strict` enables it, and a later `-ftrapping-math` selects strict exception
+behavior; three option-order regressions cover those cases.
+
+The installed Homebrew Clang 23.1.1 driver's `-###` output was also checked
+for profile/contract precedence: `-ffp-contract=fast -fno-fast-math` remains
+`fast`; `-ffast-math -ffp-contract=off` remains `off`; strict→precise retains
+strict exception/rounding state but selects contract `on`; precise→strict
+selects contract `off`. For paren protection, Clang forwards both
+`-fprotect-parens` and `-ffp-contract=fast` to cc1 in either argv order, while
+the manual specifies that protection disables contraction in the effective
+semantics. Disabling paren protection removes that frontend flag and restores
+the selected `fast` contract. These are driver-argument observations, not a
+substitute for compiling/running the Elisa regression.
+
+Clang's current manual lists `-fexcess-precision=16` as the mode that suppresses
+excess precision for `_Float16`; the option vector now represents it as
+`NoExcessPrecision`, with assertions for both option classification and its
+typed-IR dump spelling. The paren-protection tests likewise assert that the
+dump reports effective `contract=off` and `protect_parens=on`. Clang 23.1.1
+accepts `16` for x86-64 and rejects it for AArch64, so target acceptance
+remains the frontend's responsibility.
+
+The audit also corrected profile transitions: `-ffp-model=precise` and
+`-fno-fast-math` preserve prior strict exception/rounding state, while fast
+profiles clear it. A reset to `-ffp-contract=on` now occurs only when an unsafe
+math umbrella had set the contract to `fast`; a prior strict model's `off`
+contract remains intact when no unsafe umbrella intervened. Three additional
+ordered-profile regressions cover strict→precise, strict→no-fast-math, and
+rounding-math→no-fast-math.
+
+The parser also now fails closed for `-Ofast` followed by a non-`aggressive`
+`-ffp-model`, rather than treating that later flag as a reliable cancellation
+of `-Ofast`; the explicitly compatible `-ffp-model=aggressive` sequence stays
+relaxed. Two more assertions cover both cases.
+
+Compiler-free checks pass: the fixture-manifest runner (20 tests), translator
+genericity checks (6 tests), quality-report/provenance checks (27 tests total),
+the 600-line source gate, and `git diff --check`. The added Elisa option-vector
+assertions have not been compiled or run: unrelated Stage0/Stage1 work remains
+active and system free memory was below the established 60% build floor at the
+last observation. Re-run those assertions only after the shared compiler lock
+is clear and sufficient memory headroom is available.
+
+Additional compiler-independent checks passed on 2026-10-06: upstream corpus
+provenance (9 tests), Wolf compile-command generation (8), bounded-process
+limits (15), quality-IR metrics (17), local-compiler setup safety, build-cache
+fingerprinting, test-support failure attribution, compiler-compatibility
+manifest validation (3), Stage1 freshness-guard fixture, and local stdlib-link
+checks. The Stage1 guard fixture's “current” result refers only to its
+temporary synthetic compiler pair: a separate read-only invocation on the
+actual pinned Stage1 product still rejects its source-revision/tree-hash
+provenance as stale (source `2691a64c`, artifacts from `8e08cd33`). Together
+with the runs above these validate scripts, manifests, provenance and source
+hygiene; they do not validate Elisa syntax, compile the current translator, or
+satisfy the fresh-toolchain/corpus acceptance gates.
+
+## Bit-field fail-closed guard — implementation staged, compiler verification pending — 2026-10-05
+
+Static review found that `TypedField` retains neither a bit width nor a bit
+offset, while record emission treats every `FieldDecl` as an ordinary Elisa
+field. That can silently change record layout and also makes bit-field places
+invalid for assignment-value helpers that take an address. The translator
+source now recognizes Clang's `FieldDecl.isBitfield` and records a generic
+unsupported diagnostic at the field; a C fixture exercises both bit-field
+reads and writes, and the core suite requires the diagnostic with empty
+generated stdout. README and S06 identify the precise unsupported boundary.
+
+Compiler-independent checks pass: the 600-line Elisa source gate, genericity
+guard, AST mutation-corpus self-test, core-suite shell syntax and
+`git diff --check`. The fresh translator has not run this diagnostic fixture:
+the shared Stage1 seed and unrelated compiler jobs are still active, with the
+host below the configured free-memory floor. Bit-field width/layout/access
+support remains an explicit S06 requirement, not completed by this guard.
+
+## Compiler-independent test timing hardening — 2026-10-05
+
+A loaded-host run exposed two fixed-duration assumptions in the process-safety
+regressions. The descendant-timeout case launched a child with a 100 ms runner
+deadline and treated a marker written after 500 ms as proof of survival; under
+slow process startup/sampling, that marker could be written before termination
+began. It now waits for the child to register readiness, has the child record
+receipt of the process-group `SIGTERM`, and cleans up the exact test-owned group
+if an assertion fails. The focused case passed three serial runs, and the full
+fixture-manifest suite passed all 20 tests.
+
+The initial-headroom/live-floor test similarly used a 200 ms child lifetime and
+could finish before the runner's first post-launch memory sample. The child
+now waits for the fake sampler to record that sample, making the test exercise
+the intended 85%-initial / 70%-live transition rather than scheduler timing.
+All 15 bounded-process tests pass. The 17 IR-metric and 10 provenance tests,
+the quality-report integration, translator-genericity and AST-mutation
+self-tests, Python byte-compilation, the 600-line Elisa source gate, and
+`git diff --check` also pass. These results verify test tooling and source
+invariants only; no Clang, translator, or Elisa compiler was invoked. The
+shared Stage1 seed is still active and host free memory sampled at 33%, so the
+fresh translator/compiler build and compiler-backed regression matrix remain
+deferred under the selected safety policy.
+
+## Continuation verification — 2026-10-06
+
+On the current translator worktree, the fixture-manifest runner passes all 21
+tests, including process-group timeout, host-memory-floor and output/RSS
+enforcement cases. The translator-genericity suite passes all 13 tests, and
+the source-line-limit gate confirms every maintained Elisa source file remains
+at or below 600 lines. `git diff --check` is clean.
+
+These checks validate the Python harnesses and source hygiene, not translation
+semantics. No Clang, translator, or Elisa compiler was launched. A fresh
+resource sample reported 33% host free memory while unrelated Stage0/Stage1
+compiler jobs were active, below the repository's 60% launch floor. Fresh
+translator build, generated-code execution, and corpus parity remain pending a
+safe local compiler window.
 
 ## Source-linked rewrite explanations — 2026-10-03
 

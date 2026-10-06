@@ -112,6 +112,56 @@ fi
 [ ! -s build/record_alignof_packed.stdout.elisa ]
 rg -q 'record alignment layout' build/record_alignof_packed.diagnostics
 
+if test_translator_bounded testdata/fixtures/bitfield_layout_unsupported.c \
+    > build/bitfield_layout_unsupported.stdout.elisa \
+    2> build/bitfield_layout_unsupported.diagnostics; then
+    echo "expected bit-field record layout and access to fail closed" >&2
+    exit 1
+fi
+[ ! -s build/bitfield_layout_unsupported.stdout.elisa ]
+rg -q 'bit-field field layout and access' build/bitfield_layout_unsupported.diagnostics
+
+if test_translator_bounded testdata/fixtures/long_double_unsupported.c \
+    > build/long_double_unsupported.stdout.elisa \
+    2> build/long_double_unsupported.diagnostics; then
+    echo "expected long double without a verified Elisa representation to fail closed" >&2
+    exit 1
+fi
+[ ! -s build/long_double_unsupported.stdout.elisa ]
+rg -q 'long double floating-point format and ABI' \
+    build/long_double_unsupported.diagnostics
+
+for long_double_fixture in \
+    long_double_array_unsupported \
+    long_double_project_header_unsupported \
+    long_double_pointer_arithmetic_unsupported \
+    long_double_pointer_deref_unsupported; do
+    if test_translator_bounded "testdata/fixtures/$long_double_fixture.c" \
+        > "build/$long_double_fixture.stdout.elisa" \
+        2> "build/$long_double_fixture.diagnostics"; then
+        echo "expected unsupported long double value use to fail closed: $long_double_fixture" >&2
+        exit 1
+    fi
+    [ ! -s "build/$long_double_fixture.stdout.elisa" ]
+    rg -q 'long double floating-point format and ABI' \
+        "build/$long_double_fixture.diagnostics"
+done
+
+test_translator_bounded testdata/fixtures/long_double_pointer_opaque.c \
+    > build/long_double_pointer_opaque.generated.elisa
+[ -s build/long_double_pointer_opaque.generated.elisa ]
+rg -q 'opaque_value' build/long_double_pointer_opaque.generated.elisa
+
+if test_translator_bounded testdata/fixtures/complex_floating_unsupported.c \
+    > build/complex_floating_unsupported.stdout.elisa \
+    2> build/complex_floating_unsupported.diagnostics; then
+    echo "expected complex floating-point representation to fail closed" >&2
+    exit 1
+fi
+[ ! -s build/complex_floating_unsupported.stdout.elisa ]
+rg -q 'complex floating-point representation and ABI' \
+    build/complex_floating_unsupported.diagnostics
+
 if test_translator_bounded testdata/fixtures/flexible_array_member_probe.c \
     > build/flexible_array_member_probe.stdout.elisa \
     2> build/flexible_array_member_probe.diagnostics; then
@@ -237,7 +287,7 @@ set -e
 
 test_translator_bounded --dump-typed-ir testdata/fixtures/simple.c > build/simple.dump.stdout.elisa 2> build/simple.typed-ir.dump
 cmp build/simple.idiomatic.elisa build/simple.dump.stdout.elisa
-rg -q '^typed-ir-v13$' build/simple.typed-ir.dump
+rg -q '^typed-ir-v16$' build/simple.typed-ir.dump
 rg -q '^counts ' build/simple.typed-ir.dump
 test_translator_bounded --dump-typed-ir testdata/fixtures/simple.c > build/simple.dump.stdout.second.elisa 2> build/simple.typed-ir.dump.second
 cmp build/simple.idiomatic.elisa build/simple.dump.stdout.second.elisa
@@ -253,6 +303,8 @@ rg -q ' kind=Label ' build/backward_goto.typed-ir.dump
 test_translator_bounded testdata/fixtures/generic_nonnull.c > build/generic_nonnull.generated.elisa
 rg -Fq 'def elisa_nonnull[T](value: mutable T&?) -> mutable T&:' build/generic_nonnull.generated.elisa
 [ "$(rg -c '^def elisa_nonnull\[' build/generic_nonnull.generated.elisa)" -eq 1 ]
+rg -U -q '^def elisa_nonnull\[T\]\(value: mutable T&\?\) -> mutable T&:\n    if value == null:\n        panic\("C null pointer assertion failed"\)\n    return value$' build/generic_nonnull.generated.elisa
+! rg -q '^        return zeroed$' build/generic_nonnull.generated.elisa
 rg -Fq 'elisa_nonnull(byte)' build/generic_nonnull.generated.elisa
 rg -Fq 'elisa_nonnull(number)' build/generic_nonnull.generated.elisa
 rg -Fq 'elisa_nonnull(sample)' build/generic_nonnull.generated.elisa
@@ -473,10 +525,15 @@ set -e
 test_translator_bounded testdata/fixtures/cpp_unordered_map.cpp > build/cpp_unordered_map.generated.elisa
 rg -q '^include "../cpp_lib/unordered_map.elisa"$' build/cpp_unordered_map.generated.elisa
 rg -q '^global mutable values: cpp::unordered_map\[i32, i32\] = zeroed$' build/cpp_unordered_map.generated.elisa
-rg -q 'values\[7\]\.value <- 42' build/cpp_unordered_map.generated.elisa
+rg -q '^global mutable wide_values: cpp::unordered_map\[u64, i32\] = zeroed$' build/cpp_unordered_map.generated.elisa
+rg -q 'values\[7\]\.slot\.value <- 42' build/cpp_unordered_map.generated.elisa
+rg -q 'wide_values\.find\(high_key\)' build/cpp_unordered_map.generated.elisa
+rg -q 'wide_values\.count\(high_key\)' build/cpp_unordered_map.generated.elisa
+rg -q 'wide_values\.erase\(high_key\)' build/cpp_unordered_map.generated.elisa
 rg -q 'values\.count\(7\)' build/cpp_unordered_map.generated.elisa
 rg -q 'values\.empty\(\)' build/cpp_unordered_map.generated.elisa
 rg -q 'values\.erase\(7\)' build/cpp_unordered_map.generated.elisa
+rg -q 'collisions\[24\]\.slot\.value <- 240' build/cpp_unordered_map.generated.elisa
 test_clangxx_bounded -std=gnu++11 testdata/fixtures/cpp_unordered_map.cpp -o build/cpp_unordered_map.native
 if [ -x "$stage1_bin" ] && [ -f "$stage1_runtime" ]; then
     (
@@ -493,6 +550,45 @@ if [ -x "$stage1_bin" ] && [ -f "$stage1_runtime" ]; then
 [ "$cpp_map_native_rc" -eq 45 ] && [ "$cpp_map_generated_rc" -eq 45 ]
 else
     echo "skipping stage1 C++ adapter check; local stage1 compiler/runtime is not built" >&2
+fi
+
+test_translator_bounded testdata/fixtures/cpp_unordered_map_unused_prototype.cpp \
+    > build/cpp_unordered_map_unused_prototype.generated.elisa
+! rg -Fq 'include "../cpp_lib/unordered_map.elisa"' \
+    build/cpp_unordered_map_unused_prototype.generated.elisa
+! rg -Fq 'cpp::unordered_map' \
+    build/cpp_unordered_map_unused_prototype.generated.elisa
+rg -q '^def main\(' build/cpp_unordered_map_unused_prototype.generated.elisa
+
+test_translator_bounded testdata/fixtures/cpp_unordered_map_reference_stability.cpp \
+    > build/cpp_unordered_map_reference_stability.generated.elisa
+rg -q 'values\[7\]\.slot\.value' \
+    build/cpp_unordered_map_reference_stability.generated.elisa
+rg -q 'retained_reference' \
+    build/cpp_unordered_map_reference_stability.generated.elisa
+rg -q 'retained_pointer' \
+    build/cpp_unordered_map_reference_stability.generated.elisa
+test_clangxx_bounded -std=gnu++11 \
+    testdata/fixtures/cpp_unordered_map_reference_stability.cpp \
+    -o build/cpp_unordered_map_reference_stability.native
+if [ -x "$stage1_bin" ] && [ -f "$stage1_runtime" ]; then
+    (
+        cd "$stage1_worktree"
+        ELISA_STAGE1_BIN="$stage1_bin" ELISA_RUNTIME_OBJ="$stage1_runtime" \
+            bash scripts/elisac_stage1.sh -emit exe -O0 \
+            -o "$root_dir/build/cpp_unordered_map_reference_stability.generated" \
+            "$root_dir/build/cpp_unordered_map_reference_stability.generated.elisa"
+    )
+    set +e
+    ./build/cpp_unordered_map_reference_stability.native
+    cpp_map_reference_stability_native_rc=$?
+    ./build/cpp_unordered_map_reference_stability.generated
+    cpp_map_reference_stability_generated_rc=$?
+    set -e
+    [ "$cpp_map_reference_stability_native_rc" -eq 0 ] && \
+        [ "$cpp_map_reference_stability_generated_rc" -eq 0 ]
+else
+    echo "skipping stage1 unordered_map reference-stability check; local stage1 compiler/runtime is not built" >&2
 fi
 
 test_clangxx_bounded -std=gnu++11 testdata/fixtures/cpp_template_direct.cpp -o build/cpp_template_direct.native
@@ -565,6 +661,8 @@ unordered_map_policy_diagnostic_count=$(rg -c 'unsupported C\+\+ unordered_map c
 [ "$unordered_map_policy_diagnostic_count" -ge 3 ]
 rg -q 'unsupported C\+\+ unordered_map mapped-value initialization' build/cpp_unordered_map_unsupported.diagnostics
 rg -q 'unsupported C\+\+ unordered_map key hashing' build/cpp_unordered_map_unsupported.diagnostics
+unordered_map_member_diagnostic_count=$(rg -c 'unsupported C\+\+ unordered_map member operation outside supported adapter' build/cpp_unordered_map_unsupported.diagnostics || true)
+[ "$unordered_map_member_diagnostic_count" -ge 3 ]
 
 test_translator_bounded --max-frontend-output-bytes 268435456 testdata/fixtures/cpp_unordered_map_find.cpp > build/cpp_unordered_map_find.generated.elisa
 rg -q '^[[:space:]]*found: mutable cpp::unordered_map_iterator\[i32, i32\] =' build/cpp_unordered_map_find.generated.elisa
@@ -604,8 +702,8 @@ rg -q 'unsupported unordered_map iterator element reference binding' build/cpp_u
 
 test_translator_bounded testdata/fixtures/cpp_unordered_map_pointer_values.cpp > build/cpp_unordered_map_pointer_values.generated.elisa
 rg -q '^global mutable names: cpp::unordered_map\[i32, u8&\?\] = zeroed$' build/cpp_unordered_map_pointer_values.generated.elisa
-rg -q 'names\[7\]\.value' build/cpp_unordered_map_pointer_values.generated.elisa
-rg -q 'if names\[8\]\.value != null:' build/cpp_unordered_map_pointer_values.generated.elisa
+rg -q 'names\[7\]\.slot\.value' build/cpp_unordered_map_pointer_values.generated.elisa
+rg -q 'if names\[8\]\.slot\.value != null:' build/cpp_unordered_map_pointer_values.generated.elisa
 test_clangxx_bounded -std=gnu++11 testdata/fixtures/cpp_unordered_map_pointer_values.cpp -o build/cpp_unordered_map_pointer_values.native
 if [ -x "$stage1_bin" ] && [ -f "$stage1_runtime" ]; then
     (
@@ -622,6 +720,37 @@ if [ -x "$stage1_bin" ] && [ -f "$stage1_runtime" ]; then
     [ "$cpp_map_pointer_native_rc" -eq 0 ] && [ "$cpp_map_pointer_generated_rc" -eq 0 ]
 else
     echo "skipping stage1 C++ pointer-mapped adapter check; local stage1 compiler/runtime is not built" >&2
+fi
+
+test_translator_bounded --max-frontend-output-bytes 268435456 \
+    testdata/fixtures/cpp_unordered_map_pointer_find.cpp \
+    > build/cpp_unordered_map_pointer_find.generated.elisa
+rg -q 'unordered_map_iterator\[i32, u8&\?\]' \
+    build/cpp_unordered_map_pointer_find.generated.elisa
+rg -q 'missing != names\.end\(\)' \
+    build/cpp_unordered_map_pointer_find.generated.elisa
+rg -q 'found\.first\(\)|found\.second\(\)|found == names\.end\(\)' \
+    build/cpp_unordered_map_pointer_find.generated.elisa
+test_clangxx_bounded -std=gnu++11 \
+    testdata/fixtures/cpp_unordered_map_pointer_find.cpp \
+    -o build/cpp_unordered_map_pointer_find.native
+if [ -x "$stage1_bin" ] && [ -f "$stage1_runtime" ]; then
+    (
+        cd "$stage1_worktree"
+        ELISA_STAGE1_BIN="$stage1_bin" ELISA_RUNTIME_OBJ="$stage1_runtime" \
+            bash scripts/elisac_stage1.sh -emit exe -O0 \
+            -o "$root_dir/build/cpp_unordered_map_pointer_find.generated" \
+            "$root_dir/build/cpp_unordered_map_pointer_find.generated.elisa"
+    )
+    set +e
+    ./build/cpp_unordered_map_pointer_find.native
+    cpp_map_pointer_find_native_rc=$?
+    ./build/cpp_unordered_map_pointer_find.generated
+    cpp_map_pointer_find_generated_rc=$?
+    set -e
+    [ "$cpp_map_pointer_find_native_rc" -eq 0 ] && [ "$cpp_map_pointer_find_generated_rc" -eq 0 ]
+else
+    echo "skipping stage1 pointer-valued unordered_map iterator check; local stage1 compiler/runtime is not built" >&2
 fi
 
 test_translator_bounded testdata/fixtures/unqualified_unordered_map.cpp > build/unqualified_unordered_map.generated.elisa
@@ -741,7 +870,7 @@ clang -Wl,-dead_strip -o build/const_aggregates.generated build/const_aggregates
 ./build/const_aggregates.native
 ./build/const_aggregates.generated
 
-./scripts/quality_report.sh testdata/upstream/cJSON/cjson_smoke.c build/cjson.quality.elisa > build/cjson.quality.txt
+./scripts/quality_report.sh testdata/fixtures/cjson_smoke.c build/cjson.quality.elisa > build/cjson.quality.txt
 rg -q '^invalid_ir_markers: 0$' build/cjson.quality.txt
 rg -q '^casts: [0-9]+$' build/cjson.quality.txt
 rg -q '^nonnull_assertions: [0-9]+$' build/cjson.quality.txt

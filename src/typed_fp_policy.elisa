@@ -1,0 +1,7 @@
+extend CTranslator:
+    # Algebraic rewrites that rely on relaxed IEEE rules (for example,
+    # reassociation or reciprocal substitution) must pass this gate. The
+    # current readability rules are integer-only where they remove arithmetic
+    # operands, so no floating rewrite is enabled merely by this predicate.
+    def typed_fp_relaxed_rewrites_enabled[@r](ctx: TypedContext[r]&) -> bool:
+        return ctx.mode == TypedTranslationMode.Idiomatic and ctx.floating_point_options.mode == ClangFloatingPointMode.Relaxed

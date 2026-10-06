@@ -6,6 +6,9 @@ extend CTranslator:
     def cli_default_frontend_json_value_limit() -> usize:
         return 1000000.usize()
 
+    def cli_default_input_source_limit() -> usize:
+        return 256.usize()
+
     def cli_parse_positive_usize(text: sview, result: mutable usize&) -> bool:
         return false if text.len == 0
         value: mutable i64 = 0
@@ -17,6 +20,13 @@ extend CTranslator:
             value <- value * 10 + digit
         return false if value == 0
         result <- value.usize()
+        return true
+
+    def cli_parse_input_source_limit(text: sview, result: mutable usize&) -> bool:
+        parsed: mutable usize = 0.usize()
+        return false if not cli_parse_positive_usize(text, &parsed)
+        return false if parsed > 4096.usize()
+        result <- parsed
         return true
 
     def cli_default_frontend_timeout_seconds() -> usize:

@@ -331,7 +331,7 @@ extend CTranslator:
             if expression.kind == TypedExprKind.Binary or expression.kind == TypedExprKind.Sequence:
                 return typed_ir_issue(sview("binary-operands", 0, -1), index) if not typed_ir_valid_ref(expression.lhs, expression_count, false) or not typed_ir_valid_ref(expression.rhs, expression_count, false) or expression.third != -1
                 if expression.kind == TypedExprKind.Sequence:
-                    return typed_ir_issue(sview("sequence-mode", 0, -1), index) if expression.value < 0 or expression.value > 15
+                    return typed_ir_issue(sview("sequence-mode", 0, -1), index) if expression.value < 0 or expression.value > TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_READONLY
                     if expression.value >= 1 and expression.value <= 4:
                         assignment: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
                         return typed_ir_issue(sview("increment-assignment", 0, -1), index) if assignment.kind != TypedExprKind.Binary or not sview_eq(assignment.text, sview("<-", 0, -1)) or assignment.rhs < 0 or assignment.rhs >= expression_count
@@ -342,6 +342,9 @@ extend CTranslator:
                     elif expression.value == 5:
                         assignment: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
                         return typed_ir_issue(sview("assignment-value", 0, -1), index) if assignment.kind != TypedExprKind.Binary or not sview_eq(assignment.text, sview("<-", 0, -1)) or assignment.rhs < 0 or assignment.rhs >= expression_count
+                    elif expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_MUTABLE or expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_READONLY:
+                        assignment: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
+                        return typed_ir_issue(sview("compound-literal-store", 0, -1), index) if assignment.kind != TypedExprKind.Binary or not sview_eq(assignment.text, sview("<-", 0, -1)) or assignment.rhs < 0 or assignment.rhs >= expression_count or expression.rhs != assignment.lhs
                     elif expression.value >= 6:
                         assignment: TypedExpr[r] = ctx.exprs[expression.lhs.usize()]
                         return typed_ir_issue(sview("compound-assignment-value", 0, -1), index) if assignment.kind != TypedExprKind.Binary or not sview_eq(assignment.text, sview("<-", 0, -1)) or assignment.rhs < 0 or assignment.rhs >= expression_count or expression.rhs != assignment.rhs
@@ -544,7 +547,18 @@ extend CTranslator:
             return typed_ir_issue(sview("global-initializer", 0, -1), index) if not typed_ir_valid_ref(global_value.initializer, expression_count, true)
 
         return TypedIRIssue[r]{kind: sview("", 0, 0), index: -1}
-    def typed_record_ir_issue[@r](ctx: mutable TypedContext[r]&, issue: TypedIRIssue[r]) -> void can[Memory.Allocate, Abort.Panic]:
+    def typed_record_ir_issue[@r](ctx: mutable TypedContext[r]&, issue: TypedIRIssue[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         source_copy: cstr = string_view_copy(sview(ctx.source, 0, -1)) can Memory.Allocate, Abort.Panic
         kind_copy: cstr = string_view_copy(issue.kind) can Memory.Allocate, Abort.Panic
-        ctx.diagnostics.push(TypedDiagnostic{category: sview("internal-ir", 0, -1), kind: sview(kind_copy, 0, -1), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0), source: sview(source_copy, 0, -1), canonical_source: ctx.canonical_source, spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), range_start_offset: -1, range_end_offset: -1, line: issue.index, column: 0, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0})
+        source_hash: TypedContentHash = typed_cached_source_content_hash(ctx, ctx.canonical_source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        unavailable_hash: TypedContentHash = TypedContentHash{value: 0, available: false}
+        ctx.diagnostics.push(TypedDiagnostic{
+            category: sview("internal-ir", 0, -1), kind: sview(kind_copy, 0, -1), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0),
+            translation_unit: ctx.canonical_source, translation_unit_content_hash: source_hash,
+            source: sview(source_copy, 0, -1), canonical_source: ctx.canonical_source, source_content_hash: source_hash,
+            spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_source_content_hash: unavailable_hash,
+            spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), spelling_included_from_content_hash: unavailable_hash,
+            expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_source_content_hash: unavailable_hash,
+            expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), expansion_included_from_content_hash: unavailable_hash,
+            range_start_offset: -1, range_end_offset: -1, line: issue.index, column: 0, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0
+        })

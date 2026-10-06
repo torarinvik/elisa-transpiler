@@ -3,10 +3,12 @@
   "feature_families": {
     "simple": ["basic_translation", "runtime_parity"],
     "rewrite_explanations": ["idiomatic_rewrites", "evaluation_order"],
+    "cast_representation": ["integer_semantics", "runtime_parity"],
     "recursive_global_effect_propagation": ["effects", "recursion", "runtime_parity"],
     "function_pointer_const_field_call": ["function_pointers", "pointers", "qualifiers"],
     "c_compatible_cpp": ["cpp_c_subset", "namespaces", "runtime_parity"],
     "cpp_overloads": ["cpp_overloads", "abi"],
+    "cpp_unordered_map_const_iterator": ["cpp_containers", "const_correctness", "iterators", "runtime_parity"],
     "readonly_nonnull_helper": ["nullability", "pointers"],
     "nullable_index_after_guard": ["nullability", "pointers"],
     "compound_assignment_once": ["evaluation_order", "operators"],
@@ -27,6 +29,7 @@
     "variadic_va_arg": ["abi", "variadics"],
     "variadic_promotions": ["integer_semantics", "variadics"],
     "designated_initializers": ["initialization", "records"],
+    "compound_literal_object_identity": ["arrays", "initialization", "pointers", "records", "runtime_parity"],
     "c_record_and_six_element_array": ["arrays", "initialization", "records"],
     "floating_edge_values": ["floating_point", "runtime_parity"],
     "c_record_pointer_difference_layout": ["abi", "pointers", "records"],
@@ -74,11 +77,39 @@
           "^        identity: i32 = value$",
           "^        folded: i32 = 7$",
           "^        effectful_identity: i32 = \\(next_value\\(\\) \\* 1\\)$",
+          "^        effectful_zero: i32 = \\(next_value\\(\\) \\* 0\\)$",
+          "^        effectful_equal_arms: i32 = \\(6 if next_value\\(\\) != 0 else 6\\)$",
           "^        volatile_identity: i32 = \\(volatile_value \\+ 0\\)$",
           "^        pruned_short_circuit: i32 = 0$",
           "^        selected_arm: i32 = 9$",
           "^        selected_nested: i32 = \\(value \\+ 2\\)$",
-          "^        effectful_condition: i32 = \\(value if next_value\\(\\) != 0 else 0\\)$"
+          "^        effectful_condition: i32 = \\(value if next_value\\(\\) != 0 else 0\\)$",
+          "^def signed_shift_by_zero\\(value: i32\\) -> i32:\\n    return \\(value << 0\\)$",
+          "^def unsigned_shift_by_zero\\(value: u32\\) -> u32:\\n    return value$",
+          "^def signed_right_shift_by_zero\\(value: i32\\) -> i32:\\n    return \\(value >> 0\\)$",
+          "^def unsigned_right_shift_by_zero\\(value: u32\\) -> u32:\\n    return value$"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
+      "name": "cast_representation",
+      "source": "testdata/fixtures/cast_representation.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "^def sign_extend_i32\\(value: i32\\) -> i64:\\n    return \\(value\\)\\.i64\\(\\)$",
+          "^def truncate_u64\\(value: u64\\) -> u32:\\n    return \\(value\\)\\.u32\\(\\)$"
         ],
         "no_trailing_whitespace": true,
         "max_consecutive_empty_lines": 2
@@ -188,6 +219,38 @@
       "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
     },
     {
+      "name": "cpp_unordered_map_const_iterator",
+      "source": "testdata/fixtures/cpp_unordered_map_const_iterator.cpp",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "unordered_map_const_iterator\\[i32, i32\\]",
+          "found.first\\(\\)",
+          "found.second\\(\\)",
+          "mutable_found == const_found",
+          "const_found == mutable_found",
+          "mutable_found != const_found",
+          "const_found != mutable_found",
+          "mutable_missing == read_only.end\\(\\)",
+          "const_missing == values.end\\(\\)",
+          "mutable_found != const_missing",
+          "const_missing != mutable_found"
+        ],
+        "not_contains_regex": ["set_second"],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang++", "-std=gnu++11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
       "name": "readonly_nonnull_helper",
       "source": "testdata/fixtures/readonly_nonnull.c",
       "timeout_seconds": 120,
@@ -196,6 +259,7 @@
         "contains_regex": [
           "^def elisa_nonnull_readonly\\[T\\]\\(value: T&\\?\\) -> T&:",
           "^    if value == null:\\n        panic\\(\\\"C null pointer assertion failed\\\"\\)$",
+          "^    return value$",
           "elisa_nonnull_readonly\\(value\\)\\[0\\]"
         ],
         "not_contains_regex": [
@@ -703,6 +767,32 @@
       "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
     },
     {
+      "name": "compound_literal_object_identity",
+      "source": "testdata/fixtures/compound_literals.c",
+      "timeout_seconds": 120,
+      "translate_argv": ["{translator}", "{source}"],
+      "generated_checks": {
+        "contains_regex": [
+          "__elisa_transpiler_compound_literal_mutable_",
+          "__elisa_transpiler_compound_literal_readonly_"
+        ],
+        "not_contains_regex": [
+          "\\x04",
+          "\\x05"
+        ],
+        "no_trailing_whitespace": true,
+        "max_consecutive_empty_lines": 2
+      },
+      "native_build_argv": ["clang", "-std=c11", "{source}", "-o", "{native}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
+      "native_run_argv": ["{native}"],
+      "elisa_run_argv": ["{elisa_executable}"],
+      "expected_exit_code": 0,
+      "compare": ["stdout", "stderr", "exit_code"],
+      "capture_files": ["{generated}", "{native}", "{object}", "{elisa_executable}"]
+    },
+    {
       "name": "c_record_and_six_element_array",
       "source": "testdata/fixtures/record_and_six_element_array.c",
       "timeout_seconds": 120,
@@ -733,6 +823,10 @@
         "contains_regex": [
           "quiet_nan: f64 = \\(0\\.0 / 0\\.0\\)",
           "positive_infinity: f64 = \\(1\\.0 / 0\\.0\\)",
+          "decimal_just_above_f32_midpoint: f32 = [^\\n]+",
+          "smallest_f32_subnormal: f32 = [^\\n]+",
+          "decimal_f64_nearest: f64 = [^\\n]+",
+          "smallest_f64_subnormal: f64 = [^\\n]+",
           "quiet_nan == quiet_nan",
           "quiet_nan != 0\\.0",
           "positive_infinity != 0\\.0"

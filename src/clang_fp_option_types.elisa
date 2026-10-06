@@ -1,0 +1,109 @@
+extend CTranslator:
+    const enum ClangFloatingPointMode of i8:
+        Strict
+        Relaxed
+        Unknown
+
+    const enum ClangFPBooleanSetting of i8:
+        Unknown
+        TargetDefault
+        Off
+        On
+
+    const enum ClangFPExceptionSetting of i8:
+        Unknown
+        TargetDefault
+        Ignore
+        MayTrap
+        Strict
+
+    const enum ClangFPRoundingSetting of i8:
+        Unknown
+        TargetDefault
+        Tonearest
+        Dynamic
+        Downward
+        Upward
+        TowardZero
+
+    const enum ClangFPContractSetting of i8:
+        Unknown
+        TargetDefault
+        Off
+        On
+        Fast
+        FastHonorPragmas
+
+    const enum ClangFPDenormalSetting of i8:
+        Unknown
+        TargetDefault
+        IEEE
+        PreserveSign
+        PositiveZero
+
+    const enum ClangFPComplexSetting of i8:
+        Unknown
+        TargetDefault
+        Basic
+        Improved
+        Full
+        Promoted
+
+    const enum ClangFPEvalSetting of i8:
+        Unknown
+        TargetDefault
+        Source
+        Double
+        Extended
+
+    const enum ClangFPExcessPrecisionSetting of i8:
+        Unknown
+        TargetDefault
+        NoExcessPrecision
+        Fast
+        Standard
+
+    const enum ClangFPDriverLinkEffect of i8:
+        TargetDefault
+        AutomaticIfLinked
+        ExplicitlyLinked
+        Suppressed
+        NotLinked
+        Unknown
+
+    const enum ClangFPModelProfile of i8:
+        Precise
+        Strict
+        Fast
+        Aggressive
+
+    struct ClangFPOptionVector:
+        mode: ClangFloatingPointMode
+        exception_behavior: ClangFPExceptionSetting
+        fenv_access: ClangFPBooleanSetting
+        rounding_mode: ClangFPRoundingSetting
+        rounding_math: ClangFPBooleanSetting
+        contract: ClangFPContractSetting
+        explicit_contract: ClangFPContractSetting
+        contract_explicitly_seen: bool
+        denormal: ClangFPDenormalSetting
+        denormal_fp32: ClangFPDenormalSetting
+        math_errno: ClangFPBooleanSetting
+        honor_nans: ClangFPBooleanSetting
+        honor_infinities: ClangFPBooleanSetting
+        finite_math_only: ClangFPBooleanSetting
+        signed_zeros: ClangFPBooleanSetting
+        associative_math: ClangFPBooleanSetting
+        reciprocal_math: ClangFPBooleanSetting
+        approximate_functions: ClangFPBooleanSetting
+        trapping_math: ClangFPBooleanSetting
+        cx_limited_range: ClangFPBooleanSetting
+        float_store: ClangFPBooleanSetting
+        strict_float_cast_overflow: ClangFPBooleanSetting
+        single_precision_constant: ClangFPBooleanSetting
+        protect_parens: ClangFPBooleanSetting
+        complex_arithmetic: ClangFPComplexSetting
+        eval_method: ClangFPEvalSetting
+        excess_precision: ClangFPExcessPrecisionSetting
+        driver_link_effect: ClangFPDriverLinkEffect
+        unknown_option_seen: bool

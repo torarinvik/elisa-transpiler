@@ -24,11 +24,13 @@ OUTCOMES = ("passed", "failed", "timed_out", "crashed", "resource_limited", "mon
 PROCESS_POLL_SECONDS = 0.02
 DEFAULT_STAGE_OUTPUT_BYTES = 64 * 1024 * 1024
 SYSTEM_MEMORY_SAMPLE_SECONDS = 1.0
+DEFAULT_MACOS_SYSTEM_MEMORY_FLOOR_PERCENT = 60
 FEATURE_FAMILIES = frozenset({
-    "abi", "arrays", "basic_translation", "control_flow", "cpp_c_subset",
+    "abi", "arrays", "basic_translation", "control_flow", "const_correctness",
+    "cpp_c_subset", "cpp_containers",
     "cpp_overloads", "effects", "enums", "evaluation_order", "expressions",
     "floating_point", "function_pointers", "idiomatic_rewrites",
-    "initialization", "integer_semantics", "namespaces", "nullability",
+    "initialization", "integer_semantics", "iterators", "namespaces", "nullability",
     "operators", "pointers", "qualifiers", "records", "recursion",
     "runtime_parity", "typedefs", "variadics",
 })
@@ -597,7 +599,7 @@ def main():
     parser.add_argument("--max-rss-kb", type=bounded_process.positive_int, help="per-stage aggregate process-group RSS cap, with macOS physical-footprint monitoring")
     default_system_memory_floor = os.environ.get("ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT")
     if sys.platform == "darwin" and default_system_memory_floor is None:
-        default_system_memory_floor = "41"
+        default_system_memory_floor = str(DEFAULT_MACOS_SYSTEM_MEMORY_FLOOR_PERCENT)
     parser.add_argument("--min-system-free-percent", type=bounded_process.percentage, default=default_system_memory_floor, help="macOS host free-memory floor enforced before and during each stage")
     parser.add_argument(
         "--system-memory-poll-seconds",

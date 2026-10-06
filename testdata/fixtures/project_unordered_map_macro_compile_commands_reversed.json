@@ -1,0 +1,24 @@
+[
+  {
+    "directory": ".",
+    "arguments": [
+      "clang++",
+      "-std=gnu++11",
+      "-I",
+      "testdata/fixtures/project_unordered_map_macro",
+      "testdata/fixtures/project_unordered_map_macro/keyboard.cpp"
+    ],
+    "file": "testdata/fixtures/project_unordered_map_macro/keyboard.cpp"
+  },
+  {
+    "directory": ".",
+    "arguments": [
+      "clang++",
+      "-std=gnu++11",
+      "-I",
+      "testdata/fixtures/project_unordered_map_macro",
+      "testdata/fixtures/project_unordered_map_macro/main.cpp"
+    ],
+    "file": "testdata/fixtures/project_unordered_map_macro/main.cpp"
+  }
+]

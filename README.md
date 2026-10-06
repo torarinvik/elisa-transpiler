@@ -76,23 +76,45 @@ distinguishes LP64 from LLP64 (for example, Windows `long` is 32-bit while
 the command-line translator fails closed with the observed target macros;
 this is not yet a complete target data-layout model for records, bit-fields,
 address spaces, or calling conventions.
+The `f32`/`f64` path is accepted only when Clang's target macros establish
+binary32/binary64 sizes and value ranges. Long double, C complex types,
+extended-float types, and non-binary32/binary64 target float formats are
+diagnosed rather than silently narrowed; opaque pointer-only declarations are
+retained, while value access and pointer arithmetic on unsupported pointees
+are rejected.
+The translator source now rejects records declaring bit-fields rather than
+emitting them as ordinary fields; that guard awaits fresh compiler-backed
+verification. Bit-field width, layout, reads, writes, and ABI support remain
+unimplemented.
 
 The translator also owns a small, demand-driven C++ compatibility library under
-`cpp_lib/`. When Clang reports a supported `std::unordered_map<K, V>` spelling,
-the generated Elisa unit includes `cpp_lib/unordered_map.elisa` and lowers the
-type to the generic `cpp::unordered_map[K, V]`. The verified subset supports
+`cpp_lib/`. A supported `std::unordered_map<K, V>` type is lowered to the
+generic `cpp::unordered_map[K, V]`; the generated unit requests the adapter
+only when that map or its iterator type is actually emitted, rather than for
+every AST mention. An unused-prototype regression covers this distinction but
+is awaiting fresh compiler-backed verification. The verified subset supports
 integer or enum keys and integer, floating-point, or nullable object-pointer
 mapped values. Its current operations include `operator[]`, `clear`, `size`,
 `empty`, `contains`, `count`, key-based `erase`, and `find`/`end`. Iterator
 `first` and `second` projections are by value; writes to `second` are lowered
-through the adapter. Address-taking and C++ reference binding to these
-projections are rejected because the current dictionary-backed representation
-does not provide those references. Additional hash/equality/allocator template
+through the adapter. Address-taking and C++ reference binding to iterator
+`first`/`second` projections are rejected because those iterator projections
+are currently read by value. For `operator[]`, mapped values now live in stable
+per-map arena slots, with erased slots recycled and `clear` resetting the slot
+arena. A retained-reference-and-pointer parity test is implemented but awaits
+a fresh translator/compiler run; nontrivial mapped-value destruction remains
+unsupported. Additional hash/equality/allocator template
 arguments are rejected rather than silently ignored, as are unsupported key
 hashing and mapped-value initialization cases. This adapter is intentionally
 generic and is not a cJSON- or Wolf4SDL-specific table. The Elisa compiler
 provides only the language-level `Index` protocol and backend support for `[]`;
 the C++ library emulation does not belong in `Elisa-compiler/elisacore_std`.
+The current source also adds method-arity checks, routes const-map `find`/`end`
+through a separate read-only iterator, and distinguishes key-based `erase` from
+iterator/range overloads. These additions and their regressions await fresh
+compiler-backed verification.
+See [`docs/cpp_library_support.md`](docs/cpp_library_support.md) for the
+method-by-method contract, lifetime limits and verification status.
 
 In project mode, translation-unit modules and the manifest are generated under
 transaction-specific temporary names. The manifest is published last, and
@@ -191,6 +213,31 @@ C++ syntax outside the C-compatible subset—such as classes, most templates, an
 standard-library containers other than the translator-owned compatibility
 adapters—still receives a diagnostic rather than a source-specific workaround.
 
+## C++ support matrix
+
+“C++ source accepted” means the selected constructs pass through the same
+typed, fail-closed lowering as C; it does not mean general C++ language or ABI
+support. The effective Clang command controls language mode, target and
+preprocessor configuration. Direct `.cc`, `.cpp`, `.cxx` and `.C` inputs select
+`clang++` when no compilation-database command overrides that choice.
+
+| Area | Current coverage | Boundary / verification state |
+| --- | --- | --- |
+| Procedural, C-style C++ | Partial; supported C constructs can be translated from C++ units when Clang resolves them into supported forms. | Each operation remains subject to the C semantic/ABI gates above; the Wolf4SDL project is exploratory, not accepted end-to-end. |
+| Functions and overloads | Partial; Clang-selected local overloads and selected cross-unit same-arity function overloads have generic lowering and fixtures. | Namespace/using resolution, references, operators, template overload sets and general overload-family coverage remain open. |
+| Types and templates | Partial; typedef/using aliases and a bounded set of explicit class-template specializations are retained. | This is not general class, member, dependent-template, partial-specialization or parameter-pack support. |
+| Object model | Unsupported unless a construct is independently listed as supported. | Constructors/destructors, RAII, inheritance, virtual dispatch, lambdas and exceptions are not generally lowered; unsupported forms must fail closed. |
+| `std::unordered_map` adapter | Partial, translator-owned in `cpp_lib/`; integral/enum keys, selected scalar or nullable object-pointer values, `operator[]`, membership/removal/clear/size, and a limited `find`/`end` iterator surface. | Extra template policies, general iteration, full reference/lifetime semantics and other standard-library types are unsupported. Current source changes still require fresh compiler-backed verification. |
+| Other standard-library APIs | No adapter coverage claimed. | The optional inih C++ wrapper's strings/containers/algorithms and stream APIs are a future corpus challenge, not part of the current C smoke test. |
+
+The local Stage0/Stage1 products recorded in
+[`docs/compiler_compatibility.json`](docs/compiler_compatibility.json) are stale
+relative to their isolated compiler sources, and current translator validation
+is marked pending. Therefore, historical fixture results do not certify the
+current dirty translator/compiler pair; see
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) and
+[`docs/execution_status.md`](docs/execution_status.md) for the evidence ledger.
+
 The current work covers the high-value, backend-compatible portion of the
 translator improvement roadmap. The remaining deep items—full macro expansion,
 complete pointer arithmetic, aggregate variadic extraction and complete
@@ -219,8 +266,20 @@ standard library; this keeps source includes independent of the worktree's
 location. Set `ELISA_TRANSLATOR_COMPILER_WORKTREES`, `ELISA_STAGE0_WORKTREE`,
 `ELISA_STAGE1_WORKTREE`, or `ELISA_STAGE1_STDLIB` to select another isolated
 layout. A pre-existing conflicting `src/.compiler_std` path is left untouched
-and reported as an error. Set `ELISAC_BIN` only when deliberately testing a
-different compiler.
+and reported as an error. On macOS, setup requires more than 60% host free
+memory for Stage0/runtime work, matching the canonical test driver's live
+floor. The large Stage1 seed requires more than 80% free memory before launch
+by default, based on its previously measured multi-gigabyte peak; while it
+runs, the existing 60% live floor remains active. Override the initial gate
+with `ELISA_SETUP_SEED_MIN_INITIAL_SYSTEM_FREE_PERCENT` only when you have
+independently confirmed adequate headroom. Setup always reseeds Stage1 from
+the Stage0 it just built, then verifies/rebuilds the runtime using its content
+digest; it refuses before the Stage0 build when another live Stage1 seed lock
+is held. The Stage0 Go compiler build defaults to one package worker; tune it with
+`ELISA_STAGE0_GO_BUILD_PARALLELISM` (1–128) only when the host has adequate
+headroom. The free-memory threshold can be explicitly changed with
+`ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`. Set `ELISAC_BIN` only when deliberately
+testing a different compiler.
 
 ## Compiler freshness
 
@@ -269,8 +328,9 @@ the translator executable only when hashes of its Elisa sources, required
 standard-library inputs, compiler and Clang still match the recorded build;
 the selected tests themselves always run.
 
-The script first runs bounded self-tests for the build cache, manifest runner,
-and selected-compiler standard-library link. The cache tests reject stale source fingerprints, modified
+The script first runs self-tests for compiler-setup resource validation,
+build-cache freshness, manifest execution, and the selected-compiler
+standard-library link. The cache tests reject stale source fingerprints, modified
 executables, and non-executable outputs. Manifest tests cover argv execution,
 separate stdout/stderr capture, expected nonzero exits, mismatches,
 timeouts/process-tree cleanup, crashes, skips, unsupported translations,
@@ -295,16 +355,24 @@ semantics-neutral identifier rename and verifies identical normalized Elisa;
 it also verifies that truncated C fails without partial output.
 
 Pass `--diagnostics-json` to emit deterministic machine-readable translation
-diagnostics on stderr. Schema version 3 records include the semantic category
+diagnostics on stderr. Schema-v5 records include the semantic category
 and Clang node kind, the rejected node's Clang type when available, an explicit
 `required_capability` for specific unsupported features, source and canonical
 paths, half-open source byte ranges, primary coordinates, and any available
-macro spelling/expansion origins.
+macro spelling/expansion origins. The contract identifies the owning
+translation unit separately from the primary source and provides nullable
+FNV-1a-64 hashes for the unit, primary source and available spelling,
+expansion, and immediate-include files; unavailable hashes are JSON `null`.
 Unavailable type/capability values are empty strings; generic unsupported
 constructs are categorized by their Clang AST kind (expression, statement,
 declaration, or frontend) and do not claim a specific missing capability.
 Human-readable diagnostics remain the default and include type/capability
 context when known.
+
+`--dump-typed-ir` includes these diagnostics in its versioned line-oriented
+`typed-ir-v16` output. Paths and free-form text remain hex-encoded; available
+content hashes are 16-digit lowercase FNV-1a-64 values and unavailable hashes
+are `null`.
 
 Pass `--source-map-json PATH` to write an opt-in source-map file for a
 single-file translation or a project. Generated offsets address UTF-8 Elisa output bytes;
@@ -313,7 +381,9 @@ primary, macro-spelling and macro-expansion origins, immediate include edges,
 and any synthesized-node reason. The `sources` table includes each translation
 unit even if it has no emitted origins, plus deterministic FNV-1a-64 content
 hashes for readable physical files (useful for cache invalidation, not
-cryptographic verification). With `--output-dir`, PATH must
+cryptographic verification). Schema version 3 repeats the corresponding
+content hash on each primary, spelling, and expansion range, including a
+separate hash for its immediate include edge. With `--output-dir`, PATH must
 be inside that directory; the resulting JSON contains one map per translated
 unit and is published transactionally with the modules and project manifest.
 Symlinks resolving to an input, generated module or project manifest are
@@ -323,7 +393,7 @@ Source-map capture is disabled by default.
 To inspect readability metrics for any translated C file:
 
 ```sh
-./scripts/quality_report.sh testdata/upstream/cJSON/cjson_smoke.c \
+./scripts/quality_report.sh testdata/fixtures/cjson_smoke.c \
   build/cjson.quality.elisa
 ```
 
@@ -337,9 +407,16 @@ compiler capacity/sound-subset boundary, not a successful translation: no
 linkable object is produced in that case. The acceptance suite remains the
 authoritative end-to-end check until stage-1 can compile the emitter as a whole.
 
-The upstream test source is vendored under
-`testdata/upstream/inih` at commit `26254ee` (release `r62`).
-The cJSON source is vendored under `testdata/upstream/cJSON` at tag `v1.7.19`.
+Corpus snapshots, source/license identities and native test contexts are
+recorded in `testdata/upstream/corpus_manifest.json`. Run
+`python3 scripts/test_upstream_provenance.py` to validate the pins and local
+corpus files without invoking either Elisa compiler. The inih source is pinned
+to upstream r62 and its upstream tree exactly matches the vendored tree. cJSON is
+tracked as a submodule at `v1.7.19`; Wolf4SDL is tracked as an optional
+exploratory submodule at its recorded commit. Initialize both with
+`git submodule update --init --recursive` after a normal clone, or clone with
+`--recurse-submodules`. The upstream suite requires cJSON; the Wolf checkout is
+not yet part of the acceptance suite.
 
 ## Project translation
 
@@ -351,6 +428,16 @@ an `elisa_project.elisa` manifest containing the shared runtime prelude:
   --compile-commands build/compile_commands.json \
   --output-dir build/elisa-project
 ```
+
+The database must be a JSON array of object entries, each with a string
+`directory` and nonempty string `file` field. An empty `directory` uses the
+translator's current working directory. Malformed JSON, a non-array root, or a
+row without either field is rejected before any supplied direct inputs are
+translated or project output is published. Each row must also provide a usable
+`arguments` array or `command`;
+unsupported compiler-command syntax is rejected during database preflight,
+before Clang is launched for any project unit, and diagnosed against its source
+entry.
 
 Per-unit C++ mode follows Clang's effective command-line configuration (including
 `-x` overrides). Supported non-inline namespace-scope const object types with
@@ -438,14 +525,24 @@ root field before projection; optional nested Clang fields remain version-
 tolerant. The projected AST is also
 limited to 1,000,000 JSON values by default; set
 `--max-frontend-json-values N` to another positive limit. The translator counts
-values before constructing its JSON DOM, so an oversized AST is rejected
-before those arena allocations. These limits do not constitute a total
-process-tree RSS bound. Pass `--frontend-stats` to report raw and
+values before constructing its JSON DOM, so an oversized AST or compilation
+database is rejected before those arena allocations. These limits do not
+constitute a total process-tree RSS bound. Pass `--frontend-stats` to report raw and
 projected AST JSON byte counts, JSON-arena payload bytes, and projected JSON
 value count to stderr for each input; object member names are not counted as
 values. Pass `--explain-rewrites` to report applied idiomatic typed-IR
 readability rewrites with proof tags and source ranges, plus declined rewrite
 candidates with reasons, to stderr without changing generated stdout.
+
+Project inputs are limited to 256 source paths/compilation-database rows by
+default. Set `--max-input-sources N` to a positive limit up to 4096. Direct
+input paths and raw `compile_commands.json` rows share this budget; database
+rows count before duplicate-path elimination. The strict JSON preflight counts
+root-array entries and enforces the database row cap before allocating its DOM;
+the parsed row count is checked again before paths, response files, or duplicate
+conflicts are processed. This limits project-table growth and quadratic
+duplicate analysis. The JSON byte/value caps remain the bounds on reading and
+parsing the database itself.
 
 Each Clang frontend child has a 600-second monotonic deadline by default,
 including target-macro queries and AST extraction. Set

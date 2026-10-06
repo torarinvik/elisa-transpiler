@@ -1,0 +1,7 @@
+[
+  {
+    "directory": ".",
+    "file": "testdata/fixtures/simple.c",
+    "command": "clang\u0000 -std=c11 testdata/fixtures/simple.c"
+  }
+]

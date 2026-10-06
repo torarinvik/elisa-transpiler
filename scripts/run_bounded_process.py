@@ -23,23 +23,32 @@ from collections.abc import Sequence
 
 RSS_HEADROOM_MAX_KB = 65536
 RSS_HEADROOM_FRACTION_DIVISOR = 8
+PROCESS_SAMPLE_TIMEOUT_SECONDS = 1.0
 FOOTPRINT_SAMPLE_SECONDS = 0.1
+FOOTPRINT_SAMPLE_TIMEOUT_SECONDS = 10.0
 FOOTPRINT_HEADROOM_FRACTION_DIVISOR = 4
 SYSTEM_MEMORY_SAMPLE_SECONDS = 1.0
+SYSTEM_MEMORY_SAMPLE_TIMEOUT_SECONDS = 5.0
 
 
 class MonitorError(RuntimeError):
     pass
 
 
-def process_group_stats(group_id: int) -> tuple[int, bool, list[int]]:
+def process_group_stats(
+    group_id: int, timeout_seconds: float = PROCESS_SAMPLE_TIMEOUT_SECONDS,
+) -> tuple[int, bool, list[int]]:
     """Return (sum RSS in KiB, has live member, live PIDs) for a process group."""
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,rss=,stat="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,pgid=,rss=,stat="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise MonitorError(f"process-list sampling exceeded {timeout_seconds:g} seconds") from error
     if result.returncode != 0:
         detail = result.stderr.strip() or f"ps exited {result.returncode}"
         raise MonitorError(detail)
@@ -67,7 +76,9 @@ def process_group_stats(group_id: int) -> tuple[int, bool, list[int]]:
     return rss_total, live, pids
 
 
-def process_group_footprint_bytes(pids: Sequence[int]) -> int:
+def process_group_footprint_bytes(
+    pids: Sequence[int], timeout_seconds: float = FOOTPRINT_SAMPLE_TIMEOUT_SECONDS,
+) -> int:
     """Return macOS physical footprint for the listed live processes."""
     if not pids:
         return 0
@@ -80,10 +91,10 @@ def process_group_footprint_bytes(pids: Sequence[int]) -> int:
             check=False,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as error:
-        raise MonitorError("footprint sampling exceeded 10 seconds") from error
+        raise MonitorError(f"footprint sampling exceeded {timeout_seconds:g} seconds") from error
     if result.returncode != 0:
         detail = result.stderr.strip() or f"footprint exited {result.returncode}"
         raise MonitorError(detail)
@@ -97,14 +108,20 @@ def process_group_footprint_bytes(pids: Sequence[int]) -> int:
     return sum(int(value) for value in values)
 
 
-def process_group_breakdown(group_id: int) -> str:
+def process_group_breakdown(
+    group_id: int, timeout_seconds: float = PROCESS_SAMPLE_TIMEOUT_SECONDS,
+) -> str:
     """Describe each live owned process to attribute aggregate RSS failures."""
-    result = subprocess.run(
-        ["ps", "-axo", "pid=,pgid=,rss=,stat=,comm="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,pgid=,rss=,stat=,comm="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return f"unavailable (process breakdown sampling exceeded {timeout_seconds:g} seconds)"
     if result.returncode != 0:
         detail = result.stderr.strip() or f"ps exited {result.returncode}"
         return f"unavailable ({detail})"
@@ -134,7 +151,7 @@ def parse_system_memory_free_percent(output: str) -> int:
     return percentage
 
 
-def system_memory_free_percent() -> int:
+def system_memory_free_percent(timeout_seconds: float = SYSTEM_MEMORY_SAMPLE_TIMEOUT_SECONDS) -> int:
     """Return the host-wide free-memory estimate reported by macOS."""
     if sys.platform != "darwin":
         raise MonitorError("host-wide memory-floor monitoring is supported only on macOS")
@@ -144,10 +161,10 @@ def system_memory_free_percent() -> int:
             check=False,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as error:
-        raise MonitorError("memory_pressure sampling exceeded 5 seconds") from error
+        raise MonitorError(f"memory_pressure sampling exceeded {timeout_seconds:g} seconds") from error
     if result.returncode != 0:
         detail = result.stderr.strip() or f"memory_pressure exited {result.returncode}"
         raise MonitorError(detail)
@@ -242,6 +259,7 @@ def run(
     min_system_free_percent: int | None = None,
     system_memory_poll_seconds: float = SYSTEM_MEMORY_SAMPLE_SECONDS,
     quiet_success_report: bool = False,
+    require_initial_system_free_percent: int | None = None,
 ) -> int:
     if os.name != "posix":
         print("run_bounded_process: POSIX process groups are required", file=sys.stderr)
@@ -252,13 +270,27 @@ def run(
 
     minimum_system_free_percent = 100
     last_system_memory_sample = 0.0
-    if min_system_free_percent is not None:
+    if min_system_free_percent is not None or require_initial_system_free_percent is not None:
         try:
             minimum_system_free_percent = system_memory_free_percent()
         except MonitorError as error:
             print(f"run_bounded_process: cannot verify host memory before launch: {error}", file=sys.stderr)
             return 2
-        if minimum_system_free_percent <= min_system_free_percent:
+        if (
+            require_initial_system_free_percent is not None
+            and minimum_system_free_percent <= require_initial_system_free_percent
+        ):
+            print(
+                "run_bounded_process: refusing to start command: host system memory free "
+                f"percentage is {minimum_system_free_percent}%, initial headroom must be above "
+                f"{require_initial_system_free_percent}%",
+                file=sys.stderr,
+            )
+            return 125
+        if (
+            min_system_free_percent is not None
+            and minimum_system_free_percent <= min_system_free_percent
+        ):
             print(
                 "run_bounded_process: refusing to start command: host system memory free "
                 f"percentage is {minimum_system_free_percent}%, must stay above "
@@ -266,7 +298,8 @@ def run(
                 file=sys.stderr,
             )
             return 125
-        last_system_memory_sample = time.monotonic()
+        if min_system_free_percent is not None:
+            last_system_memory_sample = time.monotonic()
 
     try:
         process = subprocess.Popen(command, start_new_session=True)
@@ -287,8 +320,14 @@ def run(
     limit_reason = ""
     try:
         while True:
-            rss_kb, group_live, pids = process_group_stats(group_id)
+            remaining_seconds = max(0.001, deadline - time.monotonic())
+            rss_kb, group_live, pids = process_group_stats(
+                group_id, min(PROCESS_SAMPLE_TIMEOUT_SECONDS, remaining_seconds),
+            )
             peak_rss_kb = max(peak_rss_kb, rss_kb)
+            if group_live and time.monotonic() >= deadline:
+                limit_reason = f"deadline exceeded ({timeout_seconds:g}s)"
+                break
             if rss_kb >= rss_threshold_kb:
                 limit_reason = (
                     f"aggregate RSS {rss_kb} KiB reached safety threshold "
@@ -297,7 +336,10 @@ def run(
                 break
             now = time.monotonic()
             if footprint_available and group_live and now - last_footprint_sample >= FOOTPRINT_SAMPLE_SECONDS:
-                footprint_bytes = process_group_footprint_bytes(pids)
+                sample_timeout = max(0.001, deadline - time.monotonic())
+                footprint_bytes = process_group_footprint_bytes(
+                    pids, min(FOOTPRINT_SAMPLE_TIMEOUT_SECONDS, sample_timeout),
+                )
                 footprint_kb = (footprint_bytes + 1023) // 1024
                 peak_footprint_kb = max(peak_footprint_kb, footprint_kb)
                 last_footprint_sample = time.monotonic()
@@ -312,7 +354,10 @@ def run(
                 and group_live
                 and now - last_system_memory_sample >= system_memory_poll_seconds
             ):
-                free_percent = system_memory_free_percent()
+                sample_timeout = max(0.001, deadline - time.monotonic())
+                free_percent = system_memory_free_percent(
+                    min(SYSTEM_MEMORY_SAMPLE_TIMEOUT_SECONDS, sample_timeout),
+                )
                 minimum_system_free_percent = min(minimum_system_free_percent, free_percent)
                 last_system_memory_sample = time.monotonic()
                 if free_percent <= min_system_free_percent:
@@ -339,31 +384,42 @@ def run(
                         file=sys.stderr,
                     )
                 return return_code if return_code >= 0 else 128 - return_code
-            time.sleep(poll_seconds)
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds > 0:
+                time.sleep(min(poll_seconds, remaining_seconds))
     except MonitorError as error:
-        # A child can exit between `ps` and `footprint`. Recheck before turning
-        # a transient stale-PID report into a termination request; this also
-        # avoids signaling a process group whose leader has already been reaped.
-        try:
-            rss_kb, group_live, _ = process_group_stats(group_id)
-            peak_rss_kb = max(peak_rss_kb, rss_kb)
-        except MonitorError:
-            group_live = True
-        if not group_live and process.poll() is not None:
-            return_code = process.wait()
-            if not quiet_success_report or return_code != 0:
-                footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
-                system_memory_report = (
-                    f"; minimum host free memory {minimum_system_free_percent}%"
-                    if min_system_free_percent is not None else ""
+        if time.monotonic() >= deadline:
+            limit_reason = f"deadline exceeded ({timeout_seconds:g}s)"
+        else:
+            # A child can exit between `ps` and `footprint`. Recheck before
+            # treating a transient stale-PID report as a reason to terminate.
+            try:
+                remaining_seconds = max(0.001, deadline - time.monotonic())
+                rss_kb, group_live, _ = process_group_stats(
+                    group_id, min(PROCESS_SAMPLE_TIMEOUT_SECONDS, remaining_seconds),
                 )
-                print(
-                    f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
-                    f"{footprint_report}{system_memory_report}",
-                    file=sys.stderr,
-                )
-            return return_code if return_code >= 0 else 128 - return_code
-        limit_reason = f"could not monitor owned process group: {error}"
+                peak_rss_kb = max(peak_rss_kb, rss_kb)
+            except MonitorError:
+                group_live = True
+            if not group_live and process.poll() is not None:
+                return_code = process.wait()
+                if not quiet_success_report or return_code != 0:
+                    footprint_report = f"; peak physical footprint {peak_footprint_kb} KiB" if footprint_available else ""
+                    system_memory_report = (
+                        f"; minimum host free memory {minimum_system_free_percent}%"
+                        if min_system_free_percent is not None else ""
+                    )
+                    print(
+                        f"run_bounded_process: peak process-group RSS {peak_rss_kb} KiB"
+                        f"{footprint_report}{system_memory_report}",
+                        file=sys.stderr,
+                    )
+                return return_code if return_code >= 0 else 128 - return_code
+            limit_reason = (
+                f"deadline exceeded ({timeout_seconds:g}s)"
+                if time.monotonic() >= deadline
+                else f"could not monitor owned process group: {error}"
+            )
     except KeyboardInterrupt:
         terminate_group(group_id, process)
         return 130
@@ -394,6 +450,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=percentage,
         default=os.environ.get("ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT"),
     )
+    parser.add_argument(
+        "--require-initial-system-free-percent",
+        type=percentage,
+        help="refuse launch unless host free memory initially exceeds this percentage; live monitoring uses --min-system-free-percent",
+    )
     parser.add_argument("--system-memory-poll-seconds", type=positive_float, default=SYSTEM_MEMORY_SAMPLE_SECONDS)
     parser.add_argument(
         "--quiet-success-report",
@@ -413,6 +474,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments.min_system_free_percent,
         arguments.system_memory_poll_seconds,
         arguments.quiet_success_report,
+        arguments.require_initial_system_free_percent,
     )
 
 

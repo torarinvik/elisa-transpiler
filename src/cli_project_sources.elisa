@@ -1,0 +1,199 @@
+extend CTranslator:
+    # Filesystem paths and argv elements are NUL-terminated at the OS boundary.
+    # Reject JSON strings containing an embedded NUL instead of allowing a
+    # truncated path/argument to differ from the database's spelling.
+    def cli_view_contains_nul(value: sview) -> bool:
+        for index in 0..<value.len |value|:
+            return true if string_view_index(value, index) == 0
+        return false
+
+    # Keep compile_commands.json's `arguments` as an array of decoded strings.
+    # Do not flatten it into command text: argv boundaries are semantic data.
+    def cli_compile_arguments_valid[@r](arguments: JsonValueHandle[r]) -> bool:
+        return false if not json_handle_is_array(arguments)
+        count: i64 = json_handle_array_len(arguments)
+        return false if count <= 0
+        for index in 0..<count |arguments|:
+            argument_value: JsonValueHandle[r] = ast_array_item(arguments, index)
+            return false if not json_handle_is_string(argument_value)
+            argument: sview = ast_string(argument_value)
+            return false if index == 0 and argument.len == 0
+            for byte_index in 0..<argument.len:
+                return false if string_view_index(argument, byte_index) == 0
+        return true
+
+    def cli_compile_command[@r](entry: JsonValueHandle[r]) -> sview @r can[Memory.Allocate, Abort.Panic]:
+        arguments: JsonValueHandle[r] = ast_field(entry, sview("arguments", 0, -1))
+        return sview("", 0, 0) if cli_compile_arguments_valid(arguments)
+        return ast_string(ast_field(entry, sview("command", 0, -1)))
+
+    def cli_compile_arguments_copy[@r](arguments: JsonValueHandle[r]) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+        copied: mutable darray[sview] = []
+        count: i64 = json_handle_array_len(arguments)
+        return copied if count <= 0
+        for index in 0..<count |copied, arguments|:
+            view: sview = ast_string(ast_array_item(arguments, index))
+            owned: cstr = string_view_copy(view) can Memory.Allocate, Abort.Panic
+            copied.push(sview(owned, 0, -1))
+        return copied
+
+    def cli_owned_compile_view(view: sview) -> sview can[Memory.Allocate, Abort.Panic]:
+        return sview("", 0, 0) if view.len == 0
+        owned: cstr = string_view_copy(view) can Memory.Allocate, Abort.Panic
+        return sview(owned, 0, -1)
+
+    def cli_compile_argument_at(arguments: darray[sview], argument_index: i64) -> sview:
+        return sview("", 0, 0) if argument_index < 0 or argument_index.usize() >= arguments.count
+        return arguments[argument_index.usize()]
+
+    def cli_compile_arguments_equal(left: darray[sview], right: darray[sview]) -> bool:
+        left_count: i64 = left.count.i64()
+        right_count: i64 = right.count.i64()
+        return false if left_count != right_count
+        for index in 0..<left_count |left, right|:
+            return false if not sview_eq(left[index.usize()], right[index.usize()])
+        return true
+
+    # Canonical identities collapse aliases (including symlinks) when the
+    # source exists. Retain lexical comparison as a deterministic fallback for
+    # malformed or not-yet-created paths.
+    def cli_same_compile_source(left: CliSource, right: CliSource) -> bool:
+        return sview_eq(left.canonical_path, right.canonical_path) if left.canonical_path.len > 0 and right.canonical_path.len > 0
+        return false if not sview_eq(left.path, right.path)
+        return true if left.path.len > 0 and string_view_index(left.path, 0) == 47
+        return sview_eq(left.directory, right.directory)
+
+    def cli_same_compile_settings(left: CliSource, right: CliSource) -> bool:
+        return false if not sview_eq(left.directory, right.directory)
+        return false if left.command_valid != right.command_valid
+        if left.argv_signature.len > 0 or right.argv_signature.len > 0:
+            return false if left.argv_signature.len == 0 or right.argv_signature.len == 0
+            return sview_eq(left.argv_signature, right.argv_signature)
+        return false if left.has_arguments != right.has_arguments
+        return cli_compile_arguments_equal(left.arguments, right.arguments) if left.has_arguments
+        return sview_eq(left.command, right.command)
+
+    def cli_compile_command_sources(raw: darray[u8], max_response_bytes: usize, max_json_values: usize, max_source_entries: usize, json_value_limit_exceeded: mutable bool&, source_entry_limit_exceeded: mutable bool&, invalid_database: mutable bool&, invalid_compile_command: mutable bool&, invalid_compile_command_is_text: mutable bool&, invalid_compile_command_source: mutable sview&, duplicate_conflict: mutable bool&, conflicting_source: mutable sview&, source_operand_mismatch: mutable bool&, mismatched_source: mutable sview&, response_failure: mutable ClangResponseFailure&, response_failure_source: mutable sview&, response_failure_path: mutable darray[u8]&) -> darray[CliSource] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        sources: mutable darray[CliSource] = []
+        json_value_limit_exceeded <- false
+        source_entry_limit_exceeded <- false
+        invalid_database <- false
+        invalid_compile_command <- false
+        invalid_compile_command_is_text <- false
+        invalid_compile_command_source <- sview("", 0, 0)
+        duplicate_conflict <- false
+        conflicting_source <- sview("", 0, 0)
+        source_operand_mismatch <- false
+        mismatched_source <- sview("", 0, 0)
+        response_failure <- ClangResponseFailure.None
+        response_failure_source <- sview("", 0, 0)
+        response_failure_path.count <- 0.usize()
+        json_value_count: mutable i64 = 0
+        json_value_limit: mutable bool = false
+        source_entry_count: mutable i64 = 0
+        json_preflight_valid: bool = ast_json_preflight_value_count_with_array_limit(bytes_view(raw), max_json_values, max_source_entries, &json_value_count, &json_value_limit, &source_entry_count, &source_entry_limit_exceeded)
+        return sources if source_entry_limit_exceeded
+        if not json_preflight_valid:
+            invalid_database <- true
+            return sources
+        if json_preflight_valid and json_value_limit:
+            json_value_limit_exceeded <- true
+            return sources
+        parsed: JsonParseResult[perm_arena] = json_parse_checked(&perm_arena, bytes_view(raw))
+        if parsed.code != JsonErrorCode.OK:
+            invalid_database <- true
+            return sources
+        count: i64 = json_handle_array_len(parsed.value)
+        if count < 0:
+            invalid_database <- true
+            return sources
+        if count > max_source_entries.i64():
+            source_entry_limit_exceeded <- true
+            return sources
+        entry_index: mutable i64 = 0
+        while entry_index < count |sources, parsed, entry_index|:
+            entry: JsonValueHandle[perm_arena] = ast_array_item(parsed.value, entry_index)
+            if not json_handle_is_object(entry):
+                invalid_database <- true
+                return sources
+            file_node: JsonValueHandle[perm_arena] = ast_field(entry, sview("file", 0, -1))
+            directory_node: JsonValueHandle[perm_arena] = ast_field(entry, sview("directory", 0, -1))
+            file: sview = ast_string(file_node)
+            directory: sview = ast_string(directory_node)
+            if not json_handle_is_string(directory_node) or not json_handle_is_string(file_node) or file.len == 0 or cli_view_contains_nul(directory) or cli_view_contains_nul(file):
+                invalid_database <- true
+                return sources
+            argument_nodes: JsonValueHandle[perm_arena] = ast_field(entry, sview("arguments", 0, -1))
+            has_arguments: bool = cli_compile_arguments_valid(argument_nodes)
+            arguments: darray[sview] = cli_compile_arguments_copy(argument_nodes) can Memory.Allocate, Abort.Panic if has_arguments else []
+            command: sview = cli_compile_command(entry) can Memory.Allocate, Abort.Panic
+            owned_command: sview = cli_owned_compile_view(command) can Memory.Allocate, Abort.Panic
+            command_valid: bool = has_arguments or command.len > 0
+            candidate_path: mutable sview = file
+            # The compile command runs from `directory`, so Clang records a
+            # relative file spelling relative to that directory. Preserve that
+            # spelling for AST provenance; only synthesize a cwd-relative path
+            # when an entry has no command and must use the simple frontend.
+            if file.len > 0 and not (command_valid or directory.len == 0 or string_view_index(file, 0) == 47):
+                joined: mutable darray[u8] = []
+                append_view(&joined, directory)
+                append_view(&joined, sview("/", 0, -1)) if directory.len > 0 and string_view_index(directory, directory.len - 1) != 47
+                append_view(&joined, file)
+                candidate_path <- sview(ctx_string_from_view(bytes_view(joined)), 0, -1)
+            if not has_arguments and cli_view_contains_nul(command):
+                invalid_compile_command <- true
+                invalid_compile_command_is_text <- true
+                invalid_compile_command_source <- candidate_path
+                return sources
+            if not command_valid:
+                invalid_compile_command <- true
+                invalid_compile_command_source <- candidate_path
+                return sources
+            if file.len > 0:
+                canonical_path_bytes: mutable darray[u8] = []
+                canonical_path_directory: sview = directory if command_valid else sview("", 0, 0)
+                canonical_path_valid: bool = ast_json_resolve_path(candidate_path, canonical_path_directory, &canonical_path_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+                canonical_path: sview = sview(ctx_string_from_view(bytes_view(canonical_path_bytes)), 0, -1) if canonical_path_valid else sview("", 0, 0)
+                argv_signature: mutable sview = sview("", 0, 0)
+                short_enums: mutable bool = false
+                floating_point_options: mutable ClangFPOptionVector = clang_fp_options_default()
+                if command_valid:
+                    source_operand_checked: mutable bool = false
+                    source_operand_matches: mutable bool = false
+                    argv_signature <- clang_compile_argv_signature(directory, owned_command, arguments, has_arguments, canonical_path, max_response_bytes, &source_operand_checked, &source_operand_matches, &short_enums, &floating_point_options, response_failure, response_failure_path) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+                    if response_failure[0] != ClangResponseFailure.None:
+                        response_failure_source <- candidate_path
+                        return sources
+                    if source_operand_checked and not source_operand_matches:
+                        source_operand_mismatch <- true
+                        mismatched_source <- candidate_path
+                        return sources
+                    if argv_signature.len == 0:
+                        invalid_compile_command <- true
+                        invalid_compile_command_is_text <- command.len > 0
+                        invalid_compile_command_source <- candidate_path
+                        return sources
+                owned_candidate_path: sview = cli_owned_compile_view(candidate_path) can Memory.Allocate, Abort.Panic
+                owned_canonical_path: sview = cli_owned_compile_view(canonical_path) can Memory.Allocate, Abort.Panic
+                owned_directory: sview = cli_owned_compile_view(directory) can Memory.Allocate, Abort.Panic
+                owned_argv_signature: sview = cli_owned_compile_view(argv_signature) can Memory.Allocate, Abort.Panic
+                candidate: CliSource = CliSource{path: owned_candidate_path, canonical_path: owned_canonical_path, directory: owned_directory, command: owned_command, argv_signature: owned_argv_signature, arguments: arguments, has_arguments: has_arguments, command_valid: command_valid, short_enums: short_enums, floating_point_options: floating_point_options}
+                duplicate_found: mutable bool = false
+                conflict_found: mutable bool = false
+                source_index: mutable i64 = 0
+                while source_index < sources.count.i64() |sources, candidate, duplicate_found, conflict_found, source_index|:
+                    existing: CliSource = sources[source_index.usize()]
+                    if cli_same_compile_source(existing, candidate):
+                        if cli_same_compile_settings(existing, candidate):
+                            duplicate_found <- true
+                        else:
+                            conflict_found <- true
+                        break
+                    source_index <- source_index + 1
+                if conflict_found:
+                    duplicate_conflict <- true
+                    conflicting_source <- candidate.path
+                    return sources
+                sources.push(candidate) if not duplicate_found
+            entry_index <- entry_index + 1
+        return sources

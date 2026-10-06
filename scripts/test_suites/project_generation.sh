@@ -18,6 +18,192 @@ project_generated_rc=$?
 set -e
 [ "$project_generated_rc" -eq 0 ]
 
+# Apply the same pre-DOM JSON value budget to compilation databases. The
+# oversized metadata must fail before any project output directory is created.
+project_db_limit_tmp=$(mktemp -d build/project-db-json-limit.XXXXXX)
+if test_translator_bounded --max-frontend-json-values 2 \
+    --compile-commands testdata/fixtures/compile_commands.json \
+    --output-dir "$project_db_limit_tmp/out" \
+    > "$project_db_limit_tmp/stdout" 2> "$project_db_limit_tmp/stderr"; then
+    echo "expected compilation database JSON value-limit failure" >&2
+    exit 1
+fi
+test ! -s "$project_db_limit_tmp/stdout"
+rg -q 'compilation database exceeded --max-frontend-json-values 2 while reading testdata/fixtures/compile_commands.json' \
+    "$project_db_limit_tmp/stderr"
+test ! -e "$project_db_limit_tmp/out"
+rm "$project_db_limit_tmp/stdout" "$project_db_limit_tmp/stderr"
+rmdir "$project_db_limit_tmp"
+
+# Bound raw project-source growth before compile-command normalization and its
+# duplicate-conflict scan. Direct paths and compilation-database rows share one
+# configurable budget, and rejection must happen before output publication.
+project_source_limit_tmp=$(mktemp -d build/project-source-limit.XXXXXX)
+if test_translator_bounded --compile-commands testdata/fixtures/ast_schema_wrong_inner.json \
+    --output-dir "$project_source_limit_tmp/malformed-db-out" \
+    testdata/fixtures/simple.c \
+    > "$project_source_limit_tmp/malformed-db-stdout" 2> "$project_source_limit_tmp/malformed-db-stderr"; then
+    echo "expected non-array compilation database failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/malformed-db-stdout"
+rg -q 'invalid or malformed compilation database while reading testdata/fixtures/ast_schema_wrong_inner.json' \
+    "$project_source_limit_tmp/malformed-db-stderr"
+test ! -e "$project_source_limit_tmp/malformed-db-out"
+if test_translator_bounded --compile-commands testdata/fixtures/compile_commands_missing_file.json \
+    --output-dir "$project_source_limit_tmp/missing-file-db-out" \
+    testdata/fixtures/simple.c \
+    > "$project_source_limit_tmp/missing-file-db-stdout" 2> "$project_source_limit_tmp/missing-file-db-stderr"; then
+    echo "expected compilation database row missing-file failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/missing-file-db-stdout"
+rg -q 'invalid or malformed compilation database while reading testdata/fixtures/compile_commands_missing_file.json' \
+    "$project_source_limit_tmp/missing-file-db-stderr"
+test ! -e "$project_source_limit_tmp/missing-file-db-out"
+if test_translator_bounded --compile-commands testdata/fixtures/compile_commands_missing_directory.json \
+    --output-dir "$project_source_limit_tmp/missing-directory-db-out" \
+    testdata/fixtures/simple.c \
+    > "$project_source_limit_tmp/missing-directory-db-stdout" 2> "$project_source_limit_tmp/missing-directory-db-stderr"; then
+    echo "expected compilation database row missing-directory failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/missing-directory-db-stdout"
+rg -q 'invalid or malformed compilation database while reading testdata/fixtures/compile_commands_missing_directory.json' \
+    "$project_source_limit_tmp/missing-directory-db-stderr"
+test ! -e "$project_source_limit_tmp/missing-directory-db-out"
+for malformed_db in \
+    testdata/fixtures/compile_commands_nul_file.json \
+    testdata/fixtures/compile_commands_nul_directory.json; do
+    malformed_name=${malformed_db##*/}
+    malformed_name=${malformed_name%.json}
+    if test_translator_bounded --compile-commands "$malformed_db" \
+        --output-dir "$project_source_limit_tmp/$malformed_name-out" \
+        testdata/fixtures/simple.c \
+        > "$project_source_limit_tmp/$malformed_name-stdout" 2> "$project_source_limit_tmp/$malformed_name-stderr"; then
+        echo "expected embedded-NUL compilation database path failure: $malformed_db" >&2
+        exit 1
+    fi
+    test ! -s "$project_source_limit_tmp/$malformed_name-stdout"
+    rg -q "invalid or malformed compilation database while reading $malformed_db" \
+        "$project_source_limit_tmp/$malformed_name-stderr"
+    test ! -e "$project_source_limit_tmp/$malformed_name-out"
+done
+if test_translator_bounded --compile-commands testdata/fixtures/compile_commands_nul_command.json \
+    --output-dir "$project_source_limit_tmp/nul-command-out" \
+    testdata/fixtures/simple.c \
+    > "$project_source_limit_tmp/nul-command-stdout" 2> "$project_source_limit_tmp/nul-command-stderr"; then
+    echo "expected embedded-NUL compilation command failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/nul-command-stdout"
+rg -q 'unsupported or malformed syntax in compilation command.*simple.c' "$project_source_limit_tmp/nul-command-stderr"
+test ! -e "$project_source_limit_tmp/nul-command-out"
+python3 - "$project_source_limit_tmp/invalid-utf8-compile-commands.json" <<'PY'
+from pathlib import Path
+import sys
+
+Path(sys.argv[1]).write_bytes(
+    b'[{"directory":".","file":"testdata/fixtures/simple.c",'
+    b'"arguments":["clang","testdata/fixtures/simple.c"],"ignored":"\xc0\xaf"}]'
+)
+PY
+if test_translator_bounded --compile-commands "$project_source_limit_tmp/invalid-utf8-compile-commands.json" \
+    --output-dir "$project_source_limit_tmp/invalid-utf8-out" \
+    testdata/fixtures/simple.c \
+    > "$project_source_limit_tmp/invalid-utf8-stdout" 2> "$project_source_limit_tmp/invalid-utf8-stderr"; then
+    echo "expected malformed UTF-8 compilation database failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/invalid-utf8-stdout"
+rg -q "invalid or malformed compilation database while reading $project_source_limit_tmp/invalid-utf8-compile-commands.json" \
+    "$project_source_limit_tmp/invalid-utf8-stderr"
+test ! -e "$project_source_limit_tmp/invalid-utf8-out"
+if test_translator_bounded --max-input-sources 1 \
+    --output-dir "$project_source_limit_tmp/direct-out" \
+    testdata/fixtures/module_a.c testdata/fixtures/module_b.c \
+    > "$project_source_limit_tmp/direct-stdout" 2> "$project_source_limit_tmp/direct-stderr"; then
+    echo "expected direct input source-count limit failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/direct-stdout"
+rg -q 'input source count exceeded --max-input-sources 1 while processing command line' \
+    "$project_source_limit_tmp/direct-stderr"
+test ! -e "$project_source_limit_tmp/direct-out"
+if test_translator_bounded --max-input-sources 2 \
+    --compile-commands testdata/fixtures/compile_commands.json \
+    --output-dir "$project_source_limit_tmp/database-out" \
+    > "$project_source_limit_tmp/database-stdout" 2> "$project_source_limit_tmp/database-stderr"; then
+    echo "expected compilation database source-count limit failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/database-stdout"
+rg -q 'input source count exceeded --max-input-sources 2 while processing testdata/fixtures/compile_commands.json' \
+    "$project_source_limit_tmp/database-stderr"
+test ! -e "$project_source_limit_tmp/database-out"
+if test_translator_bounded --max-input-sources 4 \
+    --compile-commands testdata/fixtures/compile_commands.json \
+    --output-dir "$project_source_limit_tmp/shared-budget-out" \
+    testdata/fixtures/module_a.c testdata/fixtures/module_b.c \
+    > "$project_source_limit_tmp/shared-budget-stdout" 2> "$project_source_limit_tmp/shared-budget-stderr"; then
+    echo "expected shared direct/database source-count limit failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/shared-budget-stdout"
+rg -q 'input source count exceeded --max-input-sources 4 while processing testdata/fixtures/compile_commands.json' \
+    "$project_source_limit_tmp/shared-budget-stderr"
+test ! -e "$project_source_limit_tmp/shared-budget-out"
+if test_translator_bounded --max-input-sources 0 testdata/fixtures/simple.c \
+    > "$project_source_limit_tmp/invalid-stdout" 2> "$project_source_limit_tmp/invalid-stderr"; then
+    echo "expected invalid input source-count limit failure" >&2
+    exit 1
+fi
+test ! -s "$project_source_limit_tmp/invalid-stdout"
+rg -q -- '--max-input-sources requires a positive decimal integer no greater than 4096' \
+    "$project_source_limit_tmp/invalid-stderr"
+rm "$project_source_limit_tmp/direct-stdout" \
+    "$project_source_limit_tmp/direct-stderr" \
+    "$project_source_limit_tmp/database-stdout" \
+    "$project_source_limit_tmp/database-stderr" \
+    "$project_source_limit_tmp/shared-budget-stdout" \
+    "$project_source_limit_tmp/shared-budget-stderr" \
+    "$project_source_limit_tmp/malformed-db-stdout" \
+    "$project_source_limit_tmp/malformed-db-stderr" \
+    "$project_source_limit_tmp/missing-file-db-stdout" \
+    "$project_source_limit_tmp/missing-file-db-stderr" \
+    "$project_source_limit_tmp/missing-directory-db-stdout" \
+    "$project_source_limit_tmp/missing-directory-db-stderr" \
+    "$project_source_limit_tmp/compile_commands_nul_file-stdout" \
+    "$project_source_limit_tmp/compile_commands_nul_file-stderr" \
+    "$project_source_limit_tmp/compile_commands_nul_directory-stdout" \
+    "$project_source_limit_tmp/compile_commands_nul_directory-stderr" \
+    "$project_source_limit_tmp/nul-command-stdout" \
+    "$project_source_limit_tmp/nul-command-stderr" \
+    "$project_source_limit_tmp/invalid-utf8-compile-commands.json" \
+    "$project_source_limit_tmp/invalid-utf8-stdout" \
+    "$project_source_limit_tmp/invalid-utf8-stderr" \
+    "$project_source_limit_tmp/invalid-stdout" \
+    "$project_source_limit_tmp/invalid-stderr"
+rmdir "$project_source_limit_tmp"
+
+# FP semantics come from the selected compile command, not the translator's
+# invocation environment. The relaxed case traverses nested response files;
+# the second keeps an ambiguous -Ofast/-ffp-model interaction unknown. Both
+# also verify that compile-only link context survives argv normalization.
+mkdir -p build/fp-mode-relaxed build/fp-mode-unknown
+test_translator_bounded --dump-typed-ir \
+    --compile-commands testdata/fixtures/fp_modes/response_compile_commands.json \
+    --output-dir build/fp-mode-relaxed \
+    2> build/fp-mode-relaxed/typed-ir.dump
+rg -q '^floating_point_mode=relaxed$' build/fp-mode-relaxed/typed-ir.dump
+rg -q '^fp_option driver_link_effect=not-linked$' build/fp-mode-relaxed/typed-ir.dump
+test_translator_bounded --dump-typed-ir \
+    --compile-commands testdata/fixtures/fp_modes/override_compile_commands.json \
+    --output-dir build/fp-mode-unknown \
+    2> build/fp-mode-unknown/typed-ir.dump
+rg -q '^floating_point_mode=unknown$' build/fp-mode-unknown/typed-ir.dump
+rg -q '^fp_option driver_link_effect=not-linked$' build/fp-mode-unknown/typed-ir.dump
+
 # A later generation may contain fewer source units. Remove only modules listed
 # by the previous translator manifest; an unrelated file in the same directory
 # must survive unchanged.
@@ -59,6 +245,38 @@ cpp_map_contains_native_rc=$?
 cpp_map_contains_generated_rc=$?
 set -e
 [ "$cpp_map_contains_native_rc" -eq 0 ] && [ "$cpp_map_contains_generated_rc" -eq 0 ]
+
+# Exercise a Wolf-shaped generic map contract across translation units:
+# external global storage, int keys, signed 8-bit mapped values, and macros
+# which expand to both operator[] reads and writes. Reverse the database order
+# to ensure project output and cross-unit symbol resolution are order-stable.
+mkdir -p build/project-unordered-map-macro build/project-unordered-map-macro-reversed
+test_translator_bounded --max-frontend-output-bytes 268435456 \
+    --compile-commands testdata/fixtures/project_unordered_map_macro_compile_commands.json \
+    --output-dir build/project-unordered-map-macro
+test_translator_bounded --max-frontend-output-bytes 268435456 \
+    --compile-commands testdata/fixtures/project_unordered_map_macro_compile_commands_reversed.json \
+    --output-dir build/project-unordered-map-macro-reversed
+cmp build/project-unordered-map-macro/elisa_project.elisa \
+    build/project-unordered-map-macro-reversed/elisa_project.elisa
+rg -q '^include "\.\./cpp_lib/unordered_map\.elisa"$' \
+    build/project-unordered-map-macro/elisa_project.elisa
+rg -q 'key_flags\[[^]]+\]\.value' build/project-unordered-map-macro/main.elisa
+rg -q 'key_flags\[[^]]+\]\.value' build/project-unordered-map-macro/keyboard.elisa
+test_clangxx_bounded -std=gnu++11 -I testdata/fixtures/project_unordered_map_macro \
+    testdata/fixtures/project_unordered_map_macro/main.cpp \
+    testdata/fixtures/project_unordered_map_macro/keyboard.cpp \
+    -o build/project-unordered-map-macro/native
+ELISA_STAGE1_MAX_RSS_KB=4194304 bash "$stage1_worktree/scripts/elisac_stage1.sh" \
+    -emit exe -O0 -o build/project-unordered-map-macro/generated \
+    "$root_dir/build/project-unordered-map-macro/elisa_project.elisa"
+set +e
+./build/project-unordered-map-macro/native
+wolf_map_native_rc=$?
+./build/project-unordered-map-macro/generated
+wolf_map_generated_rc=$?
+set -e
+[ "$wolf_map_native_rc" -eq 0 ] && [ "$wolf_map_generated_rc" -eq 0 ]
 
 # Explicit compatibility/runtime roots make the generated project independent
 # of the translator's repository-relative cpp_lib wrapper. Copy the generated

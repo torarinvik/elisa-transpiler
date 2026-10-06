@@ -18,6 +18,15 @@ extend CTranslator:
         expression: i64
         assignment: i64
         postfix: bool
+    def typed_condition_ast_has_assignment[@r](node: JsonValueHandle[r]) -> bool:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("BinaryOperator", 0, -1)) and sview_eq(ast_string(ast_field(node, sview("opcode", 0, -1))), sview("=", 0, -1)):
+            return true
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |node|:
+                return true if typed_condition_ast_has_assignment(ast_child(node, index))
+        return false
     def ast_strip_condition[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r] @r:
         kind: sview = ast_kind(node)
         if sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
@@ -46,9 +55,18 @@ extend CTranslator:
             for offset in 0..<expression.args_count |ctx, expression|:
                 return true if typed_condition_expr_has_effect(ctx, ctx.expr_children[(expression.args_start + offset).usize()])
         return false
-    def typed_lower_condition_value[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> TypedCondition can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_lower_condition_value[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], scan_subtree_for_assignment: bool) -> TypedCondition can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         stripped: JsonValueHandle[r] = ast_strip_condition(node)
         kind: sview = ast_kind(stripped)
+        if scan_subtree_for_assignment and typed_condition_ast_has_assignment(stripped):
+            # Keep assignment results inside the expression tree. Extracting
+            # the store as a prelude and then rendering the RHS as the
+            # condition evaluates effectful RHSs twice (for example,
+            # `while ((value = next()) != -1)`). The ordinary expression
+            # lowering uses the assignment-value helper to perform the store
+            # and yield that same value in one evaluation.
+            expression: i64 = typed_lower_expr(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            return TypedCondition{expression: expression, assignment: -1, postfix: false}
         if sview_eq(kind, sview("UnaryOperator", 0, -1)) and ast_child_count(stripped) > 0:
             opcode: sview = ast_string(ast_field(stripped, sview("opcode", 0, -1)))
             if sview_eq(opcode, sview("--", 0, -1)) or sview_eq(opcode, sview("++", 0, -1)):
@@ -82,21 +100,11 @@ extend CTranslator:
                 # hoisting its write outside the test.
                 expression: i64 = typed_lower_expr(ctx, stripped) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return TypedCondition{expression: expression, assignment: -1, postfix: false}
-            if sview_eq(kind, sview("BinaryOperator", 0, -1)) and sview_eq(opcode, sview("=", 0, -1)):
-                assigned_lhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                assigned_rhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: ast_qual_type(stripped), lhs: assigned_lhs, rhs: assigned_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                return TypedCondition{expression: assigned_rhs, assignment: assignment, postfix: false}
-            if sview_eq(kind, sview("CompoundAssignOperator", 0, -1)):
-                assigned_lhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                assigned_rhs: i64 = typed_lower_expr(ctx, ast_child(stripped, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                compound: sview = typed_binary_assignment_opcode(opcode)
-                if compound.len > 0:
-                    updated: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: compound, type_name: ast_qual_type(stripped), lhs: assigned_lhs, rhs: assigned_rhs, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    assignment: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("<-", 0, -1), type_name: ast_qual_type(stripped), lhs: assigned_lhs, rhs: updated, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                    return TypedCondition{expression: updated, assignment: assignment, postfix: false}
-            left: TypedCondition = typed_lower_condition_value(ctx, ast_child(stripped, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            right: TypedCondition = typed_lower_condition_value(ctx, ast_child(stripped, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            # The enclosing condition already performed one complete subtree
+            # scan. Repeating that scan at each recursive child makes long
+            # assignment-free expressions quadratic to lower.
+            left: TypedCondition = typed_lower_condition_value(ctx, ast_child(stripped, 0), false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            right: TypedCondition = typed_lower_condition_value(ctx, ast_child(stripped, 1), false) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if left.expression < 0 or right.expression < 0:
                 return TypedCondition{expression: -1, assignment: -1, postfix: false}
             if sview_eq(opcode, sview(",", 0, -1)):
@@ -109,7 +117,7 @@ extend CTranslator:
         expression: i64 = typed_lower_expr(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         return TypedCondition{expression: expression, assignment: -1, postfix: false}
     def typed_lower_condition[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> TypedCondition can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        return typed_lower_condition_value(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return typed_lower_condition_value(ctx, node, true) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
     def typed_find_label[@r](ctx: TypedContext[r]&, id: sview) -> JsonValueHandle[r]:
         for index in 0..<ctx.labels.count |ctx, id|:
             label: TypedLabel[r] = ctx.labels[index]

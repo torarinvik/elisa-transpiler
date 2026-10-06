@@ -112,6 +112,21 @@ extend CTranslator:
         append_i64(out, value)
         first <- false
 
+    def cli_append_json_content_hash_field(out: mutable darray[u8]&, name: sview, hash: TypedContentHash, first: mutable bool&) -> void:
+        out.push(44.u8()) if not first[0]
+        cli_append_json_string(out, name)
+        out.push(58.u8())
+        if not hash.available:
+            append_view(out, sview("null", 0, -1))
+        else:
+            out.push(34.u8())
+            for index in 0..<16 |out, hash|:
+                shift: i64 = (15 - index) * 4
+                digit: i64 = ((hash.value >> shift.u64()) & 15.u64()).i64()
+                out.push((48 + digit).u8()) if digit < 10 else out.push((87 + digit).u8())
+            out.push(34.u8())
+        first <- false
+
     def cli_emit_typed_diagnostics_json(diagnostics: darray[TypedDiagnostic]) -> void can[Console, Unsafe.PointerCast, Memory.Allocate, Abort.Panic]:
         output: mutable darray[u8] = []
         output.push(91.u8())
@@ -120,27 +135,34 @@ extend CTranslator:
             output.push(44.u8()) if index > 0
             output.push(123.u8())
             first: mutable bool = true
-            cli_append_json_i64_field(&output, sview("schema_version", 0, -1), 3, &first)
+            cli_append_json_i64_field(&output, sview("schema_version", 0, -1), 5, &first)
             cli_append_json_view_field(&output, sview("category", 0, -1), diagnostic.category, &first)
             cli_append_json_view_field(&output, sview("kind", 0, -1), diagnostic.kind, &first)
             cli_append_json_view_field(&output, sview("subject_type", 0, -1), diagnostic.subject_type, &first)
             cli_append_json_view_field(&output, sview("required_capability", 0, -1), diagnostic.required_capability, &first)
+            cli_append_json_view_field(&output, sview("translation_unit", 0, -1), diagnostic.translation_unit, &first)
+            cli_append_json_content_hash_field(&output, sview("translation_unit_content_hash", 0, -1), diagnostic.translation_unit_content_hash, &first)
             cli_append_json_i64_field(&output, sview("range_start_offset", 0, -1), diagnostic.range_start_offset, &first)
             cli_append_json_i64_field(&output, sview("range_end_offset", 0, -1), diagnostic.range_end_offset, &first)
             cli_append_json_view_field(&output, sview("source", 0, -1), diagnostic.source, &first)
             cli_append_json_view_field(&output, sview("canonical_source", 0, -1), diagnostic.canonical_source, &first)
+            cli_append_json_content_hash_field(&output, sview("source_content_hash", 0, -1), diagnostic.source_content_hash, &first)
             cli_append_json_i64_field(&output, sview("line", 0, -1), diagnostic.line, &first)
             cli_append_json_i64_field(&output, sview("column", 0, -1), diagnostic.column, &first)
             cli_append_json_view_field(&output, sview("spelling_source", 0, -1), diagnostic.spelling_source, &first)
             cli_append_json_view_field(&output, sview("spelling_canonical_source", 0, -1), diagnostic.spelling_canonical_source, &first)
+            cli_append_json_content_hash_field(&output, sview("spelling_source_content_hash", 0, -1), diagnostic.spelling_source_content_hash, &first)
             cli_append_json_view_field(&output, sview("spelling_included_from", 0, -1), diagnostic.spelling_included_from, &first)
             cli_append_json_view_field(&output, sview("spelling_included_from_canonical", 0, -1), diagnostic.spelling_included_from_canonical, &first)
+            cli_append_json_content_hash_field(&output, sview("spelling_included_from_content_hash", 0, -1), diagnostic.spelling_included_from_content_hash, &first)
             cli_append_json_i64_field(&output, sview("spelling_line", 0, -1), diagnostic.spelling_line, &first)
             cli_append_json_i64_field(&output, sview("spelling_column", 0, -1), diagnostic.spelling_column, &first)
             cli_append_json_view_field(&output, sview("expansion_source", 0, -1), diagnostic.expansion_source, &first)
             cli_append_json_view_field(&output, sview("expansion_canonical_source", 0, -1), diagnostic.expansion_canonical_source, &first)
+            cli_append_json_content_hash_field(&output, sview("expansion_source_content_hash", 0, -1), diagnostic.expansion_source_content_hash, &first)
             cli_append_json_view_field(&output, sview("expansion_included_from", 0, -1), diagnostic.expansion_included_from, &first)
             cli_append_json_view_field(&output, sview("expansion_included_from_canonical", 0, -1), diagnostic.expansion_included_from_canonical, &first)
+            cli_append_json_content_hash_field(&output, sview("expansion_included_from_content_hash", 0, -1), diagnostic.expansion_included_from_content_hash, &first)
             cli_append_json_i64_field(&output, sview("expansion_line", 0, -1), diagnostic.expansion_line, &first)
             cli_append_json_i64_field(&output, sview("expansion_column", 0, -1), diagnostic.expansion_column, &first)
             output.push(125.u8())

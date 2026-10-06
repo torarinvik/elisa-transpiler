@@ -2,5 +2,3 @@
 build/
 /src/.compiler_std
 testdata/**/.git/
-/testdata/upstream/cJSON
-testdata/upstream/wolf4sdl/

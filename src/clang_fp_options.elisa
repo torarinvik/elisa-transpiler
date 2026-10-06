@@ -1,0 +1,504 @@
+extend CTranslator:
+    def clang_fp_word_end(text: darray[u8], offset: usize) -> usize:
+        cursor: mutable usize = offset
+        while cursor < text.count |text, cursor|:
+            break if text[cursor] == 0
+            cursor <- cursor + 1.usize()
+        return cursor
+
+    def clang_fp_word_equals(text: darray[u8], offset: usize, spelling: sview) -> bool:
+        end: usize = clang_fp_word_end(text, offset)
+        return false if end - offset != spelling.len.usize()
+        for index in 0..<spelling.len |text, offset, spelling|:
+            return false if text[offset + index.usize()] != string_view_index(spelling, index).u8()
+        return true
+
+    def clang_fp_word_starts_with(text: darray[u8], offset: usize, prefix: sview) -> bool:
+        end: usize = clang_fp_word_end(text, offset)
+        return false if end - offset < prefix.len.usize()
+        for index in 0..<prefix.len |text, offset, prefix|:
+            return false if text[offset + index.usize()] != string_view_index(prefix, index).u8()
+        return true
+
+    def clang_fp_word_contains(text: darray[u8], offset: usize, needle: sview) -> bool:
+        end: usize = clang_fp_word_end(text, offset)
+        return false if needle.len == 0 or end - offset < needle.len.usize()
+        for start in 0..<(end - offset - needle.len.usize() + 1.usize()) |text, offset, needle, end|:
+            matched: mutable bool = true
+            for index in 0..<needle.len |text, offset, needle, start, matched|:
+                matched <- false if text[offset + start + index.usize()] != string_view_index(needle, index).u8()
+            return true if matched
+        return false
+
+    def clang_fp_word_value_equals(text: darray[u8], offset: usize, prefix: sview, value: sview) -> bool:
+        return false if not clang_fp_word_starts_with(text, offset, prefix)
+        end: usize = clang_fp_word_end(text, offset)
+        return false if end - offset != (prefix.len + value.len).usize()
+        for index in 0..<value.len |text, offset, prefix, value|:
+            return false if text[offset + prefix.len.usize() + index.usize()] != string_view_index(value, index).u8()
+        return true
+
+    def clang_fp_options_default() -> ClangFPOptionVector:
+        return ClangFPOptionVector{
+            mode: ClangFloatingPointMode.Strict, exception_behavior: ClangFPExceptionSetting.Ignore,
+            fenv_access: ClangFPBooleanSetting.Off, rounding_mode: ClangFPRoundingSetting.Tonearest,
+            rounding_math: ClangFPBooleanSetting.Off, contract: ClangFPContractSetting.On,
+            explicit_contract: ClangFPContractSetting.Unknown, contract_explicitly_seen: false,
+            denormal: ClangFPDenormalSetting.TargetDefault, denormal_fp32: ClangFPDenormalSetting.TargetDefault,
+            math_errno: ClangFPBooleanSetting.TargetDefault, honor_nans: ClangFPBooleanSetting.On,
+            honor_infinities: ClangFPBooleanSetting.On, finite_math_only: ClangFPBooleanSetting.Off,
+            signed_zeros: ClangFPBooleanSetting.On, associative_math: ClangFPBooleanSetting.Off,
+            reciprocal_math: ClangFPBooleanSetting.Off, approximate_functions: ClangFPBooleanSetting.Off,
+            trapping_math: ClangFPBooleanSetting.Off, cx_limited_range: ClangFPBooleanSetting.Off,
+            float_store: ClangFPBooleanSetting.Off, strict_float_cast_overflow: ClangFPBooleanSetting.On,
+            single_precision_constant: ClangFPBooleanSetting.Off, protect_parens: ClangFPBooleanSetting.Off,
+            complex_arithmetic: ClangFPComplexSetting.Full, eval_method: ClangFPEvalSetting.TargetDefault,
+            excess_precision: ClangFPExcessPrecisionSetting.TargetDefault,
+            driver_link_effect: ClangFPDriverLinkEffect.TargetDefault, unknown_option_seen: false
+        }
+
+    def clang_fp_apply_profile(options: mutable ClangFPOptionVector&, profile: ClangFPModelProfile, preserve_explicit_contract: bool) -> void:
+        options.driver_link_effect <- ClangFPDriverLinkEffect.TargetDefault if options.driver_link_effect == ClangFPDriverLinkEffect.AutomaticIfLinked
+        # Clang resets the unsafe-math family for precise/no-fast profiles,
+        # but preserves separately selected exception and rounding controls.
+        # Fast profiles below mirror applyFastMath's explicit resets.
+        if preserve_explicit_contract:
+            if options.contract_explicitly_seen:
+                options.contract <- options.explicit_contract
+            elif options.contract == ClangFPContractSetting.Fast:
+                options.contract <- ClangFPContractSetting.On
+        else:
+            options.contract <- ClangFPContractSetting.On
+        options.math_errno <- ClangFPBooleanSetting.TargetDefault
+        options.honor_nans <- ClangFPBooleanSetting.On
+        options.honor_infinities <- ClangFPBooleanSetting.On
+        options.finite_math_only <- ClangFPBooleanSetting.Off
+        options.signed_zeros <- ClangFPBooleanSetting.On
+        options.associative_math <- ClangFPBooleanSetting.Off
+        options.reciprocal_math <- ClangFPBooleanSetting.Off
+        options.approximate_functions <- ClangFPBooleanSetting.Off
+        options.cx_limited_range <- ClangFPBooleanSetting.Off
+        options.complex_arithmetic <- ClangFPComplexSetting.Full
+        options.mode <- ClangFloatingPointMode.Strict
+        if profile == ClangFPModelProfile.Strict:
+            options.exception_behavior <- ClangFPExceptionSetting.Strict
+            options.fenv_access <- ClangFPBooleanSetting.On
+            options.rounding_mode <- ClangFPRoundingSetting.Dynamic
+            options.rounding_math <- ClangFPBooleanSetting.On
+            options.contract <- ClangFPContractSetting.Off
+            options.math_errno <- ClangFPBooleanSetting.On
+            options.trapping_math <- ClangFPBooleanSetting.On
+        elif profile == ClangFPModelProfile.Fast or profile == ClangFPModelProfile.Aggressive:
+            options.exception_behavior <- ClangFPExceptionSetting.Ignore
+            options.rounding_mode <- ClangFPRoundingSetting.Tonearest
+            options.rounding_math <- ClangFPBooleanSetting.Off
+            options.contract <- ClangFPContractSetting.Fast
+            options.math_errno <- ClangFPBooleanSetting.Off
+            options.signed_zeros <- ClangFPBooleanSetting.Off
+            options.associative_math <- ClangFPBooleanSetting.On
+            options.reciprocal_math <- ClangFPBooleanSetting.On
+            options.approximate_functions <- ClangFPBooleanSetting.On
+            options.trapping_math <- ClangFPBooleanSetting.Off
+            options.complex_arithmetic <- ClangFPComplexSetting.Promoted
+            options.mode <- ClangFloatingPointMode.Relaxed
+            options.driver_link_effect <- ClangFPDriverLinkEffect.AutomaticIfLinked if options.driver_link_effect == ClangFPDriverLinkEffect.TargetDefault
+            if profile == ClangFPModelProfile.Aggressive:
+                options.honor_nans <- ClangFPBooleanSetting.Off
+                options.honor_infinities <- ClangFPBooleanSetting.Off
+                options.finite_math_only <- ClangFPBooleanSetting.On
+                options.cx_limited_range <- ClangFPBooleanSetting.On
+                options.complex_arithmetic <- ClangFPComplexSetting.Basic
+
+    def clang_fp_apply_unsafe_math(options: mutable ClangFPOptionVector&, enabled: bool) -> void:
+        options.approximate_functions <- ClangFPBooleanSetting.On if enabled else ClangFPBooleanSetting.Off
+        options.associative_math <- ClangFPBooleanSetting.On if enabled else ClangFPBooleanSetting.Off
+        options.reciprocal_math <- ClangFPBooleanSetting.On if enabled else ClangFPBooleanSetting.Off
+        options.signed_zeros <- ClangFPBooleanSetting.Off if enabled else ClangFPBooleanSetting.On
+        options.trapping_math <- ClangFPBooleanSetting.Off if enabled
+        options.exception_behavior <- ClangFPExceptionSetting.Ignore if enabled
+        if enabled:
+            options.contract <- ClangFPContractSetting.Fast
+        elif options.contract_explicitly_seen:
+            options.contract <- options.explicit_contract
+        elif options.contract == ClangFPContractSetting.Fast:
+            options.contract <- ClangFPContractSetting.On
+
+    def clang_fp_apply_scalar_option(text: darray[u8], offset: usize, options: mutable ClangFPOptionVector&) -> bool:
+        if clang_fp_word_equals(text, offset, sview("-ffinite-math-only", 0, -1)):
+            options.finite_math_only <- ClangFPBooleanSetting.On
+            options.honor_nans <- ClangFPBooleanSetting.Off
+            options.honor_infinities <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-finite-math-only", 0, -1)):
+            options.finite_math_only <- ClangFPBooleanSetting.Off
+            options.honor_nans <- ClangFPBooleanSetting.On
+            options.honor_infinities <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-honor-nans", 0, -1)):
+            options.honor_nans <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fhonor-nans", 0, -1)):
+            options.honor_nans <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-honor-infinities", 0, -1)):
+            options.honor_infinities <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fhonor-infinities", 0, -1)):
+            options.honor_infinities <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-signed-zeros", 0, -1)):
+            options.signed_zeros <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fsigned-zeros", 0, -1)):
+            options.signed_zeros <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fassociative-math", 0, -1)):
+            options.associative_math <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-associative-math", 0, -1)):
+            options.associative_math <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-freciprocal-math", 0, -1)):
+            options.reciprocal_math <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-reciprocal-math", 0, -1)):
+            options.reciprocal_math <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fapprox-func", 0, -1)):
+            options.approximate_functions <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-approx-func", 0, -1)):
+            options.approximate_functions <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-funsafe-math-optimizations", 0, -1)):
+            clang_fp_apply_unsafe_math(&options, true)
+            options.driver_link_effect <- ClangFPDriverLinkEffect.AutomaticIfLinked if options.driver_link_effect == ClangFPDriverLinkEffect.TargetDefault
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-unsafe-math-optimizations", 0, -1)):
+            clang_fp_apply_unsafe_math(&options, false)
+            options.driver_link_effect <- ClangFPDriverLinkEffect.TargetDefault if options.driver_link_effect == ClangFPDriverLinkEffect.AutomaticIfLinked
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-trapping-math", 0, -1)):
+            options.trapping_math <- ClangFPBooleanSetting.Off
+            options.exception_behavior <- ClangFPExceptionSetting.Ignore
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-ftrapping-math", 0, -1)):
+            options.trapping_math <- ClangFPBooleanSetting.On
+            options.exception_behavior <- ClangFPExceptionSetting.Strict
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-frounding-math", 0, -1)):
+            options.rounding_math <- ClangFPBooleanSetting.On
+            options.rounding_mode <- ClangFPRoundingSetting.Dynamic
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-rounding-math", 0, -1)):
+            options.rounding_math <- ClangFPBooleanSetting.Off
+            options.rounding_mode <- ClangFPRoundingSetting.Tonearest
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-math-errno", 0, -1)):
+            options.math_errno <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fmath-errno", 0, -1)):
+            options.math_errno <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fcx-limited-range", 0, -1)):
+            options.cx_limited_range <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-cx-limited-range", 0, -1)):
+            options.cx_limited_range <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-ffloat-store", 0, -1)):
+            options.float_store <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-float-store", 0, -1)):
+            options.float_store <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fsingle-precision-constant", 0, -1)):
+            options.single_precision_constant <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-single-precision-constant", 0, -1)):
+            options.single_precision_constant <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fstrict-float-cast-overflow", 0, -1)):
+            options.strict_float_cast_overflow <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-strict-float-cast-overflow", 0, -1)):
+            options.strict_float_cast_overflow <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fprotect-parens", 0, -1)):
+            options.protect_parens <- ClangFPBooleanSetting.On
+            return true
+        elif clang_fp_word_equals(text, offset, sview("-fno-protect-parens", 0, -1)):
+            options.protect_parens <- ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_starts_with(text, offset, sview("-ffp-contract=", 0, -1)):
+            options.contract <- ClangFPContractSetting.Fast if clang_fp_word_value_equals(text, offset, sview("-ffp-contract=", 0, -1), sview("fast", 0, -1)) else ClangFPContractSetting.On if clang_fp_word_value_equals(text, offset, sview("-ffp-contract=", 0, -1), sview("on", 0, -1)) else ClangFPContractSetting.Off if clang_fp_word_value_equals(text, offset, sview("-ffp-contract=", 0, -1), sview("off", 0, -1)) else ClangFPContractSetting.FastHonorPragmas if clang_fp_word_value_equals(text, offset, sview("-ffp-contract=", 0, -1), sview("fast-honor-pragmas", 0, -1)) else ClangFPContractSetting.Unknown
+            options.explicit_contract <- options.contract
+            options.contract_explicitly_seen <- true
+            return true
+        elif clang_fp_word_starts_with(text, offset, sview("-ffp-exception-behavior=", 0, -1)):
+            options.exception_behavior <- ClangFPExceptionSetting.Strict if clang_fp_word_value_equals(text, offset, sview("-ffp-exception-behavior=", 0, -1), sview("strict", 0, -1)) else ClangFPExceptionSetting.MayTrap if clang_fp_word_value_equals(text, offset, sview("-ffp-exception-behavior=", 0, -1), sview("maytrap", 0, -1)) else ClangFPExceptionSetting.Ignore if clang_fp_word_value_equals(text, offset, sview("-ffp-exception-behavior=", 0, -1), sview("ignore", 0, -1)) else ClangFPExceptionSetting.Unknown
+            options.trapping_math <- ClangFPBooleanSetting.On if options.exception_behavior == ClangFPExceptionSetting.Strict else ClangFPBooleanSetting.Off
+            return true
+        elif clang_fp_word_starts_with(text, offset, sview("-ffp-eval-method=", 0, -1)):
+            options.eval_method <- ClangFPEvalSetting.Source if clang_fp_word_value_equals(text, offset, sview("-ffp-eval-method=", 0, -1), sview("source", 0, -1)) else ClangFPEvalSetting.Double if clang_fp_word_value_equals(text, offset, sview("-ffp-eval-method=", 0, -1), sview("double", 0, -1)) else ClangFPEvalSetting.Extended if clang_fp_word_value_equals(text, offset, sview("-ffp-eval-method=", 0, -1), sview("extended", 0, -1)) else ClangFPEvalSetting.Unknown
+            return true
+        elif clang_fp_word_starts_with(text, offset, sview("-fcomplex-arithmetic=", 0, -1)):
+            options.complex_arithmetic <- ClangFPComplexSetting.Basic if clang_fp_word_value_equals(text, offset, sview("-fcomplex-arithmetic=", 0, -1), sview("basic", 0, -1)) else ClangFPComplexSetting.Improved if clang_fp_word_value_equals(text, offset, sview("-fcomplex-arithmetic=", 0, -1), sview("improved", 0, -1)) else ClangFPComplexSetting.Full if clang_fp_word_value_equals(text, offset, sview("-fcomplex-arithmetic=", 0, -1), sview("full", 0, -1)) else ClangFPComplexSetting.Promoted if clang_fp_word_value_equals(text, offset, sview("-fcomplex-arithmetic=", 0, -1), sview("promoted", 0, -1)) else ClangFPComplexSetting.Unknown
+            return true
+        elif clang_fp_word_starts_with(text, offset, sview("-fexcess-precision=", 0, -1)):
+            if clang_fp_word_value_equals(text, offset, sview("-fexcess-precision=", 0, -1), sview("fast", 0, -1)):
+                options.excess_precision <- ClangFPExcessPrecisionSetting.Fast
+            elif clang_fp_word_value_equals(text, offset, sview("-fexcess-precision=", 0, -1), sview("standard", 0, -1)):
+                options.excess_precision <- ClangFPExcessPrecisionSetting.Standard
+            elif clang_fp_word_value_equals(text, offset, sview("-fexcess-precision=", 0, -1), sview("16", 0, -1)):
+                options.excess_precision <- ClangFPExcessPrecisionSetting.NoExcessPrecision
+            else:
+                options.excess_precision <- ClangFPExcessPrecisionSetting.Unknown
+            return true
+        elif clang_fp_word_starts_with(text, offset, sview("-fdenormal-fp-math=", 0, -1)):
+            options.denormal <- ClangFPDenormalSetting.IEEE if clang_fp_word_value_equals(text, offset, sview("-fdenormal-fp-math=", 0, -1), sview("ieee", 0, -1)) else ClangFPDenormalSetting.PreserveSign if clang_fp_word_value_equals(text, offset, sview("-fdenormal-fp-math=", 0, -1), sview("preserve-sign", 0, -1)) else ClangFPDenormalSetting.PositiveZero if clang_fp_word_value_equals(text, offset, sview("-fdenormal-fp-math=", 0, -1), sview("positive-zero", 0, -1)) else ClangFPDenormalSetting.Unknown
+            return true
+        elif clang_fp_word_starts_with(text, offset, sview("-fdenormal-fp-math-fp32=", 0, -1)):
+            options.denormal_fp32 <- ClangFPDenormalSetting.IEEE if clang_fp_word_value_equals(text, offset, sview("-fdenormal-fp-math-fp32=", 0, -1), sview("ieee", 0, -1)) else ClangFPDenormalSetting.PreserveSign if clang_fp_word_value_equals(text, offset, sview("-fdenormal-fp-math-fp32=", 0, -1), sview("preserve-sign", 0, -1)) else ClangFPDenormalSetting.PositiveZero if clang_fp_word_value_equals(text, offset, sview("-fdenormal-fp-math-fp32=", 0, -1), sview("positive-zero", 0, -1)) else ClangFPDenormalSetting.Unknown
+            return true
+        return false
+
+    def clang_fp_options_mark_unknown(options: mutable ClangFPOptionVector&) -> void:
+        options.exception_behavior <- ClangFPExceptionSetting.Unknown
+        options.fenv_access <- ClangFPBooleanSetting.Unknown
+        options.rounding_mode <- ClangFPRoundingSetting.Unknown
+        options.rounding_math <- ClangFPBooleanSetting.Unknown
+        options.contract <- ClangFPContractSetting.Unknown
+        options.explicit_contract <- ClangFPContractSetting.Unknown
+        options.contract_explicitly_seen <- false
+        options.denormal <- ClangFPDenormalSetting.Unknown
+        options.denormal_fp32 <- ClangFPDenormalSetting.Unknown
+        options.math_errno <- ClangFPBooleanSetting.Unknown
+        options.honor_nans <- ClangFPBooleanSetting.Unknown
+        options.honor_infinities <- ClangFPBooleanSetting.Unknown
+        options.finite_math_only <- ClangFPBooleanSetting.Unknown
+        options.signed_zeros <- ClangFPBooleanSetting.Unknown
+        options.associative_math <- ClangFPBooleanSetting.Unknown
+        options.reciprocal_math <- ClangFPBooleanSetting.Unknown
+        options.approximate_functions <- ClangFPBooleanSetting.Unknown
+        options.trapping_math <- ClangFPBooleanSetting.Unknown
+        options.cx_limited_range <- ClangFPBooleanSetting.Unknown
+        options.float_store <- ClangFPBooleanSetting.Unknown
+        options.strict_float_cast_overflow <- ClangFPBooleanSetting.Unknown
+        options.single_precision_constant <- ClangFPBooleanSetting.Unknown
+        options.protect_parens <- ClangFPBooleanSetting.Unknown
+        options.complex_arithmetic <- ClangFPComplexSetting.Unknown
+        options.eval_method <- ClangFPEvalSetting.Unknown
+        options.excess_precision <- ClangFPExcessPrecisionSetting.Unknown
+        options.driver_link_effect <- ClangFPDriverLinkEffect.Unknown
+
+    def clang_fp_option_is_partial(text: darray[u8], offset: usize) -> bool:
+        return false if not (clang_fp_word_starts_with(text, offset, sview("-", 0, -1)) or clang_fp_word_starts_with(text, offset, sview("/", 0, -1)))
+        return true if clang_fp_word_starts_with(text, offset, sview("-mllvm=", 0, -1))
+        # These alter whether Clang links the process-wide FTZ/DAZ
+        # constructor; a per-translation-unit arithmetic mode cannot model it.
+        return true if clang_fp_word_equals(text, offset, sview("-mdaz-ftz", 0, -1)) or clang_fp_word_equals(text, offset, sview("-mno-daz-ftz", 0, -1))
+        return true if clang_fp_word_starts_with(text, offset, sview("-ffp-", 0, -1)) and not clang_fp_word_starts_with(text, offset, sview("-ffp-model=", 0, -1))
+        return true if clang_fp_word_starts_with(text, offset, sview("-fdenormal-fp-math", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-funsafe-math-optimizations", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-unsafe-math-optimizations", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-ffinite-math-only", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-finite-math-only", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fno-honor-nans", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-honor-infinities", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fno-signed-zeros", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fsigned-zeros", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fassociative-math", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-associative-math", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-freciprocal-math", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-reciprocal-math", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fapprox-func", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-approx-func", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fno-trapping-math", 0, -1)) or clang_fp_word_equals(text, offset, sview("-ftrapping-math", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fno-rounding-math", 0, -1)) or clang_fp_word_equals(text, offset, sview("-frounding-math", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fno-math-errno", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fmath-errno", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fcx-limited-range", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-cx-limited-range", 0, -1))
+        return true if clang_fp_word_starts_with(text, offset, sview("-fexcess-precision", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-ffloat-store", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-float-store", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fsingle-precision-constant", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-single-precision-constant", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fstrict-float-cast-overflow", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-strict-float-cast-overflow", 0, -1))
+        return true if clang_fp_word_equals(text, offset, sview("-fprotect-parens", 0, -1)) or clang_fp_word_equals(text, offset, sview("-fno-protect-parens", 0, -1))
+        return true if clang_fp_word_starts_with(text, offset, sview("/fp:", 0, -1)) and not (clang_fp_word_equals(text, offset, sview("/fp:fast", 0, -1)) or clang_fp_word_equals(text, offset, sview("/fp:precise", 0, -1)) or clang_fp_word_equals(text, offset, sview("/fp:strict", 0, -1)))
+        # Do not silently interpret a newer or vendor-specific math switch as
+        # the strict default merely because this translator has not cataloged
+        # that individual spelling yet.
+        return true if clang_fp_word_contains(text, offset, sview("fp-", 0, -1)) or clang_fp_word_contains(text, offset, sview("math", 0, -1)) or clang_fp_word_contains(text, offset, sview("float", 0, -1)) or clang_fp_word_contains(text, offset, sview("signed-zero", 0, -1))
+        return true if clang_fp_word_contains(text, offset, sview("nan", 0, -1)) or clang_fp_word_contains(text, offset, sview("infin", 0, -1)) or clang_fp_word_contains(text, offset, sview("denorm", 0, -1)) or clang_fp_word_contains(text, offset, sview("precision", 0, -1)) or clang_fp_word_contains(text, offset, sview("rounding", 0, -1)) or clang_fp_word_contains(text, offset, sview("trapping", 0, -1))
+        return true if clang_fp_word_contains(text, offset, sview("finite", 0, -1)) or clang_fp_word_contains(text, offset, sview("approx", 0, -1)) or clang_fp_word_contains(text, offset, sview("recip", 0, -1)) or clang_fp_word_contains(text, offset, sview("fenv", 0, -1)) or clang_fp_word_contains(text, offset, sview("complex-arithmetic", 0, -1))
+        return false
+
+    def clang_fp_mode_from_argv(text: darray[u8], offsets: darray[usize]) -> ClangFloatingPointMode:
+        mode: mutable ClangFloatingPointMode = ClangFloatingPointMode.Strict
+        partial_option_seen: mutable bool = false
+        ofast_seen: mutable bool = false
+        index: mutable usize = 1.usize()
+        while index < offsets.count |text, offsets, mode, partial_option_seen, ofast_seen, index|:
+            offset: usize = offsets[index.usize()]
+            if clang_fp_word_equals(text, offset, sview("--", 0, -1)):
+                break
+            elif clang_fp_word_equals(text, offset, sview("-Xclang", 0, -1)):
+                # Clang forwards this following word to cc1 as an option, so
+                # inspect it on the next iteration rather than treating it as
+                # ordinary option payload.
+                pass
+            elif clang_fp_word_equals(text, offset, sview("-mllvm", 0, -1)):
+                # Backend options are unrestricted and may change FP
+                # assumptions; do not guess from an opaque forwarded value.
+                partial_option_seen <- true
+                mode <- ClangFloatingPointMode.Unknown
+                index <- index + 1.usize() if index + 1.usize() < offsets.count
+            elif clang_argv_option_takes_value(text, offset):
+                index <- index + 1.usize()
+            elif clang_argv_option_has_attached_value(text, offset):
+                pass
+            elif clang_fp_word_equals(text, offset, sview("-Ofast", 0, -1)):
+                mode <- ClangFloatingPointMode.Relaxed
+                ofast_seen <- true
+            elif clang_fp_word_equals(text, offset, sview("-ffast-math", 0, -1)) or clang_fp_word_equals(text, offset, sview("/fp:fast", 0, -1)):
+                mode <- ClangFloatingPointMode.Relaxed
+            elif clang_fp_word_equals(text, offset, sview("-fno-fast-math", 0, -1)) or clang_fp_word_equals(text, offset, sview("/fp:precise", 0, -1)) or clang_fp_word_equals(text, offset, sview("/fp:strict", 0, -1)):
+                mode <- ClangFloatingPointMode.Strict
+            elif ofast_seen and clang_fp_word_starts_with(text, offset, sview("-ffp-model=", 0, -1)) and not clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("aggressive", 0, -1)):
+                # Clang takes a special override/warning path for incompatible
+                # models under effective -Ofast; this is not simple last-option
+                # wins, so do not assign a guessed effective profile.
+                partial_option_seen <- true
+                mode <- ClangFloatingPointMode.Unknown
+            elif clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("fast", 0, -1)) or clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("aggressive", 0, -1)):
+                mode <- ClangFloatingPointMode.Relaxed
+            elif clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("precise", 0, -1)) or clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("strict", 0, -1)):
+                mode <- ClangFloatingPointMode.Strict
+            elif ofast_seen and clang_fp_word_starts_with(text, offset, sview("-O", 0, -1)):
+                # Clang only expands -Ofast to the fast-math profile when it
+                # remains the effective optimization level. Without a full
+                # model of every driver option ordering, refuse to infer the
+                # final FP profile after a later -O* switch.
+                partial_option_seen <- true
+                mode <- ClangFloatingPointMode.Unknown
+            elif clang_fp_option_is_partial(text, offset):
+                partial_option_seen <- true
+                mode <- ClangFloatingPointMode.Unknown
+            elif clang_fp_word_starts_with(text, offset, sview("-ffp-model=", 0, -1)):
+                mode <- ClangFloatingPointMode.Unknown
+            index <- index + 1.usize()
+        return ClangFloatingPointMode.Unknown if partial_option_seen else mode
+
+    def clang_fp_options_from_argv(text: darray[u8], offsets: darray[usize]) -> ClangFPOptionVector:
+        options: mutable ClangFPOptionVector = clang_fp_options_default()
+        options.mode <- clang_fp_mode_from_argv(text, offsets)
+        shared_seen: mutable bool = false
+        link_context_unknown_seen: mutable bool = false
+        ofast_seen: mutable bool = false
+        ofast_precedence_unknown: mutable bool = false
+        index: mutable usize = 1.usize()
+        while index < offsets.count |text, offsets, options, shared_seen, link_context_unknown_seen, ofast_seen, ofast_precedence_unknown, index|:
+            offset: usize = offsets[index]
+            if clang_fp_word_equals(text, offset, sview("--", 0, -1)):
+                break
+            elif clang_fp_word_equals(text, offset, sview("-Xclang", 0, -1)):
+                # This value is another cc1 option, so leave it for the next
+                # loop iteration; the top-level driver would not interpret it.
+                pass
+            elif clang_fp_word_equals(text, offset, sview("-mllvm", 0, -1)):
+                # LLVM pass/codegen options can alter floating-point
+                # semantics, so the effective vector is unknown.
+                options.unknown_option_seen <- true
+                index <- index + 1.usize() if index + 1.usize() < offsets.count
+            elif clang_fp_word_equals(text, offset, sview("-Xlinker", 0, -1)):
+                # The forwarded value can change linker mode or startup files;
+                # do not interpret it as a top-level compiler option.
+                link_context_unknown_seen <- true
+                index <- index + 1.usize() if index + 1.usize() < offsets.count
+            elif clang_argv_option_takes_value(text, offset):
+                index <- index + 1.usize()
+            elif clang_argv_option_has_attached_value(text, offset):
+                pass
+            elif clang_fp_word_equals(text, offset, sview("-Ofast", 0, -1)) or clang_fp_word_equals(text, offset, sview("-ffast-math", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Aggressive, false)
+                ofast_seen <- true if clang_fp_word_equals(text, offset, sview("-Ofast", 0, -1))
+            elif clang_fp_word_equals(text, offset, sview("/fp:fast", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Aggressive, false)
+                options.driver_link_effect <- ClangFPDriverLinkEffect.Unknown
+            elif clang_fp_word_equals(text, offset, sview("-fno-fast-math", 0, -1)) or clang_fp_word_equals(text, offset, sview("/fp:precise", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Precise, true)
+            elif clang_fp_word_equals(text, offset, sview("/fp:strict", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Strict, false)
+            elif clang_fp_word_starts_with(text, offset, sview("-Wl,", 0, -1)):
+                link_context_unknown_seen <- true
+            elif ofast_seen and clang_fp_word_starts_with(text, offset, sview("-ffp-model=", 0, -1)) and not clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("aggressive", 0, -1)):
+                options.unknown_option_seen <- true
+            elif clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("precise", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Precise, false)
+            elif clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("strict", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Strict, false)
+            elif clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("fast", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Fast, false)
+            elif clang_fp_word_value_equals(text, offset, sview("-ffp-model=", 0, -1), sview("aggressive", 0, -1)):
+                clang_fp_apply_profile(&options, ClangFPModelProfile.Aggressive, false)
+            elif clang_fp_word_starts_with(text, offset, sview("-ffp-model=", 0, -1)):
+                options.unknown_option_seen <- true
+            elif clang_fp_word_equals(text, offset, sview("-mdaz-ftz", 0, -1)) or clang_fp_word_equals(text, offset, sview("-mno-daz-ftz", 0, -1)):
+                # These switches are target-specific (for example, unused on
+                # Apple ARM), so argv alone cannot establish their effect.
+                options.driver_link_effect <- ClangFPDriverLinkEffect.Unknown
+            elif clang_fp_word_equals(text, offset, sview("-shared", 0, -1)):
+                shared_seen <- true
+            elif clang_fp_word_equals(text, offset, sview("-nostartfiles", 0, -1)) or clang_fp_word_equals(text, offset, sview("-nostdlib", 0, -1)) or clang_fp_word_equals(text, offset, sview("-nodefaultlibs", 0, -1)) or clang_fp_word_equals(text, offset, sview("-r", 0, -1)):
+                link_context_unknown_seen <- true
+            elif ofast_seen and clang_fp_word_starts_with(text, offset, sview("-O", 0, -1)):
+                ofast_precedence_unknown <- true
+            elif clang_fp_apply_scalar_option(text, offset, &options):
+                pass
+            elif clang_fp_option_is_partial(text, offset):
+                options.unknown_option_seen <- true
+            index <- index + 1.usize()
+        # Clang disables floating-point contraction whenever paren protection
+        # is active. Resolve this after argv scanning so option order cannot
+        # re-enable contraction, while a later -fno-protect-parens naturally
+        # restores the contract selected by the other options.
+        options.contract <- ClangFPContractSetting.Off if options.protect_parens == ClangFPBooleanSetting.On
+        options.driver_link_effect <- ClangFPDriverLinkEffect.Suppressed if shared_seen and options.driver_link_effect == ClangFPDriverLinkEffect.AutomaticIfLinked
+        if link_context_unknown_seen and options.driver_link_effect != ClangFPDriverLinkEffect.TargetDefault and options.driver_link_effect != ClangFPDriverLinkEffect.NotLinked:
+            options.driver_link_effect <- ClangFPDriverLinkEffect.Unknown
+        options.unknown_option_seen <- true if ofast_precedence_unknown
+        clang_fp_options_mark_unknown(&options) if options.unknown_option_seen
+        # No-link actions dominate uncertainty in link/runtime effects. Keep
+        # this after mark_unknown, which invalidates the complete FP vector.
+        options.driver_link_effect <- ClangFPDriverLinkEffect.NotLinked if clang_argv_has_no_link_action(text, offsets)
+        return options
+
+    # Preserve link-action semantics across compile-argv normalization: parse
+    # arithmetic options from normalized argv, then overlay only the driver
+    # context from the original, response-file-expanded invocation.
+    def clang_fp_options_from_normalized_argv(normalized_text: darray[u8], normalized_offsets: darray[usize], original_text: darray[u8], original_offsets: darray[usize]) -> ClangFPOptionVector:
+        options: mutable ClangFPOptionVector = clang_fp_options_from_argv(normalized_text, normalized_offsets)
+        options.driver_link_effect <- ClangFPDriverLinkEffect.NotLinked if clang_argv_has_no_link_action(original_text, original_offsets)
+        return options
+
+    def clang_fp_mode_name(mode: ClangFloatingPointMode) -> sview:
+        return "strict" if mode == ClangFloatingPointMode.Strict else "relaxed" if mode == ClangFloatingPointMode.Relaxed else "unknown"
+
+    def clang_fp_boolean_setting_name(setting: ClangFPBooleanSetting) -> sview:
+        return "target-default" if setting == ClangFPBooleanSetting.TargetDefault else "off" if setting == ClangFPBooleanSetting.Off else "on" if setting == ClangFPBooleanSetting.On else "unknown"
+
+    def clang_fp_exception_setting_name(setting: ClangFPExceptionSetting) -> sview:
+        return "target-default" if setting == ClangFPExceptionSetting.TargetDefault else "ignore" if setting == ClangFPExceptionSetting.Ignore else "maytrap" if setting == ClangFPExceptionSetting.MayTrap else "strict" if setting == ClangFPExceptionSetting.Strict else "unknown"
+
+    def clang_fp_rounding_setting_name(setting: ClangFPRoundingSetting) -> sview:
+        return "target-default" if setting == ClangFPRoundingSetting.TargetDefault else "tonearest" if setting == ClangFPRoundingSetting.Tonearest else "dynamic" if setting == ClangFPRoundingSetting.Dynamic else "downward" if setting == ClangFPRoundingSetting.Downward else "upward" if setting == ClangFPRoundingSetting.Upward else "towardzero" if setting == ClangFPRoundingSetting.TowardZero else "unknown"
+
+    def clang_fp_contract_setting_name(setting: ClangFPContractSetting) -> sview:
+        return "target-default" if setting == ClangFPContractSetting.TargetDefault else "off" if setting == ClangFPContractSetting.Off else "on" if setting == ClangFPContractSetting.On else "fast" if setting == ClangFPContractSetting.Fast else "fast-honor-pragmas" if setting == ClangFPContractSetting.FastHonorPragmas else "unknown"
+
+    def clang_fp_denormal_setting_name(setting: ClangFPDenormalSetting) -> sview:
+        return "target-default" if setting == ClangFPDenormalSetting.TargetDefault else "ieee" if setting == ClangFPDenormalSetting.IEEE else "preserve-sign" if setting == ClangFPDenormalSetting.PreserveSign else "positive-zero" if setting == ClangFPDenormalSetting.PositiveZero else "unknown"
+
+    def clang_fp_complex_setting_name(setting: ClangFPComplexSetting) -> sview:
+        return "target-default" if setting == ClangFPComplexSetting.TargetDefault else "basic" if setting == ClangFPComplexSetting.Basic else "improved" if setting == ClangFPComplexSetting.Improved else "full" if setting == ClangFPComplexSetting.Full else "promoted" if setting == ClangFPComplexSetting.Promoted else "unknown"
+
+    def clang_fp_eval_setting_name(setting: ClangFPEvalSetting) -> sview:
+        return "target-default" if setting == ClangFPEvalSetting.TargetDefault else "source" if setting == ClangFPEvalSetting.Source else "double" if setting == ClangFPEvalSetting.Double else "extended" if setting == ClangFPEvalSetting.Extended else "unknown"
+
+    def clang_fp_excess_precision_setting_name(setting: ClangFPExcessPrecisionSetting) -> sview:
+        return "target-default" if setting == ClangFPExcessPrecisionSetting.TargetDefault else "none" if setting == ClangFPExcessPrecisionSetting.NoExcessPrecision else "fast" if setting == ClangFPExcessPrecisionSetting.Fast else "standard" if setting == ClangFPExcessPrecisionSetting.Standard else "unknown"
+
+    def clang_fp_driver_link_effect_name(effect: ClangFPDriverLinkEffect) -> sview:
+        return "target-default" if effect == ClangFPDriverLinkEffect.TargetDefault else "automatic-if-linked" if effect == ClangFPDriverLinkEffect.AutomaticIfLinked else "explicitly-linked" if effect == ClangFPDriverLinkEffect.ExplicitlyLinked else "suppressed" if effect == ClangFPDriverLinkEffect.Suppressed else "not-linked" if effect == ClangFPDriverLinkEffect.NotLinked else "unknown"

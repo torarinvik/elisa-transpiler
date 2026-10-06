@@ -79,21 +79,24 @@ extend CTranslator:
         return false if not (cli_source_map_add_file(range.file, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
         return cli_source_map_add_file(range.included_from, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
 
+    def cli_source_map_compare_paths(left: sview, right: sview) -> i64:
+        shared: i64 = left.len if left.len < right.len else right.len
+        for index in 0..<shared |left, right|:
+            left_byte: i64 = string_view_index(left, index)
+            right_byte: i64 = string_view_index(right, index)
+            return -1 if left_byte < right_byte
+            return 1 if left_byte > right_byte
+        return -1 if left.len < right.len
+        return 1 if left.len > right.len
+        return 0
+
     def cli_source_map_sort_files(files: mutable darray[CliSourceMapFile]&) -> void:
         for index in 1..<files.count.i64() |files|:
             cursor: mutable i64 = index
             while cursor > 0 |files, cursor|:
                 left: CliSourceMapFile = files[(cursor - 1).usize()]
                 right: CliSourceMapFile = files[cursor.usize()]
-                swap: mutable bool = false
-                shared: i64 = left.path.len if left.path.len < right.path.len else right.path.len
-                for byte_index in 0..<shared |left, right, swap|:
-                    left_byte: i64 = string_view_index(left.path, byte_index)
-                    right_byte: i64 = string_view_index(right.path, byte_index)
-                    if left_byte != right_byte:
-                        swap <- left_byte > right_byte
-                        break
-                swap <- left.path.len > right.path.len if not swap and left.path.len != right.path.len
+                swap: bool = cli_source_map_compare_paths(left.path, right.path) > 0
                 break if not swap
                 files[(cursor - 1).usize()] <- right
                 files[cursor.usize()] <- left
@@ -105,13 +108,47 @@ extend CTranslator:
             digit: i64 = ((value >> shift.u64()) & 15.u64()).i64()
             out.push((48 + digit).u8()) if digit < 10 else out.push((87 + digit).u8())
 
-    def cli_source_map_append_range[@r](out: mutable darray[u8]&, name: sview, range: TypedOwnedSourceRange[r], first: mutable bool&) -> void:
+    def cli_source_map_append_hash(out: mutable darray[u8]&, hash: TypedContentHash) -> void:
+        if not hash.available:
+            append_view(out, sview("null", 0, -1))
+        else:
+            out.push(34.u8())
+            cli_source_map_append_hex_u64(out, hash.value)
+            out.push(34.u8())
+
+    def cli_source_map_hash_for_path(files: darray[CliSourceMapFile], path: sview) -> TypedContentHash:
+        unavailable: TypedContentHash = TypedContentHash{value: 0, available: false}
+        low: mutable i64 = 0
+        high: mutable i64 = files.count.i64()
+        while low < high |files, path, low, high|:
+            middle: i64 = low + (high - low) / 2
+            file: CliSourceMapFile = files[middle.usize()]
+            comparison: i64 = cli_source_map_compare_paths(file.path, path)
+            if comparison < 0:
+                low <- middle + 1
+            else:
+                high <- middle
+        if low < files.count.i64():
+            file: CliSourceMapFile = files[low.usize()]
+            return TypedContentHash{value: file.content_hash, available: true} if cli_source_map_compare_paths(file.path, path) == 0
+        return unavailable
+
+    def cli_source_map_append_range[@r](out: mutable darray[u8]&, name: sview, range: TypedOwnedSourceRange[r], files: darray[CliSourceMapFile], first: mutable bool&) -> void:
         out.push(44.u8()) if not first[0]
         cli_append_json_string(out, name)
         append_view(out, sview(":{", 0, -1))
         first <- true
         cli_append_json_view_field(out, sview("path", 0, -1), range.file, first)
         cli_append_json_view_field(out, sview("included_from", 0, -1), range.included_from, first)
+        out.push(44.u8()) if not first[0]
+        cli_append_json_string(out, sview("content_hash", 0, -1))
+        append_view(out, sview(":", 0, -1))
+        cli_source_map_append_hash(out, cli_source_map_hash_for_path(files, range.file))
+        first <- false
+        out.push(44.u8())
+        cli_append_json_string(out, sview("included_from_content_hash", 0, -1))
+        append_view(out, sview(":", 0, -1))
+        cli_source_map_append_hash(out, cli_source_map_hash_for_path(files, range.included_from))
         cli_append_json_i64_field(out, sview("start_offset", 0, -1), range.start_offset, first)
         cli_append_json_i64_field(out, sview("end_offset", 0, -1), range.end_offset, first)
         out.push(125.u8())
@@ -135,7 +172,7 @@ extend CTranslator:
         source_bytes_hashed <- hashed_bytes
 
         out.count <- 0.usize()
-        append_view(out, sview("{\"schema_version\":1,\"offset_unit\":\"byte\",\"offset_convention\":\"zero-based-half-open\",\"hash_algorithm\":\"fnv1a64\",\"sources\":[", 0, -1))
+        append_view(out, sview("{\"schema_version\":3,\"offset_unit\":\"byte\",\"offset_convention\":\"zero-based-half-open\",\"hash_algorithm\":\"fnv1a64\",\"sources\":[", 0, -1))
         for index in 0..<files.count |out, files|:
             file: CliSourceMapFile = files[index]
             out.push(44.u8()) if index > 0
@@ -160,9 +197,10 @@ extend CTranslator:
             first: mutable bool = true
             cli_append_json_i64_field(out, sview("generated_start", 0, -1), span.generated_start, &first)
             cli_append_json_i64_field(out, sview("generated_end", 0, -1), span.generated_end, &first)
-            cli_source_map_append_range(out, sview("source", 0, -1), span.source, &first)
-            cli_source_map_append_range(out, sview("spelling", 0, -1), span.spelling, &first)
-            cli_source_map_append_range(out, sview("expansion", 0, -1), span.expansion, &first)
+            cli_append_json_view_field(out, sview("translation_unit", 0, -1), span.translation_unit, &first)
+            cli_source_map_append_range(out, sview("source", 0, -1), span.source, files, &first)
+            cli_source_map_append_range(out, sview("spelling", 0, -1), span.spelling, files, &first)
+            cli_source_map_append_range(out, sview("expansion", 0, -1), span.expansion, files, &first)
             cli_append_json_view_field(out, sview("synthesized_reason", 0, -1), span.synthesized_reason, first)
             out.push(125.u8())
             if out.count > max_json_bytes:

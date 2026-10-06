@@ -1,0 +1,81 @@
+# Fail closed on target scalar formats that Elisa cannot represent faithfully.
+# Pointer values remain opaque until a source use materializes a value. Floating
+# formats outside verified binary32/binary64 representations are rejected.
+
+extend CTranslator:
+    def typed_type_unsupported_float_capability(abi: ClangTargetABI, type_name: sview) -> sview:
+        if c_type_is_function(type_name):
+            result_type: sview = c_function_return_type(type_name)
+            result_capability: sview = typed_type_unsupported_float_capability(abi, result_type)
+            return result_capability if result_capability.len > 0
+            parameter: mutable i64 = 0
+            while true |type_name, parameter|:
+                parameter_type: sview = c_function_parameter_type(type_name, parameter)
+                return sview("", 0, 0) if parameter_type.len == 0
+                parameter_capability: sview = typed_type_unsupported_float_capability(abi, parameter_type)
+                return parameter_capability if parameter_capability.len > 0
+                parameter <- parameter + 1
+        return sview("", 0, 0) if c_type_pointer_count(type_name) > 0
+        # Arrays are by-value objects even though their element type is not
+        # reflected by the pointer-depth query. Inspect their element spelling
+        # before deciding whether the declaration is only an opaque pointer.
+        element_type: sview = c_array_base_type(type_name) if c_type_is_array(type_name) else type_name
+        return sview("", 0, 0) if c_type_pointer_count(element_type) > 0
+        base: sview = c_type_named_base(element_type)
+        return sview("long double floating-point format and ABI", 0, -1) if sview_eq(base, sview("long double", 0, -1)) or sview_eq(base, sview("Long_double", 0, -1))
+        return sview("target float representation and ABI", 0, -1) if sview_eq(base, sview("float", 0, -1)) and not abi.float_is_binary32
+        return sview("target double representation and ABI", 0, -1) if sview_eq(base, sview("double", 0, -1)) and not abi.double_is_binary64
+        has_complex: bool = typed_type_spelling_has_word(base, sview("_Complex", 0, -1)) and (typed_type_spelling_has_word(base, sview("float", 0, -1)) or typed_type_spelling_has_word(base, sview("double", 0, -1)))
+        return sview("complex floating-point representation and ABI", 0, -1) if has_complex
+        return sview("extended floating-point format and ABI", 0, -1) if sview_eq(base, sview("_Float16", 0, -1)) or sview_eq(base, sview("_Float32", 0, -1)) or sview_eq(base, sview("_Float64", 0, -1)) or sview_eq(base, sview("_Float128", 0, -1)) or sview_eq(base, sview("_Float32x", 0, -1)) or sview_eq(base, sview("_Float64x", 0, -1)) or sview_eq(base, sview("_Float128x", 0, -1)) or sview_eq(base, sview("__fp16", 0, -1)) or sview_eq(base, sview("__bf16", 0, -1)) or sview_eq(base, sview("__float80", 0, -1)) or sview_eq(base, sview("__float128", 0, -1)) or sview_eq(base, sview("__ibm128", 0, -1)) or sview_eq(base, sview("__half", 0, -1))
+        return sview("", 0, 0)
+
+    def typed_pointer_arithmetic_float_capability(abi: ClangTargetABI, pointer_type: sview) -> sview:
+        return sview("", 0, 0) if c_type_pointer_count(pointer_type) == 0
+        return sview("", 0, 0) if c_type_pointer_count(pointer_type) > 1 and not c_type_is_pointer_to_array(pointer_type)
+        pointee_type: sview = string_view_prefix(pointer_type, sview_find_byte(pointer_type, 40)) if c_type_is_pointer_to_array(pointer_type) else c_type_pointer_base(pointer_type)
+        return typed_type_unsupported_float_capability(abi, pointee_type)
+
+    def typed_ast_pointer_arithmetic_float_capability[@r](abi: ClangTargetABI, node: JsonValueHandle[r]) -> sview @r:
+        kind: sview = ast_kind(node)
+        if sview_eq(kind, sview("BinaryOperator", 0, -1)) or sview_eq(kind, sview("CompoundAssignOperator", 0, -1)):
+            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            return sview("", 0, 0) if not (sview_eq(opcode, sview("+", 0, -1)) or sview_eq(opcode, sview("-", 0, -1)) or sview_eq(opcode, sview("+=", 0, -1)) or sview_eq(opcode, sview("-=", 0, -1)))
+            count: i64 = ast_child_count(node)
+            if count > 0:
+                for index in 0..<count |node, abi|:
+                    capability: sview = typed_pointer_arithmetic_float_capability(abi, ast_abi_qual_type(ast_child(node, index)))
+                    return capability if capability.len > 0
+        if sview_eq(kind, sview("UnaryOperator", 0, -1)):
+            opcode: sview = ast_string(ast_field(node, sview("opcode", 0, -1)))
+            if sview_eq(opcode, sview("++", 0, -1)) or sview_eq(opcode, sview("--", 0, -1)):
+                return typed_pointer_arithmetic_float_capability(abi, ast_abi_qual_type(ast_child(node, 0))) if ast_child_count(node) > 0
+        return sview("", 0, 0)
+
+    def typed_record_unsupported_target_float[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], capability: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return if ctx.unsupported_target_float_seen
+        return if capability.len == 0
+        ctx.unsupported_target_float_seen <- true
+        typed_record_unsupported(ctx, node, capability) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_scan_unsupported_target_types[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], inside_user_declaration: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        source_owned: mutable bool = inside_user_declaration
+        # Resolve source ownership only at declaration boundaries. Evaluating
+        # physical source-path provenance for every expression in a large AST
+        # would add repeated filesystem work to this linear scan.
+        if not source_owned and sview_ends_with(ast_kind(node), sview("Decl", 0, -1)):
+            source_owned <- ast_is_user_declaration(node, ctx.source) or ast_is_user_type_declaration(node, ctx.source)
+        if not ctx.unsupported_target_float_seen and source_owned:
+            type_node: JsonValueHandle[r] = ast_field(node, sview("type", 0, -1))
+            if not json_handle_is_null(type_node):
+                type_name: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                capability: sview = typed_type_unsupported_float_capability(ctx.target_abi, type_name)
+                typed_record_unsupported_target_float(ctx, node, capability) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if not ctx.unsupported_target_float_seen:
+                pointer_arithmetic_capability: sview = typed_ast_pointer_arithmetic_float_capability(ctx.target_abi, node)
+                typed_record_unsupported_target_float(ctx, node, pointer_arithmetic_capability) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return if ctx.unsupported_target_float_seen
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node|:
+                typed_scan_unsupported_target_types(ctx, ast_child(node, index), source_owned) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

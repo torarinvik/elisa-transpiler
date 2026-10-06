@@ -1,0 +1,10 @@
+extend CTranslator:
+    # Keep source spelling for display, but retain a physical identity for
+    # diagnostics so relative paths and symlink aliases can be compared.
+    def typed_canonical_source_path(path: sview, working_directory: sview) -> sview can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+        return sview("", 0, 0) if path.len == 0
+        resolved: mutable darray[u8] = []
+        found: bool = ast_json_resolve_path(path, working_directory, &resolved) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return sview("", 0, 0) if not found
+        copied: cstr = string_view_copy(bytes_view(resolved)) can Memory.Allocate, Abort.Panic
+        return sview(copied, 0, -1)

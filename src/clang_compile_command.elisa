@@ -110,17 +110,6 @@ extend CTranslator:
         failure_path: mutable darray[u8] = []
         clang_expand_compile_responses_detailed(directory, source_text, source_offsets, target_text, target_offsets, max_response_bytes, valid, &failure, &failure_path) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
 
-    def clang_compile_option_takes_value(text: darray[u8], offset: usize) -> bool:
-        return argv_word_equals(text, offset, sview("-I", 0, -1)) or argv_word_equals(text, offset, sview("-isystem", 0, -1)) or argv_word_equals(text, offset, sview("-iquote", 0, -1)) or argv_word_equals(text, offset, sview("-idirafter", 0, -1)) or argv_word_equals(text, offset, sview("-iframework", 0, -1)) or argv_word_equals(text, offset, sview("-iframeworkwithsysroot", 0, -1))
-        return true if argv_word_equals(text, offset, sview("-include", 0, -1)) or argv_word_equals(text, offset, sview("-include-pch", 0, -1)) or argv_word_equals(text, offset, sview("-include-pth", 0, -1)) or argv_word_equals(text, offset, sview("-imacros", 0, -1))
-        return true if argv_word_equals(text, offset, sview("-iprefix", 0, -1)) or argv_word_equals(text, offset, sview("-iwithprefix", 0, -1)) or argv_word_equals(text, offset, sview("-iwithprefixbefore", 0, -1)) or argv_word_equals(text, offset, sview("-isysroot", 0, -1)) or argv_word_equals(text, offset, sview("--sysroot", 0, -1))
-        return true if argv_word_equals(text, offset, sview("-target", 0, -1)) or argv_word_equals(text, offset, sview("--target", 0, -1)) or argv_word_equals(text, offset, sview("-arch", 0, -1)) or argv_word_equals(text, offset, sview("-x", 0, -1)) or argv_word_equals(text, offset, sview("-std", 0, -1))
-        return true if argv_word_equals(text, offset, sview("-D", 0, -1)) or argv_word_equals(text, offset, sview("-U", 0, -1)) or argv_word_equals(text, offset, sview("-Xclang", 0, -1)) or argv_word_equals(text, offset, sview("-Xlinker", 0, -1)) or argv_word_equals(text, offset, sview("-Xpreprocessor", 0, -1)) or argv_word_equals(text, offset, sview("-Xassembler", 0, -1)) or argv_word_equals(text, offset, sview("-mllvm", 0, -1))
-        return true if argv_word_equals(text, offset, sview("-fplugin", 0, -1)) or argv_word_equals(text, offset, sview("-load", 0, -1)) or argv_word_equals(text, offset, sview("-plugin", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-map-file", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-file", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-output", 0, -1))
-        return true if argv_word_equals(text, offset, sview("-fmodule-name", 0, -1)) or argv_word_equals(text, offset, sview("-fmodules-cache-path", 0, -1)) or argv_word_equals(text, offset, sview("-fmodule-user-build-path", 0, -1)) or argv_word_equals(text, offset, sview("-resource-dir", 0, -1))
-        return true if argv_word_equals(text, offset, sview("-working-directory", 0, -1)) or argv_word_equals(text, offset, sview("-ivfsoverlay", 0, -1)) or argv_word_equals(text, offset, sview("-B", 0, -1)) or argv_word_equals(text, offset, sview("-F", 0, -1)) or argv_word_equals(text, offset, sview("-L", 0, -1)) or argv_word_equals(text, offset, sview("-l", 0, -1))
-        return false
-
     # Serialize normalized argv as decimal-length-prefixed words. This stays a
     # valid Elisa string even when an argument contains delimiter-like bytes.
     # At the same time, identify the actual positional source operand so a
@@ -136,10 +125,11 @@ extend CTranslator:
             elif argv_word_equals(text, offsets[index], sview("-fno-short-enums", 0, -1)):
                 enabled <- false
         return enabled
-    def clang_compile_argv_signature(directory: sview, command: sview, arguments: darray[sview], use_arguments: bool, expected_source: sview, max_response_bytes: usize, source_operand_checked: mutable bool&, source_operand_matches: mutable bool&, short_enums_out: mutable bool&, response_failure: mutable ClangResponseFailure&, response_failure_path: mutable darray[u8]&) -> sview can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+    def clang_compile_argv_signature(directory: sview, command: sview, arguments: darray[sview], use_arguments: bool, expected_source: sview, max_response_bytes: usize, source_operand_checked: mutable bool&, source_operand_matches: mutable bool&, short_enums_out: mutable bool&, floating_point_options_out: mutable ClangFPOptionVector&, response_failure: mutable ClangResponseFailure&, response_failure_path: mutable darray[u8]&) -> sview can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
         source_operand_checked <- false
         source_operand_matches <- false
         short_enums_out <- false
+        floating_point_options_out <- clang_fp_options_default()
         response_failure <- ClangResponseFailure.None
         response_failure_path.count <- 0.usize()
         parsed_text: mutable darray[u8] = []
@@ -171,6 +161,7 @@ extend CTranslator:
         normalize_compile_argv(expanded_text, expanded_offsets, &normalized_text, &normalized_offsets, &normalized_valid)
         return sview("", 0, 0) if not normalized_valid
         short_enums_out <- clang_compile_argv_has_short_enums(normalized_text, normalized_offsets)
+        floating_point_options_out <- clang_fp_options_from_normalized_argv(normalized_text, normalized_offsets, expanded_text, expanded_offsets)
 
         source_operand_checked <- expected_source.len > 0
         if source_operand_checked[0]:
@@ -181,7 +172,7 @@ extend CTranslator:
                 if not options_ended and argv_word_equals(normalized_text, word_offset, sview("--", 0, -1)):
                     options_ended <- true
                     source_index <- source_index + 1.usize()
-                elif not options_ended and clang_compile_option_takes_value(normalized_text, word_offset):
+                elif not options_ended and clang_argv_option_takes_value(normalized_text, word_offset):
                     source_index <- source_index + 2.usize() if source_index + 1.usize() < normalized_offsets.count else normalized_offsets.count
                 elif not options_ended and normalized_text[word_offset] == 45:
                     source_index <- source_index + 1.usize()

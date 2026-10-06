@@ -166,6 +166,81 @@ for malformed_ast in \
     fi
 done
 
+# Raw UTF-8 scalar boundaries must survive strict preflight in fields that the
+# projection discards. One fake-AST run exercises every legal boundary without
+# multiplying the expensive translator invocations.
+python3 - "$partial_ast" <<'PY'
+from pathlib import Path
+import sys
+
+valid = (
+    b"\xc2\x80\xdf\xbf\xe0\xa0\x80\xed\x9f\xbf\xee\x80\x80"
+    b"\xef\xbf\xbf\xf0\x90\x80\x80\xf4\x8f\xbf\xbf"
+)
+Path(sys.argv[1]).write_bytes(
+    b'{"kind":"TranslationUnitDecl","inner":[],"ignored":"' + valid + b'"}'
+)
+PY
+set +e
+PATH="$root_dir/testdata/fake_tools:$PATH" \
+    ELISA_FAKE_CLANG_JSON="$partial_ast" \
+    "$transpiler" testdata/fixtures/simple.c >"$output" 2>"$diagnostics"
+valid_utf8_exit=$?
+set -e
+if [ "$valid_utf8_exit" -ne 0 ] || [ ! -s "$output" ]; then
+    echo "translator rejected valid raw UTF-8 scalar boundaries in Clang JSON" >&2
+    cat "$diagnostics" >&2
+    exit 1
+fi
+
+# Exercise malformed lead, continuation, overlong, surrogate, out-of-range and
+# truncation cases. Each must fail before DOM construction/publication.
+for invalid_utf8_case in \
+    isolated-continuation isolated-final-continuation \
+    overlong-two-byte invalid-two-byte-lead invalid-two-byte-continuation \
+    overlong-three-byte invalid-three-byte-continuation surrogate \
+    overlong-four-byte invalid-four-byte-continuation out-of-range \
+    invalid-lead-f5 invalid-lead-ff truncated-two-byte \
+    truncated-three-byte truncated-four-byte; do
+    python3 - "$partial_ast" "$invalid_utf8_case" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+invalid = {
+    "isolated-continuation": b"\x80",
+    "isolated-final-continuation": b"\xbf",
+    "overlong-two-byte": b"\xc0\xaf",
+    "invalid-two-byte-lead": b"\xc1\xbf",
+    "invalid-two-byte-continuation": b"\xc2 ",
+    "overlong-three-byte": b"\xe0\x80\x80",
+    "invalid-three-byte-continuation": b"\xe1\x80 ",
+    "surrogate": b"\xed\xa0\x80",
+    "overlong-four-byte": b"\xf0\x80\x80\x80",
+    "invalid-four-byte-continuation": b"\xf1\x80\x80 ",
+    "out-of-range": b"\xf4\x90\x80\x80",
+    "invalid-lead-f5": b"\xf5\x80\x80\x80",
+    "invalid-lead-ff": b"\xff",
+    "truncated-two-byte": b"\xc2",
+    "truncated-three-byte": b"\xe2\x82",
+    "truncated-four-byte": b"\xf0\x90\x80",
+}[sys.argv[2]]
+path.write_bytes(b'{"kind":"TranslationUnitDecl","inner":[],"ignored":"' + invalid + b'"}')
+PY
+    set +e
+    PATH="$root_dir/testdata/fake_tools:$PATH" \
+        ELISA_FAKE_CLANG_JSON="$partial_ast" \
+        "$transpiler" testdata/fixtures/simple.c >"$output" 2>"$diagnostics"
+    malformed_utf8_exit=$?
+    set -e
+    if [ "$malformed_utf8_exit" -eq 0 ] || [ -s "$output" ] || \
+        ! rg -q 'Clang emitted invalid or over-depth AST JSON while processing testdata/fixtures/simple.c' "$diagnostics"; then
+        echo "translator accepted malformed raw UTF-8 in Clang JSON ($invalid_utf8_case)" >&2
+        cat "$diagnostics" >&2
+        exit 1
+    fi
+done
+
 # Syntax-valid but schema-invalid roots must fail closed after parsing. Keep
 # this contract deliberately narrow: the projector requires a TranslationUnitDecl
 # object with an array-valued inner field, while nested Clang fields remain
@@ -173,6 +248,7 @@ done
 for schema_case in \
     ast_schema_missing_kind.json \
     ast_schema_wrong_kind.json \
+    ast_schema_wrong_kind_utf8.json \
     ast_schema_missing_inner.json \
     ast_schema_wrong_inner.json \
     ast_schema_non_object.json; do
@@ -323,6 +399,26 @@ if [ "$status" -eq 0 ] || [ -s "$output" ] || \
 fi
 if [ -n "$(find "$project_output" -type f -print -quit)" ]; then
     echo "rejected shell command left generated project files" >&2
+    exit 1
+fi
+
+# Reject malformed database commands before an earlier-sorting direct source
+# can start Clang and report its unrelated source error.
+set +e
+"$transpiler" --compile-commands testdata/fixtures/compile_command_shell_operator.json \
+    --output-dir "$project_output" testdata/fixtures/clang_failure.c \
+    >"$output" 2>"$diagnostics"
+status=$?
+set -e
+
+if [ "$status" -eq 0 ] || [ -s "$output" ] || \
+    ! rg -q 'unsupported or malformed syntax in compilation command for testdata/fixtures/compile_command_quoted.c' "$diagnostics"; then
+    echo "malformed compilation command was not rejected before translating another input" >&2
+    cat "$diagnostics" >&2
+    exit 1
+fi
+if [ -n "$(find "$project_output" -type f -print -quit)" ]; then
+    echo "preflight-rejected compilation command left generated project files" >&2
     exit 1
 fi
 

@@ -1,0 +1,68 @@
+extend CTranslator:
+    struct TypedDiagnosticHashes:
+        translation_unit: TypedContentHash
+        source: TypedContentHash
+        spelling_source: TypedContentHash
+        spelling_included_from: TypedContentHash
+        expansion_source: TypedContentHash
+        expansion_included_from: TypedContentHash
+
+    def typed_push_ast_parse_diagnostic[@r](translation: mutable TypedTranslation[r]&, category: sview, kind: sview, source: sview @r, canonical_source: sview @r, source_hash: TypedContentHash, column: i64) -> void can[Memory.Allocate, Abort.Panic]:
+        unavailable_hash: TypedContentHash = TypedContentHash{value: 0, available: false}
+        kind_copy: sview @r = typed_copy_view_to_region(kind) can Memory.Allocate, Abort.Panic
+        translation.diagnostics.push(TypedDiagnostic{
+            category: category, kind: kind_copy, subject_type: sview("", 0, 0), required_capability: sview("", 0, 0),
+            translation_unit: canonical_source, translation_unit_content_hash: source_hash,
+            source: source, canonical_source: canonical_source, source_content_hash: source_hash,
+            spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_source_content_hash: unavailable_hash,
+            spelling_included_from: sview("", 0, 0), spelling_included_from_canonical: sview("", 0, 0), spelling_included_from_content_hash: unavailable_hash,
+            expansion_source: sview("", 0, 0), expansion_canonical_source: sview("", 0, 0), expansion_source_content_hash: unavailable_hash,
+            expansion_included_from: sview("", 0, 0), expansion_included_from_canonical: sview("", 0, 0), expansion_included_from_content_hash: unavailable_hash,
+            range_start_offset: -1, range_end_offset: -1, line: 0, column: column, spelling_line: 0, spelling_column: 0, expansion_line: 0, expansion_column: 0
+        })
+
+    def typed_content_hash_equal(left: TypedContentHash, right: TypedContentHash) -> bool:
+        return left.available == right.available and (not left.available or left.value == right.value)
+
+    def typed_hash_canonical_source_file(path: sview) -> TypedContentHash can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return TypedContentHash{value: 0, available: false} if path.len == 0 or string_view_index(path, 0) == 60
+        path_cstr: cstr = string_view_copy(path) can Memory.Allocate, Abort.Panic
+        stream: CFile? = c_fopen(path_cstr, "rb")
+        return TypedContentHash{value: 0, available: false} if stream == null
+        handle: CFile = stream
+        chunk: mutable u8[8192] = zeroed
+        hash: mutable u64 = 0xcbf29ce484222325
+        while true |handle, chunk, hash|:
+            count: usize = c_fread((&chunk[0]).cast[mutable void&], 1.usize(), 8192.usize(), handle)
+            if count == 0.usize():
+                read_failed: bool = c_ferror(handle) != 0
+                _ = c_fclose(handle)
+                return TypedContentHash{value: 0, available: false} if read_failed
+                return TypedContentHash{value: hash, available: true}
+            for index in 0..<count |chunk, hash|:
+                hash <- (hash ^ chunk[index].u64()) * 0x100000001b3
+        return TypedContentHash{value: 0, available: false}
+
+    def typed_source_content_hash(path: sview, working_directory: sview) -> TypedContentHash can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        canonical: sview = typed_canonical_source_path(path, working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return typed_hash_canonical_source_file(canonical) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+
+    def typed_cached_source_content_hash[@r](ctx: mutable TypedContext[r]&, path: sview) -> TypedContentHash can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        canonical: sview = typed_canonical_source_path(path, ctx.source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast
+        return TypedContentHash{value: 0, available: false} if canonical.len == 0
+        for index in 0..<ctx.source_hashes.count |ctx, canonical|:
+            entry: TypedSourceHashEntry[r] = ctx.source_hashes[index]
+            return entry.hash if sview_eq(entry.canonical_path, canonical)
+        hash: TypedContentHash = typed_hash_canonical_source_file(canonical) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        canonical_copy: sview @r = typed_copy_view_to_region(canonical) can Memory.Allocate, Abort.Panic
+        ctx.source_hashes.push(TypedSourceHashEntry[r]{canonical_path: canonical_copy, hash: hash})
+        return hash
+
+    def typed_cached_diagnostic_hashes[@r](ctx: mutable TypedContext[r]&, translation_unit: sview, source: sview, spelling_source: sview, spelling_included_from: sview, expansion_source: sview, expansion_included_from: sview) -> TypedDiagnosticHashes can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        unit_hash: TypedContentHash = typed_cached_source_content_hash(ctx, translation_unit) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        source_hash: TypedContentHash = typed_cached_source_content_hash(ctx, source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        spelling_hash: TypedContentHash = typed_cached_source_content_hash(ctx, spelling_source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        spelling_include_hash: TypedContentHash = typed_cached_source_content_hash(ctx, spelling_included_from) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        expansion_hash: TypedContentHash = typed_cached_source_content_hash(ctx, expansion_source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        expansion_include_hash: TypedContentHash = typed_cached_source_content_hash(ctx, expansion_included_from) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return TypedDiagnosticHashes{translation_unit: unit_hash, source: source_hash, spelling_source: spelling_hash, spelling_included_from: spelling_include_hash, expansion_source: expansion_hash, expansion_included_from: expansion_include_hash}

@@ -55,6 +55,9 @@ extend CTranslator:
         Fidelity
         Idiomatic
 
+    const TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_MUTABLE: i64 = 16
+    const TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_READONLY: i64 = 17
+
     # Readability transforms are deliberately counted at the point where the
     # typed emitter proves and applies them.  The translator is currently a
     # single-threaded process and translates one unit at a time, so a small
@@ -190,6 +193,13 @@ extend CTranslator:
     struct TypedNameAlias[@r]:
         source: sview @r
         suffix: sview @r
+
+    struct TypedCompoundLiteralStorage[@r]:
+        node_id: sview @r
+        function_id: sview @r
+        name: sview @r
+        type_name: sview @r
+        node: JsonValueHandle[r]
 
     # A project typedef is kept as a source-level alias until type lowering.
     # Clang does not attach `desugaredQualType` to every use (notably `memptr *`),
@@ -412,30 +422,6 @@ extend CTranslator:
         state_name: sview @r
         current: mutable i64
 
-    struct TypedDiagnostic:
-        category: sview
-        kind: sview
-        subject_type: sview
-        required_capability: sview
-        source: sview
-        canonical_source: sview
-        spelling_source: sview
-        spelling_canonical_source: sview
-        spelling_included_from: sview
-        spelling_included_from_canonical: sview
-        expansion_source: sview
-        expansion_canonical_source: sview
-        expansion_included_from: sview
-        expansion_included_from_canonical: sview
-        range_start_offset: i64
-        range_end_offset: i64
-        line: i64
-        column: i64
-        spelling_line: i64
-        spelling_column: i64
-        expansion_line: i64
-        expansion_column: i64
-
     struct TypedDeclInfo[@r]:
         id: sview @r
         is_canonical: bool
@@ -465,6 +451,8 @@ extend CTranslator:
         float_bytes: i64
         double_bytes: i64
         long_double_bytes: i64
+        float_is_binary32: bool
+        double_is_binary64: bool
         pointer_bits: i64
         size_type_bits: i64
         char_unsigned: bool
@@ -523,11 +511,14 @@ extend CTranslator:
         decl_infos: mutable darray[TypedDeclInfo[r]] @r
         declaration_index: mutable darray[TypedDeclIndexSlot[r]] @r
         declaration_index_count: mutable i64
+        source_hashes: mutable darray[TypedSourceHashEntry[r]] @r
         break_scopes: mutable darray[i8] @r
         switch_depth: mutable i64
         current_for_increment: mutable i64
         current_return_type: mutable sview @r
         current_function_name: mutable sview @r
+        current_function_id: mutable sview @r
+        current_function_source: mutable sview @r
         current_has_goto: mutable bool
         current_emit_has_goto: mutable bool
         current_structured_break_label: mutable i64
@@ -537,10 +528,13 @@ extend CTranslator:
         current_function_body: mutable i64
         current_trusted_depth: mutable i64
         needs_cpp_unordered_map: mutable bool
+        compound_literals: mutable darray[TypedCompoundLiteralStorage[r]] @r
+        unsupported_target_float_seen: mutable bool
         source_mapping_enabled: bool
         project_mode: bool
         initializer_name: sview @r
         mode: TypedTranslationMode
+        floating_point_options: ClangFPOptionVector
         target_abi: ClangTargetABI
         source_language_is_cxx: bool
         source: cstr

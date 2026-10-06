@@ -44,6 +44,20 @@ extend CTranslator:
         append_view(out, sview("[T](place: mutable T&, value: T) -> T:\n", 0, -1))
         append_view(out, sview("    place[0] <- value\n", 0, -1))
         append_view(out, sview("    return value\n\n", 0, -1))
+
+    def typed_emit_compound_literal_helper_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, readonly: bool) -> void:
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        source_hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        append_view(out, sview("__elisa_transpiler_compound_literal_", 0, -1))
+        append_view(out, sview("readonly_", 0, -1)) if readonly else append_view(out, sview("mutable_", 0, -1))
+        append_i64(out, source_hash.i64())
+
+    def typed_emit_compound_literal_helper[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, readonly: bool) -> void:
+        append_view(out, sview("def ", 0, -1))
+        typed_emit_compound_literal_helper_name(out, ctx, readonly)
+        append_view(out, sview("[T](place: mutable T&, value: T) -> ", 0, -1))
+        append_view(out, sview("T&:\n", 0, -1)) if readonly else append_view(out, sview("mutable T&:\n", 0, -1))
+        append_view(out, sview("    place[0] <- value\n    return place\n\n", 0, -1))
     def typed_emit_compound_assignment_value_helper[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, index: i64) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression: TypedExpr[r] = typed_expr_at(ctx, index)
         assignment: TypedExpr[r] = typed_expr_at(ctx, expression.lhs)
