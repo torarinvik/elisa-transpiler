@@ -232,9 +232,13 @@ preprocessor configuration. Direct `.cc`, `.cpp`, `.cxx` and `.C` inputs select
 
 The local Stage0/Stage1 products recorded in
 [`docs/compiler_compatibility.json`](docs/compiler_compatibility.json) are stale
-relative to their isolated compiler sources, and current translator validation
-is marked pending. Therefore, historical fixture results do not certify the
-current dirty translator/compiler pair; see
+relative to their isolated compiler sources: Stage0 source is `f84b9c10` and
+Stage1 source is `6b475d89`, while the available products come from older
+revisions. The current translator worktree is clean, but it has not been rebuilt
+and validated against this compiler pair; historical fixture results do not
+certify the current source/toolchain combination. The Stage1 compiler worktree
+also has a local tracked-file modification recorded in the compatibility
+manifest. See
 [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) and
 [`docs/execution_status.md`](docs/execution_status.md) for the evidence ledger.
 
@@ -284,15 +288,14 @@ testing a different compiler.
 ## Compiler freshness
 
 `docs/compiler_compatibility.json` is the authoritative compiler-pair record.
-Its 2026-10-05 snapshot has isolated Stage0 and Stage1 sources at
-`11858f2e` and `2691a64c`, while the local Stage0 executable and Stage1
+Its 2026-10-06 snapshot has isolated Stage0 and Stage1 sources at
+`f84b9c10` and `6b475d89`, while the local Stage0 executable and Stage1
 executable/runtime are from older revisions; translator validation is pending.
 Historical test results therefore do not verify the current translator source
-against that refreshed compiler pair. Rebuild the local products and rerun the
-focused and serial acceptance suites before making that claim. The snapshot
-also records the private Stage1 worktree as dirty because of a modified
-tracked `.DS_Store`; preserve and inspect that unrelated change rather than
-silently reverting it.
+against that compiler pair. Rebuild the local products and rerun the focused
+and serial acceptance suites before making that claim. The snapshot also
+records a local tracked-file modification in the private Stage1 worktree;
+preserve and inspect it rather than silently reverting it.
 
 ## Test
 
