@@ -4193,6 +4193,41 @@ translator/compiler build was attempted because host free memory was 32%, below
 the 60% build floor. The packager intentionally refuses those current inputs;
 release packaging and clean-layout product verification remain open.
 
+## Explicit Clang executables for direct inputs — staged, unverified — 2026-10-06
+
+The CLI now accepts `--clang PATH` and `--clangxx PATH` for direct source
+inputs, and passes the selected executable to both Clang's target-macro query
+and AST/layout extraction. Compilation-database argv remains authoritative.
+The regression wraps real Clang executables behind paths containing spaces,
+checks that both frontend invocations use the override, confirms a recorded
+compilation-database compiler takes precedence, and rejects missing or empty
+paths. README usage and the V07 checklist record the distinction.
+
+Shell syntax, Python packaging tests, source-size and diff checks are run for
+the accompanying work, but the Elisa source changes and fake-frontend
+integration have not been compiler-verified: the current compatibility record
+is still pending and host free memory remains below the configured build floor.
+During this continuation, the host measured 33% free memory while an unrelated
+Stage0 build was active; that process was left untouched. No feature status is
+promoted on this source-only evidence.
+
+## Early validation for Stage1 seed optimization — 2026-10-07
+
+`setup_local_compilers.sh` now validates `ELISA_STAGE1_SEED_OPT_LEVEL` against
+the seed wrapper's supported `-O0` through `-O3` values before creating
+worktrees or rebuilding Stage0. It exports the resolved default/override into
+the seed subprocess and reports the selected level. The setup self-test rejects
+unsupported levels and checks that rejection leaves its worktree root absent.
+This makes the existing lower-optimization seed path available for a bounded
+memory experiment; no reduction in peak memory is claimed until measured.
+`sh scripts/test_setup_local_compilers.sh` passes, including both unsupported-
+level rejection cases; shell syntax, source line limit and `git diff --check`
+also pass. At 82% free memory, PID 5999's seed lock had cleared, but a second
+Stage1 seed acquired it as setup launched with `ELISA_STAGE1_SEED_OPT_LEVEL=-O0`.
+The setup preflight refused before the Stage0 build (PID 9966 owned the new
+lock). No process was interrupted. Lower-level seed peak memory and
+compiler-pair freshness remain unverified.
+
 ## Source-linked rewrite explanations — 2026-10-03
 
 `--explain-rewrites` now emits opt-in, machine-readable applied/declined events

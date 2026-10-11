@@ -1,51 +1,51 @@
 {
   "schema": "elisa-transpiler-compiler-compatibility-v1",
-  "recorded_at": "2026-10-06",
-  "target": "arm64-apple-darwin27.0.0",
+  "recorded_at": "2026-10-07",
+  "target": "x86_64-pc-linux-gnu",
   "compiler_pair": {
     "stage0": {
       "repository": "Elisa-core",
       "worktree": "../elisa-transpiler-worktrees/stage0-latest",
-      "source_revision": "f84b9c1034f708f69d048bd6cafb813e88c8210f",
+      "source_revision": "4a68f508b90634b548f5e0728da4147853560248",
       "source_worktree_clean": true,
-      "source_freshness_verified": false,
+      "source_freshness_verified": true,
       "executable": {
         "path": "compiler/bin/elisac-local",
-        "sha256": "15254cdbf96c981b0c0cc31a65b95357761801aee2db08884e5a05b76c9c89a3",
-        "artifact_source_revision": "6a0628cc48a7e019ed023c835b379fb55522ff1e"
+        "sha256": "fe3df4963b524f87fa7ffc80aca7b04082db2765c47eee48a0f4d197aa8bd02e",
+        "artifact_source_revision": "4a68f508b90634b548f5e0728da4147853560248"
       }
     },
     "stage1": {
       "repository": "Elisa-compiler",
       "worktree": "../elisa-transpiler-worktrees/transpiler",
-      "source_revision": "6b475d894331f0a81c3112167ef7fcf5c642a424",
+      "source_revision": "58690fe597514eb853e9bb6bd343f8afa954ef4c",
       "source_worktree_clean": false,
-      "source_freshness_verified": false,
-      "artifact_build_recipe_sha256": "e0967a96814e4810869032da1a65cc190868ea4c9e65ca5cf52da989cdd04a16",
+      "source_freshness_verified": true,
+      "artifact_build_recipe_sha256": "7b4267cbd9e406c71e7bb89bfb93980d8d3e9c6cc33746340cba67adc27d6e10",
       "executable": {
         "path": "bin/elisac-stage1",
-        "sha256": "f7d4dc3c2a2a126da19723abdcd806bf99f08a71cc8bf15a35c2f508e2e19b9d",
-        "artifact_source_revision": "8e08cd3397b1680c61bfb76b70e1a76541522e3d"
+        "sha256": "d8690be426b03afe8c7168cc6196ec3393a9f5c3adc4874682f029c57138cfc6",
+        "artifact_source_revision": "58690fe597514eb853e9bb6bd343f8afa954ef4c"
       },
       "runtime": {
         "path": "build/runtime/elisacore_runtime.o",
-        "sha256": "b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897",
-        "artifact_source_revision": "8e08cd3397b1680c61bfb76b70e1a76541522e3d"
+        "sha256": "10bb27ad5528a2d87c4c247501265f197b4f601608f0fe4b1c350ef23f3239be",
+        "artifact_source_revision": "58690fe597514eb853e9bb6bd343f8afa954ef4c"
       },
-      "artifact_source_tree_sha256": "9d770f8f11c09e19f4ad49801f1a5b473dede17c25fed4f9e1cb06ac1de29f5e",
+      "artifact_source_tree_sha256": "786d1136bda8dbfdfe59d881d2da74b65c72efa5c727781cb8f46488c7ce46e2",
       "bootstrap_reproduced_from_stage0": false
     }
   },
   "translator_validation": {
     "status": "pending",
     "current_translator_sources_verified": false,
-    "compiler_products_current": false,
-    "compiler_product_state": "Stage0 source is at f84b9c10 while its executable is from 6a0628cc; Stage1 source is at 6b475d89 while its executable and runtime are from 8e08cd33. Both compiler products remain stale.",
-    "reason": "The isolated Stage0 source is synchronized to the clean Stage0 main-worktree revision f84b9c10. The isolated Stage1 source is at 6b475d89 and now also contains the uncommitted initializer-shadowing semantic fix and regression-fixture comment from the Stage1 main worktree; the source and fixture files match byte-for-byte. The current translator worktree also contains uncommitted changes, including the signed-64-bit integer formatter fix. Neither compiler pair nor translator has been rebuilt from current sources, and fixture behavior has not been rerun against a fresh pair.",
+    "compiler_products_current": true,
+    "compiler_product_state": "Stage0 source is at 4a68f508 and its executable was freshly built from that clean revision. Stage1 source is at 58690fe5, including the returned-alias growth-summary fix, and its executable and runtime were freshly built from that source with Stage0. Stage1 provenance freshness passed; the worktree still has three local provenance-guard script changes outside the compiler source and build recipe. The Stage1 patch is preserved at docs/compiler_patches/58690fe-fix-returned-alias-growth-summaries.patch. Translator validation is still pending.",
+    "reason": "The isolated compiler pair was rebuilt on the Vast x86_64-pc-linux-gnu host with Go 1.25.12 and LLVM/Clang 21.1.8. Stage0 freshness is verified with a source-revision and executable-hash sidecar because this Go repository has no root go.mod for Go's built-in VCS stamping. The returned-alias compiler fix passed all 9 callee-field-growth parity cases. The current translator sources have not yet passed a fresh build and serial fixture/upstream checks.",
     "required_checks": [
-      "Rebuild Stage0 and Stage1 from the current isolated source revisions and update artifact provenance only after successful bounded builds.",
-      "Build the translator from the current source with the pinned local compiler and matching runtime.",
-      "Run focused integer-constant and core fixtures, then the serial acceptance manifest.",
+      "Build the translator from the current source with the freshly built compiler pair and matching runtime.",
+      "Run the serial fixture and project suites, recording expected capability skips separately from failures.",
+      "Run upstream corpus checks serially and record their build, link and runtime outcomes.",
       "Record build hashes, test results, and any skips or failures in docs/execution_status.md."
     ]
   },

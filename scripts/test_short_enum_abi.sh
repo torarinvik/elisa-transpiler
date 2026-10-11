@@ -23,6 +23,14 @@ fi
 [ -x "$stage1" ] || { echo "missing stage1 compiler: $stage1" >&2; exit 2; }
 [ -f "$stage1_runtime" ] || { echo "missing stage1 runtime: $stage1_runtime" >&2; exit 2; }
 
+if [ -z "${ELISA_TEST_LINK_FLAGS:-}" ]; then
+    case "$(uname -s)" in
+        Darwin) ELISA_TEST_LINK_FLAGS=-Wl,-dead_strip ;;
+        Linux) ELISA_TEST_LINK_FLAGS=-no-pie ;;
+        *) ELISA_TEST_LINK_FLAGS= ;;
+    esac
+fi
+
 fixture="$root_dir/testdata/fixtures/short_enum_abi.c"
 database="$root_dir/testdata/fixtures/short_enum_abi_compile_commands.json"
 work_dir=$(mktemp -d "$root_dir/build/short-enum.XXXXXX")
@@ -56,11 +64,11 @@ for compiler_name in stage0 stage1; do
     fi
     "$compiler" -emit obj -O0 -o "$work_dir/$compiler_name.o" "$work_dir/project/elisa_project.elisa" >"$work_dir/$compiler_name.stdout" 2>"$work_dir/$compiler_name.stderr"
     if [ -n "$runtime_args" ]; then
-        clang -Wl,-dead_strip -o "$work_dir/$compiler_name-run" "$work_dir/$compiler_name.o" "$runtime_args" -lm
+        clang $ELISA_TEST_LINK_FLAGS -o "$work_dir/$compiler_name-run" "$work_dir/$compiler_name.o" "$runtime_args" -lm
     elif [ -f "$root_dir/../compiler/runtime/profile_hooks.c" ]; then
-        clang -Wl,-dead_strip -o "$work_dir/$compiler_name-run" "$work_dir/$compiler_name.o" "$root_dir/../compiler/runtime/profile_hooks.c" -lm
+        clang $ELISA_TEST_LINK_FLAGS -o "$work_dir/$compiler_name-run" "$work_dir/$compiler_name.o" "$root_dir/../compiler/runtime/profile_hooks.c" -lm
     else
-        clang -Wl,-dead_strip -o "$work_dir/$compiler_name-run" "$work_dir/$compiler_name.o" -lm
+        clang $ELISA_TEST_LINK_FLAGS -o "$work_dir/$compiler_name-run" "$work_dir/$compiler_name.o" -lm
     fi
     generated_rc=0
     "$work_dir/$compiler_name-run" || generated_rc=$?

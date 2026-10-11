@@ -54,6 +54,7 @@ def run_arguments(output_dir, timeout=None, max_rss_kb=None):
         default_timeout_seconds=2,
         translator=sys.executable,
         elisa_compiler=sys.executable,
+        elisa_target_triple="",
         max_rss_kb=max_rss_kb,
         max_output_bytes=RUNNER.DEFAULT_STAGE_OUTPUT_BYTES,
     )
@@ -62,6 +63,19 @@ def run_arguments(output_dir, timeout=None, max_rss_kb=None):
 class FixtureManifestRunnerTests(unittest.TestCase):
     def test_macos_default_free_memory_floor_matches_setup_safety_floor(self):
         self.assertEqual(RUNNER.DEFAULT_MACOS_SYSTEM_MEMORY_FLOOR_PERCENT, 60)
+
+    def test_manifest_linker_marker_uses_host_specific_elisa_flags(self):
+        argv = ["clang", "-Wl,-dead_strip", "-o", "generated", "generated.o"]
+        with mock.patch.object(RUNNER, "elisa_test_link_flags", return_value=["-no-pie"]):
+            self.assertEqual(
+                RUNNER.normalize_elisa_link_argv(argv),
+                ["clang", "-no-pie", "-o", "generated", "generated.o"],
+            )
+        with mock.patch.object(RUNNER, "elisa_test_link_flags", return_value=[]):
+            self.assertEqual(
+                RUNNER.normalize_elisa_link_argv(argv),
+                ["clang", "-o", "generated", "generated.o"],
+            )
 
     def run_case_quietly(self, case, output_dir, feature_families=None):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -165,6 +179,40 @@ class FixtureManifestRunnerTests(unittest.TestCase):
             stages = {stage["stage"]: stage for stage in result["stages"]}
             self.assertEqual(stages["elisa_link"]["argv"][-1], str(runtime))
             self.assertNotIn(str(runtime), stages["native_build"]["argv"])
+
+    def test_cpp_compatibility_directory_placeholders_reach_translation(self):
+        with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
+            cpp_lib_dir = Path(temporary) / "cpp_lib"
+            elisa_std_dir = Path(temporary) / "elisa_std"
+            cpp_lib_dir.mkdir()
+            elisa_std_dir.mkdir()
+            case = base_case()
+            case["translate_argv"] = python_argv("import sys;sys.stdout.write('def main(): pass')") + [
+                "--cpp-lib-dir", "{cpp_lib_dir}", "--elisa-std-dir", "{elisa_std_dir}"
+            ]
+            arguments = run_arguments(Path(temporary) / "out")
+            arguments.cpp_lib_dir = str(cpp_lib_dir)
+            arguments.elisa_std_dir = str(elisa_std_dir)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result = RUNNER.run_case(case, arguments)
+            self.assertEqual(result["status"], "passed")
+            translate = next(stage for stage in result["stages"] if stage["stage"] == "translate")
+            self.assertEqual(
+                translate["argv"][-4:],
+                ["--cpp-lib-dir", str(cpp_lib_dir), "--elisa-std-dir", str(elisa_std_dir)],
+            )
+
+    def test_elisa_target_triple_placeholder_reaches_compile(self):
+        with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:
+            case = base_case()
+            case["elisa_compile_argv"] = [sys.executable, "-c", "pass", "{elisa_target_triple}"]
+            arguments = run_arguments(Path(temporary) / "out")
+            arguments.elisa_target_triple = "x86_64-linux-gnu"
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                result = RUNNER.run_case(case, arguments)
+            self.assertEqual(result["status"], "passed")
+            compile_stage = next(stage for stage in result["stages"] if stage["stage"] == "elisa_compile")
+            self.assertEqual(compile_stage["argv"][-1], "x86_64-linux-gnu")
 
     def test_wrong_expected_exit_fails_at_execution_stage(self):
         with tempfile.TemporaryDirectory(prefix="elisa-fixture-runner-test-") as temporary:

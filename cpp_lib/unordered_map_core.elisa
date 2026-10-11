@@ -6,8 +6,12 @@
 
 module cpp:
     struct unordered_map_value_slot[V]:
+        # Erased slots stay in value_arena until clear. A later insertion gets
+        # a fresh zero-initialized slot instead of trying to assign `zeroed`
+        # to unconstrained V, which may be a non-null reference type according
+        # to the language's generic type checker even when this adapter's
+        # supported source values are zero-initializable scalars or pointers.
         value: mutable V
-        next: mutable heap unordered_map_value_slot[V]&?
 
     struct unordered_map_entry[V]:
         # Dictionary buckets move when the table grows. Keep mapped objects in
@@ -18,7 +22,6 @@ module cpp:
     struct unordered_map[K, V]:
         storage: mutable dict[K, unordered_map_entry[V]]
         value_arena: mutable Arena
-        free_values: mutable heap unordered_map_value_slot[V]&?
 
     struct unordered_map_iterator[K, V]:
         owner: mutable unordered_map[K, V]&
@@ -55,23 +58,16 @@ module cpp:
             return nonnull(existing) if existing != null
             can Memory.Allocate, Abort.Panic:
                 # `operator[]` returns V&, and that address must remain stable
-                # when dictionary buckets rehash. Reuse erased slots before
-                # growing this map's arena.
-                initial_value: mutable heap unordered_map_value_slot[V]&
-                if self.free_values != null:
-                    initial_value <- self.free_values
-                    self.free_values <- initial_value.next
-                    initial_value.next <- null
-                    initial_value.value <- zeroed
-                else:
-                    initial_value <- arena_box_zeroed[unordered_map_value_slot[V]](&self.value_arena)
+                # when dictionary buckets rehash. Erase invalidates the C++
+                # reference, so keep old slots arena-owned until clear and
+                # allocate a fresh zero-initialized slot for a later insert.
+                initial_value: mutable heap unordered_map_value_slot[V]& = arena_box_zeroed[unordered_map_value_slot[V]](&self.value_arena)
                 initial_entry: unordered_map_entry[V] = unordered_map_entry[V]{slot: initial_value}
                 entry: mutable unordered_map_entry[V]&? = arena_dict_put_or_panic(&perm_arena, self.storage, key, initial_entry)
                 return nonnull(entry)
 
     def clear[K, V](self: mutable unordered_map[K, V]&):
         self.storage.clear()
-        self.free_values <- null
         arena_reset(&self.value_arena)
 
     def size[K, V](self: unordered_map[K, V]&) -> usize:
@@ -89,10 +85,6 @@ module cpp:
     def erase[K, V](self: mutable unordered_map[K, V]&, key: K) -> usize:
         entry: mutable unordered_map_entry[V]&? = arena_dict_get_mut(self.storage, key)
         return 0.usize() if entry == null
-        slot: mutable heap unordered_map_value_slot[V]& = nonnull(entry).slot
-        slot.value <- zeroed
-        slot.next <- self.free_values
-        self.free_values <- slot
         arena_dict_remove(self.storage, key)
         return 1.usize()
 
@@ -116,6 +108,24 @@ module cpp:
     def end[K, V](self: unordered_map[K, V]&) -> unordered_map_const_iterator[K, V]:
         return unordered_map_const_iterator[K, V]{owner: self, key_value: null, is_end: true}
 
+    # The C++ frontend calls these uniquely named overloads directly. Elisa's
+    # overloaded member selection does not always preserve a const receiver
+    # after C++ lvalue-to-rvalue casts, so lowering selects the return type
+    # from Clang's canonical receiver type.
+    def unordered_map_find_mutable[K, V](self: mutable unordered_map[K, V]&, key: K) -> unordered_map_iterator[K, V]:
+        found: bool = contains(self, key)
+        return unordered_map_iterator[K, V]{owner: self, key_value: key, is_end: not found}
+
+    def unordered_map_find_const[K, V](self: unordered_map[K, V]&, key: K) -> unordered_map_const_iterator[K, V]:
+        found: bool = contains(self, key)
+        return unordered_map_const_iterator[K, V]{owner: self, key_value: key, is_end: not found}
+
+    def unordered_map_end_mutable[K, V](self: mutable unordered_map[K, V]&) -> unordered_map_iterator[K, V]:
+        return unordered_map_iterator[K, V]{owner: self, key_value: null, is_end: true}
+
+    def unordered_map_end_const[K, V](self: unordered_map[K, V]&) -> unordered_map_const_iterator[K, V]:
+        return unordered_map_const_iterator[K, V]{owner: self, key_value: null, is_end: true}
+
     def first[K, V](self: unordered_map_iterator[K, V]&) -> K:
         match self.key_value:
             null:
@@ -129,9 +139,13 @@ module cpp:
     # `set_second`, retaining writes without depending on reference-valued call
     # results in the stage-1 backend.
     def second[K, V](self: unordered_map_iterator[K, V]&) -> V:
-        key: K = first(self)
-        entry: unordered_map_entry[V]&? = arena_dict_get(self.owner.storage, key)
-        return nonnull(entry).slot.value
+        match self.key_value:
+            null:
+                can Abort.Panic:
+                    panic("unordered_map: dereferenced end iterator")
+            key:
+                entry: unordered_map_entry[V]&? = arena_dict_get(self.owner.storage, key)
+                return nonnull(entry).slot.value
 
     def first[K, V](self: unordered_map_const_iterator[K, V]&) -> K:
         match self.key_value:
@@ -142,9 +156,41 @@ module cpp:
                 return key
 
     def second[K, V](self: unordered_map_const_iterator[K, V]&) -> V:
-        key: K = first(self)
-        entry: unordered_map_entry[V]&? = arena_dict_get(self.owner.storage, key)
-        return nonnull_readonly(entry).slot.value
+        match self.key_value:
+            null:
+                can Abort.Panic:
+                    panic("unordered_map: dereferenced end iterator")
+            key:
+                entry: unordered_map_entry[V]&? = arena_dict_get(self.owner.storage, key)
+                return nonnull_readonly(entry).slot.value
+
+    # The C++ frontend lowers iterator comparisons to these explicitly named
+    # helpers. Keeping the four operand shapes separate avoids relying on
+    # overloaded Eq methods for the two distinct mutable/const iterator types.
+    def unordered_map_iter_equal_fields[K](left_key: K?, left_end: bool, right_key: K?, right_end: bool) -> bool:
+        if left_end or right_end:
+            return left_end and right_end
+        match left_key:
+            null:
+                return false
+            left:
+                match right_key:
+                    null:
+                        return false
+                    right:
+                        return left == right
+
+    def unordered_map_iter_equal_mut_mut[K, V](left: unordered_map_iterator[K, V], right: unordered_map_iterator[K, V]) -> bool:
+        return unordered_map_iter_equal_fields(left.key_value, left.is_end, right.key_value, right.is_end)
+
+    def unordered_map_iter_equal_mut_const[K, V](left: unordered_map_iterator[K, V], right: unordered_map_const_iterator[K, V]) -> bool:
+        return unordered_map_iter_equal_fields(left.key_value, left.is_end, right.key_value, right.is_end)
+
+    def unordered_map_iter_equal_const_mut[K, V](left: unordered_map_const_iterator[K, V], right: unordered_map_iterator[K, V]) -> bool:
+        return unordered_map_iter_equal_fields(left.key_value, left.is_end, right.key_value, right.is_end)
+
+    def unordered_map_iter_equal_const_const[K, V](left: unordered_map_const_iterator[K, V], right: unordered_map_const_iterator[K, V]) -> bool:
+        return unordered_map_iter_equal_fields(left.key_value, left.is_end, right.key_value, right.is_end)
 
     def set_second[K, V](self: mutable unordered_map_iterator[K, V]&, value: V) -> V:
         key: K = first(self)
@@ -156,9 +202,15 @@ module cpp:
         def __eq__(self: unordered_map_iterator[K, V], other: unordered_map_iterator[K, V]) -> bool:
             if self.is_end or other.is_end:
                 return self.is_end and other.is_end
-            self_key: K = first(self)
-            other_key: K = first(other)
-            return self_key == other_key
+            match self.key_value:
+                null:
+                    return false
+                self_key:
+                    match other.key_value:
+                        null:
+                            return false
+                        other_key:
+                            return self_key == other_key
 
         # C++ permits comparing iterator and const_iterator values from the
         # same container. Keep both operand orders explicit because Elisa
@@ -166,21 +218,39 @@ module cpp:
         def __eq__(self: unordered_map_iterator[K, V], other: unordered_map_const_iterator[K, V]) -> bool:
             if self.is_end or other.is_end:
                 return self.is_end and other.is_end
-            self_key: K = first(self)
-            other_key: K = first(other)
-            return self_key == other_key
+            match self.key_value:
+                null:
+                    return false
+                self_key:
+                    match other.key_value:
+                        null:
+                            return false
+                        other_key:
+                            return self_key == other_key
 
     impl[K, V] Eq for unordered_map_const_iterator[K, V]:
         def __eq__(self: unordered_map_const_iterator[K, V], other: unordered_map_const_iterator[K, V]) -> bool:
             if self.is_end or other.is_end:
                 return self.is_end and other.is_end
-            self_key: K = first(self)
-            other_key: K = first(other)
-            return self_key == other_key
+            match self.key_value:
+                null:
+                    return false
+                self_key:
+                    match other.key_value:
+                        null:
+                            return false
+                        other_key:
+                            return self_key == other_key
 
         def __eq__(self: unordered_map_const_iterator[K, V], other: unordered_map_iterator[K, V]) -> bool:
             if self.is_end or other.is_end:
                 return self.is_end and other.is_end
-            self_key: K = first(self)
-            other_key: K = first(other)
-            return self_key == other_key
+            match self.key_value:
+                null:
+                    return false
+                self_key:
+                    match other.key_value:
+                        null:
+                            return false
+                        other_key:
+                            return self_key == other_key

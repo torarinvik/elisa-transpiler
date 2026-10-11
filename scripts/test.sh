@@ -12,6 +12,25 @@ fi
 . "$root_dir/scripts/test_support.sh"
 test_install_failure_trace
 
+case "$(uname -s)" in
+    Darwin) ELISA_TEST_LINK_FLAGS=-Wl,-dead_strip ;;
+    Linux) ELISA_TEST_LINK_FLAGS=-no-pie ;;
+    *) ELISA_TEST_LINK_FLAGS= ;;
+esac
+export ELISA_TEST_LINK_FLAGS
+
+# The suites invoke the selected compiler binary directly instead of going
+# through the Stage1 launcher. Preserve the launcher's host predicates so
+# compile-time `static if ELISA_TARGET_OS_*` branches match the machine running
+# these tests (not the compiler's fallback platform).
+case "$(uname -s)" in
+    Linux) ELISA_HOST_LINUX=1; export ELISA_HOST_LINUX ;;
+    MINGW*|MSYS*|CYGWIN*) ELISA_HOST_WINDOWS=1; export ELISA_HOST_WINDOWS ;;
+esac
+case "$(uname -m)" in
+    x86_64) ELISA_HOST_X86_64=1; export ELISA_HOST_X86_64 ;;
+esac
+
 test_suite=all
 reuse_build=0
 
@@ -57,6 +76,7 @@ case "$test_suite" in
         ;;
 esac
 
+python3 scripts/test_linker_flags.py
 case "$test_suite" in
     all|upstream) python3 scripts/test_upstream_provenance.py ;;
 esac
@@ -90,6 +110,9 @@ fi
 stage1_stdlib=${ELISA_STAGE1_STDLIB:-$stage1_worktree/elisacore_std}
 
 sh scripts/test_stage1_freshness.sh "$stage1_worktree"
+if [ -x "$stage1_worktree/scripts/test_stage0_provenance.sh" ]; then
+    bash "$stage1_worktree/scripts/test_stage0_provenance.sh"
+fi
 
 if [ -n "${ELISAC_BIN:-}" ]; then
     elisa_bin=$ELISAC_BIN
@@ -238,6 +261,19 @@ translator_run_bounded() {
     fi
 }
 
+link_translator_output() {
+    output_path=$1
+    object_path=$2
+    link_input=${3:-}
+    if [ -n "$link_input" ]; then
+        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
+            clang $ELISA_TEST_LINK_FLAGS -o "$output_path" "$object_path" "$link_input" -lm
+    else
+        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
+            clang $ELISA_TEST_LINK_FLAGS -o "$output_path" "$object_path" -lm
+    fi
+}
+
 # Integration probes launch Clang, the translator, and sometimes the selected
 # Elisa compiler as ordinary subprocesses. Bound the entire probe process group
 # so its Python parent and every inherited child share one RSS/footprint budget.
@@ -252,10 +288,12 @@ compute_translator_inputs_fingerprint() {
     clang_path=$(command -v clang || true)
     [ -n "$clang_path" ] || { echo "clang is required to build the translator" >&2; return 2; }
     std_root=$stage1_stdlib
+    link_flags="clang $ELISA_TEST_LINK_FLAGS -lm"
     source_fingerprint=$({
         printf '%s\n' "platform=$(uname -s)/$(uname -m)" \
+            "target_triple=$translator_target_triple" \
             'elisa_flags=-emit obj -O0' \
-            'link_flags=clang -Wl,-dead_strip -lm' \
+            "link_flags=$link_flags" \
             "elisa_compiler_path=$elisa_bin" \
             "elisa_compiler_sha256=$(hash_file "$elisa_bin")" \
             "clang_path=$clang_path" \
@@ -285,6 +323,10 @@ compute_translator_inputs_fingerprint() {
 
 translator_path=build/elisa-c-transpiler
 fingerprint_path=build/translator-build.fingerprint
+clang_path=$(command -v clang || true)
+[ -n "$clang_path" ] || { echo "clang is required to build the translator" >&2; exit 2; }
+translator_target_triple=$("$clang_path" -dumpmachine)
+[ -n "$translator_target_triple" ] || { echo "clang did not report a target triple" >&2; exit 2; }
 translator_inputs_fingerprint=$(compute_translator_inputs_fingerprint)
 reuse_valid=0
 if [ "$reuse_build" -eq 1 ] && translator_build_cache_is_fresh \
@@ -306,20 +348,17 @@ else
     translator_build_max_rss_kb=${ELISA_TRANSLATOR_BUILD_MAX_RSS_KB:-2097152}
     translator_build_timeout_seconds=${ELISA_TRANSLATOR_BUILD_TIMEOUT_SECONDS:-600}
     translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
-        "$elisa_bin" -emit obj -O0 -o build/transpiler.o src/main.elisa
+        "$elisa_bin" -target-triple "$translator_target_triple" -emit obj -O0 -o build/transpiler.o src/main.elisa
     # A selected self-hosted stage1 runtime is a complete, matching runtime
     # boundary. Do not mix it with stage0 profiling hooks: those hooks belong
     # to the stage0 ABI and can make a stage1-built translator hang or fail in
     # otherwise unrelated probes. The default path remains unchanged.
     if [ -n "$elisa_runtime" ]; then
-        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
-            clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o "$elisa_runtime" -lm
+        link_translator_output "$translator_path" build/transpiler.o "$elisa_runtime"
     elif [ -n "$profile_hooks" ]; then
-        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
-            clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o "$profile_hooks" -lm
+        link_translator_output "$translator_path" build/transpiler.o "$profile_hooks"
     else
-        translator_run_bounded "$translator_build_max_rss_kb" "$translator_build_timeout_seconds" \
-            clang -Wl,-dead_strip -o "$translator_path" build/transpiler.o -lm
+        link_translator_output "$translator_path" build/transpiler.o
     fi
     translator_binary_fingerprint=$(hash_file "$translator_path")
     translator_build_cache_write "$fingerprint_path" \
@@ -347,41 +386,16 @@ case "$test_suite" in
             --translator build/elisa-c-transpiler \
             --elisa-compiler "$elisa_bin" \
             --elisa-runtime "$elisa_runtime" \
+            --cpp-lib-dir "$root_dir/cpp_lib" \
+            --elisa-std-dir "$stage1_stdlib" \
+            --elisa-target-triple "$translator_target_triple" \
             --output-dir build/manifest-tests \
-            --max-rss-kb "${ELISA_FIXTURE_PROCESS_MAX_RSS_KB:-1572864}" \
-            --case simple \
-            --case rewrite_explanations \
-            --case function_pointer_const_field_call \
-            --case c_compatible_cpp \
-            --case cpp_overloads \
-            --case readonly_nonnull_helper \
-            --case nullable_index_after_guard \
-            --case compound_assignment_once \
-            --case increment_evaluation \
-            --case sequencing_expressions \
-            --case nested_conditional_operator \
-            --case short_circuit_constant \
-            --case call_argument_conditional_comma \
-            --case c_enum_integer_semantics \
-            --case runtime_unsigned_wrap \
-            --case c_enum_typedef_aliases \
-            --case c_array_to_pointer_decay \
-            --case c_record_pointer_call_arguments \
-            --case c_pointer_difference_element_units \
-            --case c_record_pointer_difference_layout \
-            --case c_record_sizeof_alignof_layout \
-            --case c_void_pointer_boundaries \
-            --case cpp_scoped_enum_namespace_aliases \
-            --case variadic_va_arg \
-            --case variadic_promotions \
-            --case designated_initializers \
-            --case c_record_and_six_element_array \
-            --case floating_edge_values \
-            --case variadic_va_copy
+            --max-rss-kb "${ELISA_FIXTURE_PROCESS_MAX_RSS_KB:-1572864}"
         ELISA_PROPERTY_CORPUS_RUNTIME="$elisa_runtime" \
             python3 scripts/run_property_corpus.py \
                 --translator build/elisa-c-transpiler \
                 --elisa-compiler "$elisa_bin" \
+                --elisa-target-triple "$translator_target_triple" \
                 --seed "${ELISA_PROPERTY_CORPUS_SEED:-1729}" \
                 --output-dir build/property-corpus \
                 --max-rss-kb "${ELISA_FIXTURE_PROCESS_MAX_RSS_KB:-1572864}" \
@@ -390,7 +404,7 @@ case "$test_suite" in
         ;;
 esac
 
-# The sourced suites contain many small, direct `clang -Wl,-dead_strip` links.
+# The sourced suites contain many small direct links of generated Elisa objects.
 # That flag identifies generated Elisa objects in this harness. When an
 # explicit self-hosted stage1 compiler is selected, those objects need the
 # matching runtime object; inject it at the one shared link boundary rather
@@ -439,7 +453,7 @@ clang() {
     elisa_generated_link=0
     elisa_runtime_present=0
     for elisa_arg in "$@"; do
-        [ "$elisa_arg" = "-Wl,-dead_strip" ] && elisa_generated_link=1
+        [ -n "$ELISA_TEST_LINK_FLAGS" ] && [ "$elisa_arg" = "$ELISA_TEST_LINK_FLAGS" ] && elisa_generated_link=1
         [ "$elisa_arg" = "$elisa_runtime" ] && elisa_runtime_present=1
     done
     if [ "$elisa_generated_link" -eq 1 ] && [ "$elisa_runtime_present" -eq 0 ]; then

@@ -101,6 +101,10 @@ extend CTranslator:
             cast_kind: sview = ast_cast_kind(node)
             if sview_eq(cast_kind, sview("NullToPointer", 0, -1)):
                 return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(cast_kind, sview("LValueToRValue", 0, -1)) and ast_child_count(node) > 0 and sview_eq(ast_kind(ast_child(node, 0)), sview("ArraySubscriptExpr", 0, -1)):
+                compound_subscript_handled: mutable bool = false
+                compound_subscript_value: i64 = typed_lower_pure_array_compound_literal_subscript(ctx, ast_child(node, 0), compound_subscript_handled) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                return compound_subscript_value if compound_subscript_handled
             operand: i64 = typed_lower_expr(ctx, ast_child(node, 0)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if operand < 0:
                 return -1
@@ -298,13 +302,24 @@ extend CTranslator:
                 if right_map_type.len == 0:
                     typed_record_unsupported(ctx, node, sview("unordered_map iterator comparison right operand", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     return -1
-                if not sview_eq(left_map_type, right_map_type):
+                if not sview_eq(cpp_unordered_map_normalized_type(left_map_type), cpp_unordered_map_normalized_type(right_map_type)):
                     typed_record_unsupported(ctx, node, sview("unordered_map iterator comparison across different map types", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     return -1
                 left: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 right: i64 = typed_lower_expr(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 if left >= 0 and right >= 0:
-                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Binary, text: sview("==", 0, -1) if sview_eq(operator_name, sview("operator==", 0, -1)) else sview("!=", 0, -1), type_name: type_name, lhs: left, rhs: right, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    left_is_const: bool = cpp_unordered_map_iterator_is_const(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    right_is_const: bool = cpp_unordered_map_iterator_is_const(ctx, ast_child(node, 2)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    comparator: mutable sview = sview("cpp::unordered_map_iter_equal_mut_mut", 0, -1)
+                    comparator <- sview("cpp::unordered_map_iter_equal_mut_const", 0, -1) if not left_is_const and right_is_const
+                    comparator <- sview("cpp::unordered_map_iter_equal_const_mut", 0, -1) if left_is_const and not right_is_const
+                    comparator <- sview("cpp::unordered_map_iter_equal_const_const", 0, -1) if left_is_const and right_is_const
+                    args_start: i64 = ctx.expr_children.count.i64()
+                    ctx.expr_children.push(left)
+                    ctx.expr_children.push(right)
+                    equal: i64 = typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: comparator, type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: 2, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Unary, text: sview("not", 0, -1), type_name: type_name, lhs: equal, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if sview_eq(operator_name, sview("operator!=", 0, -1))
+                    return equal
             typed_record_unsupported(ctx, node, operator_name if operator_name.len > 0 else sview("C++ operator expression", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return -1
         if sview_eq(kind, sview("ArraySubscriptExpr", 0, -1)):
@@ -393,6 +408,26 @@ extend CTranslator:
                 callee_node: JsonValueHandle[r] = ast_child(node, 0)
                 callee_name: mutable sview = ast_expr_name(callee_node)
                 callee_name <- ast_name(callee_node) if callee_name.len == 0
+                map_member_name: sview = cpp_unordered_map_member_call_name(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                if (sview_eq(map_member_name, sview("find", 0, -1)) or sview_eq(map_member_name, sview("end", 0, -1))) and sview_eq(ast_kind(callee_node), sview("MemberExpr", 0, -1)) and ast_child_count(callee_node) > 0:
+                    receiver_node: JsonValueHandle[r] = cpp_unwrap_expression(ast_child(callee_node, 0))
+                    receiver: mutable i64 = typed_lower_expr(ctx, receiver_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1 if receiver < 0
+                    receiver_type: sview = typed_expr_at(ctx, receiver).type_name
+                    if not cpp_unordered_map_receiver_is_reference(receiver_node):
+                        receiver <- typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Unary, text: sview("&", 0, -1), type_name: receiver_type, lhs: receiver, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    receiver_is_const: bool = cpp_unordered_map_receiver_is_const(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    helper: mutable sview = sview("cpp::unordered_map_end_mutable", 0, -1) if sview_eq(map_member_name, sview("end", 0, -1)) else sview("cpp::unordered_map_find_mutable", 0, -1)
+                    helper <- sview("cpp::unordered_map_end_const", 0, -1) if receiver_is_const and sview_eq(map_member_name, sview("end", 0, -1))
+                    helper <- sview("cpp::unordered_map_find_const", 0, -1) if receiver_is_const and sview_eq(map_member_name, sview("find", 0, -1))
+                    args_start: i64 = ctx.expr_children.count.i64()
+                    ctx.expr_children.push(receiver)
+                    if sview_eq(map_member_name, sview("find", 0, -1)):
+                        return -1 if ast_child_count(node) != 2
+                        key: i64 = typed_lower_expr(ctx, ast_child(node, 1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        return -1 if key < 0
+                        ctx.expr_children.push(key)
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: helper, type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: ctx.expr_children.count.i64() - args_start, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 callee_index: i64 = typed_lower_expr(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 if callee_index >= 0 and callee_name.len > 0:
                     lowered_args: mutable darray[i64] = []
@@ -417,16 +452,26 @@ extend CTranslator:
             varargs_copy: bool = sview_eq(callee_name, sview("__builtin_va_copy", 0, -1))
             float_builtin_kind: i64 = typed_float_builtin_kind(callee_name)
             if float_builtin_kind > 0:
-                # The payload passed to __builtin_nan* is a C encoding string
-                # rather than a runtime value. Elisa currently has no source
-                # spelling for payload-selected NaNs, so lower the generic C
-                # value to the compiler's IEEE quiet-NaN/infinity expression.
-                # Do not register an external: these builtins are pure and
-                # have no required ABI symbol.
-                required_arguments: i64 = 1 if float_builtin_kind == 1 else 0
+                # NaN/infinity constructors take no runtime value (the NaN
+                # payload is a compile-time string). Classification builtins
+                # receive one floating operand and are emitted through
+                # translator-owned helpers because Clang gives these implicit
+                # builtins an unprototyped `int ()` declaration.
+                required_arguments: i64 = 1 if float_builtin_kind == 1 or float_builtin_kind == 3 or float_builtin_kind == 4 else 0
                 if ast_child_count(node) - 1 != required_arguments:
                     typed_record_unsupported(ctx, node, sview("floating builtin arguments", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     return -1
+                if float_builtin_kind == 3 or float_builtin_kind == 4:
+                    argument_node: JsonValueHandle[r] = ast_child(node, 1)
+                    argument_type: sview = clang_target_type_abi_base(ctx.target_abi, typed_c_type(ctx, argument_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+                    if not sview_eq(argument_type, sview("f32", 0, -1)) and not sview_eq(argument_type, sview("f64", 0, -1)):
+                        typed_record_unsupported(ctx, node, sview("floating classification builtin type", 0, -1)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                        return -1
+                    argument: i64 = typed_lower_expr(ctx, argument_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    return -1 if argument < 0
+                    args_start: i64 = ctx.expr_children.count.i64()
+                    ctx.expr_children.push(argument)
+                    return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: sview("__builtin_isnan_value", 0, -1) if float_builtin_kind == 3 else sview("__builtin_isinf_sign_value", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: args_start, args_count: 1, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: sview("__builtin_nan_value", 0, -1) if float_builtin_kind == 1 else sview("__builtin_inf_value", 0, -1), type_name: type_name, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             # `__builtin_expect(value, hint)` is a compiler branch-prediction
             # annotation. It has the value and side effects of its first
@@ -477,7 +522,11 @@ extend CTranslator:
             # C function. This preserves typed indirect calls without adding a
             # target-library table.
             callee_type: sview = typed_c_type(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            if not varargs_start and not varargs_end and not varargs_copy and (callee_name.len == 0 or (c_type_is_function_pointer(callee_type) and not defined_named_function and not header_inline_call and not (ctx.source_language_is_cxx and named_function_callee))):
+            # Clang's spelling for a direct function that returns a callback
+            # can contain a top-level `(*)` group. Keep declarations resolved
+            # as FunctionDecl direct even when the compact type-shape parser
+            # also sees that returned callback group.
+            if not varargs_start and not varargs_end and not varargs_copy and (callee_name.len == 0 or (c_type_is_function_pointer(callee_type) and not defined_named_function and not header_inline_call and not named_function_callee)):
                 callee_index <- typed_lower_expr(ctx, callee_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 return -1 if callee_index < 0
             callee_name <- sview("llvm_va_start", 0, -1) if varargs_start
@@ -490,9 +539,16 @@ extend CTranslator:
             if last_argument > first_argument:
                 index: mutable i64 = first_argument
                 while index < last_argument |ctx, node, index, callee_name, lowered_args|:
-                    argument: i64 = typed_lower_expr(ctx, ast_child(node, index)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    argument_node: JsonValueHandle[r] = ast_child(node, index)
+                    argument: i64 = typed_lower_expr(ctx, argument_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     if argument < 0:
                         return -1
+                    if varargs_start or varargs_end or varargs_copy:
+                        source_node: JsonValueHandle[r] = ast_child(argument_node, 0) if ast_child_count(argument_node) > 0 else argument_node
+                        source_type_view: ClangTypeView[r] = clang_type_view_of_decl(source_node)
+                        if c_type_is_array(source_type_view.desugared_spelling) and ctx.exprs[argument.usize()].kind == TypedExprKind.Cast:
+                            lowered_argument: TypedExpr[r] = ctx.exprs[argument.usize()]
+                            ctx.exprs[argument.usize()] <- TypedExpr[r]{kind: lowered_argument.kind, text: lowered_argument.text, type_name: lowered_argument.type_name, lhs: lowered_argument.lhs, rhs: lowered_argument.rhs, third: lowered_argument.third, args_start: lowered_argument.args_start, args_count: lowered_argument.args_count, value: TYPED_EXPR_CAST_VA_LIST_ARRAY_DECAY}
                     lowered_args.push(argument)
                     index <- index + 1
             args_start: i64 = ctx.expr_children.count.i64()

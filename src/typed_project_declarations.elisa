@@ -160,7 +160,7 @@ extend CTranslator:
         return sview(copied, 0, -1)
     def typed_project_register_external_function[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return if not ctx.project_mode
-        link_name: sview = ast_function_link_name(node)
+        link_name: sview = ast_function_link_name(node, ctx.target_abi.object_symbol_prefix)
         return if link_name.len == 0
         signature: sview = typed_project_external_function_signature(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         status: i64 = typed_project_external_declaration_status(link_name, signature)
@@ -173,7 +173,7 @@ extend CTranslator:
                 typed_project_mark_external_declaration(link_name, signature) can Memory.Allocate, Abort.Panic
     def typed_project_register_external_object[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return if not ctx.project_mode or not ast_is_extern_decl(node)
-        link_name: sview = ast_declaration_link_name(node)
+        link_name: sview = ast_declaration_link_name(node, ctx.target_abi.object_symbol_prefix)
         return if link_name.len == 0
         object_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         signature: mutable darray[u8] = []

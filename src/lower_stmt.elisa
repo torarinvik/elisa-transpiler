@@ -157,6 +157,35 @@ extend CTranslator:
             ctx.expr_children.push(lowered_args[index])
         result_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Call, text: safe_identifier(callee_name), type_name: result_type, lhs: call_callee, rhs: -1, third: -1, args_start: args_start, args_count: lowered_args.count.i64(), value: 1 if indirect_callee else (2 if header_inline_call else 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_lower_discarded_callback_result[@r](ctx: mutable TypedContext[r]&, index: i64) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return index if index < 0 or index >= ctx.exprs.count.i64()
+        call: TypedExpr[r] = typed_expr_at(ctx, index)
+        # The current backend cannot emit a callback-valued CallExpr in
+        # statement position. When C discards that result, preserve the call
+        # and its arguments through a second external binding with the same
+        # ABI parameters and link name but a void result. Function pointer
+        # results use the target's ordinary scalar pointer return convention;
+        # no result storage or conversion is observable at this call site.
+        return index if call.kind != TypedExprKind.Call or not c_type_is_function_pointer(call.type_name) or typed_call_is_header_inline(call.value) or call.value == 1
+        external_index: mutable i64 = typed_call_external_index(call.value)
+        external_index <- typed_external_index(ctx, call.text) if external_index < 0
+        return index if external_index < 0 or external_index >= ctx.externs.count.i64()
+        original: TypedExtern[r] = ctx.externs[external_index.usize()]
+        return index if not c_type_is_function_pointer(original.result_type)
+        alias_name_bytes: mutable darray[u8] = []
+        append_view(alias_name_bytes, sview("__elisa_transpiler_discard_result_", 0, -1))
+        append_i64(alias_name_bytes, external_index)
+        alias_name_storage: cstr = string_view_copy(bytes_view(alias_name_bytes)) can Memory.Allocate
+        alias_name: sview = sview(alias_name_storage, 0, -1)
+        alias_index: mutable i64 = typed_external_index(ctx, alias_name)
+        if alias_index < 0:
+            alias_index <- ctx.externs.count.i64()
+            alias_params_start: i64 = ctx.extern_params.count.i64()
+            for offset in 0..<original.params_count |ctx, original, alias_params_start|:
+                ctx.extern_params.push(ctx.extern_params[(original.params_start + offset).usize()])
+            ctx.externs.push(TypedExtern[r]{name: alias_name, link_name: original.link_name, declaration_id: sview("", 0, 0), return_type: sview("void", 0, -1), result_type: sview("void", 0, -1), params_start: alias_params_start, params_count: original.params_count, variadic: original.variadic})
+        ctx.exprs[index.usize()] <- TypedExpr[r]{kind: TypedExprKind.Call, text: alias_name, type_name: sview("void", 0, -1), lhs: call.lhs, rhs: call.rhs, third: call.third, args_start: call.args_start, args_count: call.args_count, value: typed_call_external_value(alias_index, false)}
+        return index
     def typed_lower_comma_conditional[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], conditional: JsonValueHandle[r], prelude: mutable darray[i64]&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         expression_start: usize = ctx.exprs.count
         child_start: usize = ctx.expr_children.count
@@ -220,11 +249,28 @@ extend CTranslator:
         if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("CXXStaticCastExpr", 0, -1)):
             cast_kind: sview = ast_cast_kind(node)
             value_type: sview = typed_c_type(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            explicit_cast: bool = sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("CXXStaticCastExpr", 0, -1))
             if sview_eq(cast_kind, sview("NullToPointer", 0, -1)):
                 return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Null, text: sview("", 0, 0), type_name: value_type, lhs: -1, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return -1 if ast_child_count(node) == 0
             operand: i64 = typed_lower_comma_value(ctx, ast_child(node, 0), prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return -1 if operand < 0
+            operand_type: sview = typed_expr_at(ctx, operand).type_name
+            source_is_numeric: bool = c_type_is_integer(operand_type) or c_type_is_floating(operand_type)
+            target_is_numeric: bool = c_type_is_integer(value_type) or c_type_is_floating(value_type)
+            if source_is_numeric and target_is_numeric and (explicit_cast or not sview_eq(clang_target_type_abi_base(ctx.target_abi, operand_type), clang_target_type_abi_base(ctx.target_abi, value_type))):
+                # This helper is used by returns and expressions with comma
+                # preludes. Keep the conversions Clang inserted around those
+                # expressions, including explicit casts; otherwise a return
+                # such as `(int64_t)value` silently changes its Elisa ABI type.
+                return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Cast, text: value_type, type_name: value_type, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            if sview_eq(cast_kind, sview("LValueToRValue", 0, -1)):
+                operand_expression: TypedExpr[r] = ctx.exprs[operand.usize()]
+                if operand_expression.kind == TypedExprKind.Sequence and (operand_expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_MUTABLE or operand_expression.value == TYPED_EXPR_SEQUENCE_COMPOUND_LITERAL_READONLY):
+                    return -1 if operand_expression.lhs < 0 or operand_expression.lhs >= ctx.exprs.count.i64()
+                    store: TypedExpr[r] = ctx.exprs[operand_expression.lhs.usize()]
+                    ctx.exprs[operand.usize()] <- TypedExpr[r]{kind: operand_expression.kind, text: operand_expression.text, type_name: operand_expression.type_name, lhs: operand_expression.lhs, rhs: store.rhs, third: operand_expression.third, args_start: operand_expression.args_start, args_count: operand_expression.args_count, value: 5}
+                    return operand
             if sview_eq(cast_kind, sview("BitCast", 0, -1)) or sview_eq(cast_kind, sview("PointerToIntegral", 0, -1)) or sview_eq(cast_kind, sview("IntegralToPointer", 0, -1)) or sview_eq(cast_kind, sview("NoOp", 0, -1)):
                 return typed_push_expr(ctx, TypedExpr[r]{kind: TypedExprKind.Cast, text: value_type, type_name: value_type, lhs: operand, rhs: -1, third: -1, args_start: -1, args_count: 0, value: 0}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return operand
@@ -502,6 +548,7 @@ extend CTranslator:
         expression: i64 = typed_lower_expr(ctx, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         if expression < 0:
             return -1
+        expression <- typed_lower_discarded_callback_result(ctx, expression) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         return typed_push_stmt(ctx, TypedStmt[r]{kind: TypedStmtKind.Expression, expr: expression, aux: -1, aux2: -1, children_start: -1, children_count: 0, name: sview("", 0, 0), type_name: sview("", 0, 0)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
     def typed_lower_declaration[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r]) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         if not sview_eq(ast_kind(node), sview("VarDecl", 0, -1)):

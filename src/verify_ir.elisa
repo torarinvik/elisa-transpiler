@@ -54,6 +54,14 @@ extend CTranslator:
             result <- string_view_prefix(result, result.len - 1)
         return result
 
+    def typed_ir_parenthesis_is_top_level(value: sview, wanted: i64) -> bool:
+        depth: mutable i64 = 0
+        for index in 0..<wanted |value, wanted, depth|:
+            byte: i64 = string_view_index(value, index)
+            depth <- depth + 1 if byte == 40
+            depth <- depth - 1 if byte == 41 and depth > 0
+        return depth == 0
+
     # Recover the declared parameter count from Clang's spelling of an
     # indirect function type, e.g. `int (*)(int, void (*)(int, int))`.
     # A C `(*)()` has no prototype and therefore imposes no argument-count
@@ -61,6 +69,7 @@ extend CTranslator:
     def typed_ir_function_pointer_arity(function_type: sview, source_is_cxx: bool) -> TypedIRFunctionArity:
         for group_open in 0..<function_type.len |function_type|:
             continue if string_view_index(function_type, group_open) != 40
+            continue if not typed_ir_parenthesis_is_top_level(function_type, group_open)
             group_close: i64 = typed_ir_matching_paren(function_type, group_open)
             continue if group_close <= group_open
             pointer_group: mutable bool = false
@@ -74,6 +83,14 @@ extend CTranslator:
             continue if params_open >= function_type.len or string_view_index(function_type, params_open) != 40
             params_close: i64 = typed_ir_matching_paren(function_type, params_open)
             continue if params_close <= params_open
+            # A function returning a callback can spell its result before its
+            # own parameter group, for example `R (*)(Args) (FunctionArgs)`.
+            # Skip that inner pointer's arity and continue to the outer
+            # function-pointer declarator.
+            after_params: mutable i64 = params_close + 1
+            while after_params < function_type.len and (string_view_index(function_type, after_params) == 32 or string_view_index(function_type, after_params) == 9):
+                after_params <- after_params + 1
+            continue if after_params < function_type.len and string_view_index(function_type, after_params) == 40
             params: sview = typed_ir_trim_type_spaces(string_view_prefix(string_view_suffix(function_type, params_open + 1), params_close - params_open - 1))
             if params.len == 0:
                 return TypedIRFunctionArity{recognized: true, has_prototype: source_is_cxx, params_count: 0, variadic: false}
@@ -552,7 +569,7 @@ extend CTranslator:
         kind_copy: cstr = string_view_copy(issue.kind) can Memory.Allocate, Abort.Panic
         source_hash: TypedContentHash = typed_cached_source_content_hash(ctx, ctx.canonical_source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         unavailable_hash: TypedContentHash = TypedContentHash{value: 0, available: false}
-        ctx.diagnostics.push(TypedDiagnostic{
+        ctx.diagnostics.push(TypedDiagnostic[r]{
             category: sview("internal-ir", 0, -1), kind: sview(kind_copy, 0, -1), subject_type: sview("", 0, 0), required_capability: sview("", 0, 0),
             translation_unit: ctx.canonical_source, translation_unit_content_hash: source_hash,
             source: sview(source_copy, 0, -1), canonical_source: ctx.canonical_source, source_content_hash: source_hash,

@@ -3,10 +3,14 @@ extend CTranslator:
         saved_function_name: sview = ctx.current_function_name
         saved_function_id: sview = ctx.current_function_id
         saved_function_source: sview = ctx.current_function_source
+        saved_function_diagnostic_source: sview = ctx.current_function_diagnostic_source
         ctx.current_function_name <- ast_name(node)
         ctx.current_function_id <- ast_string(ast_field(node, sview("id", 0, -1)))
         ctx.current_function_source <- ast_location_source_file(node)
         ctx.current_function_source <- sview(ctx.source, 0, -1) if ctx.current_function_source.len == 0
+        ctx.current_function_diagnostic_source <- ast_location_source_file(node)
+        ctx.current_function_diagnostic_source <- typed_decl_source_file(ctx, ctx.current_function_id) if ctx.current_function_diagnostic_source.len == 0
+        ctx.current_function_diagnostic_source <- sview(ctx.source, 0, -1) if ctx.current_function_diagnostic_source.len == 0
         params_start: i64 = ctx.params.count.i64()
         ordinal: mutable i64 = 0
         count: i64 = ast_child_count(node)
@@ -38,13 +42,14 @@ extend CTranslator:
         ctx.current_has_goto <- false
         first_compound_literal: i64 = ctx.compound_literals.count.i64()
         first_expr: i64 = ctx.exprs.count.i64()
-        body: i64 = typed_lower_stmt(ctx, body_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        body: mutable i64 = typed_lower_stmt(ctx, body_node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         body <- typed_attach_compound_literal_storage(ctx, body, first_compound_literal, first_expr) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if body >= 0
         has_goto: bool = ctx.current_has_goto
         ctx.current_return_type <- saved_return_type
         ctx.current_function_name <- saved_function_name
         ctx.current_function_id <- saved_function_id
         ctx.current_function_source <- saved_function_source
+        ctx.current_function_diagnostic_source <- saved_function_diagnostic_source
         ctx.current_has_goto <- saved_has_goto
         if body < 0:
             return -1
@@ -57,7 +62,7 @@ extend CTranslator:
         # implementation private to Elisa. Static and header-inline definitions
         # must remain local, and C varargs cannot yet cross an export boundary.
         if ctx.project_mode and label_count >= 0 and not ast_is_static_decl(node) and not inside_anonymous_namespace and not sview_eq(function_name, sview("main", 0, -1)) and sview_find_byte(function_type, 46) < 0:
-            function_link_name <- ast_function_link_name(node)
+            function_link_name <- ast_function_link_name(node, ctx.target_abi.object_symbol_prefix)
         declaration_id: sview = typed_decl_identity(ctx, node)
         function_index: i64 = typed_push_function(ctx, TypedFunction[r]{name: function_name, declaration_id: declaration_id, internal_linkage: ast_is_static_decl(node) or inside_anonymous_namespace, link_name: function_link_name, return_type: function_type, params_start: params_start, params_count: ctx.params.count.i64() - params_start, body: body, variadic: sview_find_byte(function_type, 46) >= 0, has_global_effect: ast_contains_static_decl(body_node), has_unsafe_effect: ast_contains_kind(node, sview("ArraySubscriptExpr", 0, -1)), has_goto: has_goto, label_count: label_count, comment: ast_comment_text(node)}) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         signature_index: i64 = typed_user_function_signature_index(ctx, declaration_id, ast_name(node), function_type)

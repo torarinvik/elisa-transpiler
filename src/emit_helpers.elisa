@@ -33,6 +33,52 @@ extend CTranslator:
             type_key: sview = typed_increment_type_name(type_id)
             for mode in 1..<5 |out, ctx, mask, type_id, type_key|:
                 typed_emit_increment_helper(out, ctx, type_key, mode) if typed_increment_helper_is_used(mask, type_id, mode)
+    def typed_float_classification_kind(name: sview) -> i64:
+        return 1 if sview_eq(name, sview("__builtin_isnan_value", 0, -1))
+        return 2 if sview_eq(name, sview("__builtin_isinf_sign_value", 0, -1))
+        return 0
+    def typed_float_classification_type[@r](ctx: TypedContext[r]&, expression: TypedExpr[r]) -> sview @r:
+        return sview("", 0, 0) if expression.args_count != 1 or expression.args_start < 0
+        argument_index: i64 = ctx.expr_children[expression.args_start.usize()]
+        return clang_target_type_abi_base(ctx.target_abi, typed_expr_at(ctx, argument_index).type_name)
+    def typed_emit_float_classification_helper_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, kind: i64, float_type: sview) -> void:
+        identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
+        source_hash: u64 = hash_sview(identity) & 0x7fffffffffffffff
+        append_view(out, sview("__elisa_transpiler_", 0, -1))
+        append_view(out, sview("isnan_", 0, -1)) if kind == 1 else append_view(out, sview("isinf_sign_", 0, -1))
+        append_i64(out, source_hash.i64())
+        append_view(out, sview("_", 0, -1))
+        append_view(out, float_type)
+    def typed_float_classification_helper_is_first[@r](ctx: TypedContext[r]&, index: i64) -> bool:
+        current: TypedExpr[r] = typed_expr_at(ctx, index)
+        kind: i64 = typed_float_classification_kind(current.text)
+        return false if kind == 0
+        float_type: sview = typed_float_classification_type(ctx, current)
+        return false if not sview_eq(float_type, sview("f32", 0, -1)) and not sview_eq(float_type, sview("f64", 0, -1))
+        for previous_index in 0..<index |ctx, current, kind, float_type|:
+            previous: TypedExpr[r] = typed_expr_at(ctx, previous_index)
+            return false if typed_float_classification_kind(previous.text) == kind and sview_eq(typed_float_classification_type(ctx, previous), float_type)
+        return true
+    def typed_emit_float_classification_helper[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&, index: i64) -> void:
+        expression: TypedExpr[r] = typed_expr_at(ctx, index)
+        kind: i64 = typed_float_classification_kind(expression.text)
+        float_type: sview = typed_float_classification_type(ctx, expression)
+        append_view(out, sview("def ", 0, -1))
+        typed_emit_float_classification_helper_name(out, ctx, kind, float_type)
+        append_view(out, sview("(value: ", 0, -1))
+        append_view(out, float_type)
+        append_view(out, sview(") -> i32:\n", 0, -1))
+        if kind == 1:
+            append_view(out, sview("    return 1 if value != value else 0\n\n", 0, -1))
+            return
+        append_view(out, sview("    if value == value and value - value != ", 0, -1))
+        append_view(out, sview("(0.0).f32()", 0, -1)) if sview_eq(float_type, sview("f32", 0, -1)) else append_view(out, sview("0.0", 0, -1))
+        append_view(out, sview(":\n        return 1 if value > ", 0, -1))
+        append_view(out, sview("(0.0).f32()", 0, -1)) if sview_eq(float_type, sview("f32", 0, -1)) else append_view(out, sview("0.0", 0, -1))
+        append_view(out, sview(" else -1\n    return 0\n\n", 0, -1))
+    def typed_emit_float_classification_helpers[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&) -> void:
+        for index in 0..<ctx.exprs.count.i64() |out, ctx|:
+            typed_emit_float_classification_helper(out, ctx, index) if typed_float_classification_helper_is_first(ctx, index)
     def typed_emit_assignment_value_helper_name[@r](out: mutable darray[u8]&, ctx: TypedContext[r]&) -> void:
         identity: sview = ctx.canonical_source if ctx.canonical_source.len > 0 else sview(ctx.source, 0, -1)
         hash: u64 = hash_sview(identity) & 0x7fffffffffffffff

@@ -3,7 +3,7 @@ extend CTranslator:
     # running the translator. Integer widths are stored in bits; floating
     # sizes are stored in target bytes for safe sizeof constant evaluation.
     def clang_target_abi_unknown() -> ClangTargetABI:
-        return ClangTargetABI{char_bits: 0, short_bits: 0, int_bits: 0, long_bits: 0, long_long_bits: 0, float_bytes: 0, double_bytes: 0, long_double_bytes: 0, float_is_binary32: false, double_is_binary64: false, pointer_bits: 0, size_type_bits: 0, char_unsigned: false, short_enums: false, valid: false}
+        return ClangTargetABI{char_bits: 0, short_bits: 0, int_bits: 0, long_bits: 0, long_long_bits: 0, float_bytes: 0, double_bytes: 0, long_double_bytes: 0, float_is_binary32: false, double_is_binary64: false, pointer_bits: 0, size_type_bits: 0, char_unsigned: false, object_symbol_prefix: false, short_enums: false, valid: false}
 
     def clang_target_abi_load(macros: darray[u8], succeeded: bool) -> ClangTargetABI:
         return clang_target_abi_load_with_options(macros, succeeded, false)
@@ -116,8 +116,9 @@ extend CTranslator:
         host_pointer_bits: i64 = size_of[uintptr].i64() * 8
         size_type_bits: i64 = clang_target_size_type_bits(macros, char_bits, short_bits, int_bits, long_bits, long_long_bits)
         char_unsigned: bool = clang_target_macro_value(macros, sview("__CHAR_UNSIGNED__", 0, -1)).len > 0
+        object_symbol_prefix: bool = clang_target_macro_value(macros, sview("__APPLE__", 0, -1)).len > 0 or clang_target_macro_value(macros, sview("__MACH__", 0, -1)).len > 0
         # Current C integer promotion and string lowering require 8-bit bytes
         # and a 32-bit int. Other widths are intentionally rejected rather
         # than silently routed through the host's i32 arithmetic rules.
         valid: bool = char_bits == 8 and int_bits == 32 and clang_target_width_supported(short_bits) and clang_target_width_supported(long_bits) and clang_target_width_supported(long_long_bits) and clang_target_width_supported(pointer_bits) and pointer_bits == host_pointer_bits and clang_target_width_supported(size_type_bits)
-        return ClangTargetABI{char_bits: char_bits, short_bits: short_bits, int_bits: int_bits, long_bits: long_bits, long_long_bits: long_long_bits, float_bytes: float_bytes, double_bytes: double_bytes, long_double_bytes: long_double_bytes, float_is_binary32: float_is_binary32, double_is_binary64: double_is_binary64, pointer_bits: pointer_bits, size_type_bits: size_type_bits, char_unsigned: char_unsigned, short_enums: short_enums, valid: valid} if valid else clang_target_abi_unknown()
+        return ClangTargetABI{char_bits: char_bits, short_bits: short_bits, int_bits: int_bits, long_bits: long_bits, long_long_bits: long_long_bits, float_bytes: float_bytes, double_bytes: double_bytes, long_double_bytes: long_double_bytes, float_is_binary32: float_is_binary32, double_is_binary64: double_is_binary64, pointer_bits: pointer_bits, size_type_bits: size_type_bits, char_unsigned: char_unsigned, object_symbol_prefix: object_symbol_prefix, short_enums: short_enums, valid: valid} if valid else clang_target_abi_unknown()

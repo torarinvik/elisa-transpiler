@@ -78,32 +78,32 @@ extend CTranslator:
         Aggressive
 
     struct ClangFPOptionVector:
-        mode: ClangFloatingPointMode
-        exception_behavior: ClangFPExceptionSetting
-        fenv_access: ClangFPBooleanSetting
-        rounding_mode: ClangFPRoundingSetting
-        rounding_math: ClangFPBooleanSetting
-        contract: ClangFPContractSetting
-        explicit_contract: ClangFPContractSetting
-        contract_explicitly_seen: bool
-        denormal: ClangFPDenormalSetting
-        denormal_fp32: ClangFPDenormalSetting
-        math_errno: ClangFPBooleanSetting
-        honor_nans: ClangFPBooleanSetting
-        honor_infinities: ClangFPBooleanSetting
-        finite_math_only: ClangFPBooleanSetting
-        signed_zeros: ClangFPBooleanSetting
-        associative_math: ClangFPBooleanSetting
-        reciprocal_math: ClangFPBooleanSetting
-        approximate_functions: ClangFPBooleanSetting
-        trapping_math: ClangFPBooleanSetting
-        cx_limited_range: ClangFPBooleanSetting
-        float_store: ClangFPBooleanSetting
-        strict_float_cast_overflow: ClangFPBooleanSetting
-        single_precision_constant: ClangFPBooleanSetting
-        protect_parens: ClangFPBooleanSetting
-        complex_arithmetic: ClangFPComplexSetting
-        eval_method: ClangFPEvalSetting
-        excess_precision: ClangFPExcessPrecisionSetting
-        driver_link_effect: ClangFPDriverLinkEffect
-        unknown_option_seen: bool
+        mode: mutable ClangFloatingPointMode
+        exception_behavior: mutable ClangFPExceptionSetting
+        fenv_access: mutable ClangFPBooleanSetting
+        rounding_mode: mutable ClangFPRoundingSetting
+        rounding_math: mutable ClangFPBooleanSetting
+        contract: mutable ClangFPContractSetting
+        explicit_contract: mutable ClangFPContractSetting
+        contract_explicitly_seen: mutable bool
+        denormal: mutable ClangFPDenormalSetting
+        denormal_fp32: mutable ClangFPDenormalSetting
+        math_errno: mutable ClangFPBooleanSetting
+        honor_nans: mutable ClangFPBooleanSetting
+        honor_infinities: mutable ClangFPBooleanSetting
+        finite_math_only: mutable ClangFPBooleanSetting
+        signed_zeros: mutable ClangFPBooleanSetting
+        associative_math: mutable ClangFPBooleanSetting
+        reciprocal_math: mutable ClangFPBooleanSetting
+        approximate_functions: mutable ClangFPBooleanSetting
+        trapping_math: mutable ClangFPBooleanSetting
+        cx_limited_range: mutable ClangFPBooleanSetting
+        float_store: mutable ClangFPBooleanSetting
+        strict_float_cast_overflow: mutable ClangFPBooleanSetting
+        single_precision_constant: mutable ClangFPBooleanSetting
+        protect_parens: mutable ClangFPBooleanSetting
+        complex_arithmetic: mutable ClangFPComplexSetting
+        eval_method: mutable ClangFPEvalSetting
+        excess_precision: mutable ClangFPExcessPrecisionSetting
+        driver_link_effect: mutable ClangFPDriverLinkEffect
+        unknown_option_seen: mutable bool

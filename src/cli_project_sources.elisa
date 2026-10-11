@@ -91,8 +91,8 @@ extend CTranslator:
         json_value_count: mutable i64 = 0
         json_value_limit: mutable bool = false
         source_entry_count: mutable i64 = 0
-        json_preflight_valid: bool = ast_json_preflight_value_count_with_array_limit(bytes_view(raw), max_json_values, max_source_entries, &json_value_count, &json_value_limit, &source_entry_count, &source_entry_limit_exceeded)
-        return sources if source_entry_limit_exceeded
+        json_preflight_valid: bool = ast_json_preflight_value_count_with_array_limit(bytes_view(raw), max_json_values, max_source_entries, &json_value_count, &json_value_limit, &source_entry_count, source_entry_limit_exceeded)
+        return sources if source_entry_limit_exceeded[0]
         if not json_preflight_valid:
             invalid_database <- true
             return sources

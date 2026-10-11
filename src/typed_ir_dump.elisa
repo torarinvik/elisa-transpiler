@@ -167,7 +167,7 @@ extend CTranslator:
         typed_dump_append_fp_option(out, sview("driver_link_effect", 0, -1), clang_fp_driver_link_effect_name(options.driver_link_effect))
         typed_dump_append_fp_option(out, sview("unknown_option_seen", 0, -1), "true" if options.unknown_option_seen else "false")
 
-    def typed_dump_diagnostic(out: mutable darray[u8]&, index: i64, diagnostic: TypedDiagnostic) -> void:
+    def typed_dump_diagnostic[@r](out: mutable darray[u8]&, index: i64, diagnostic: TypedDiagnostic[r]) -> void:
         typed_dump_append_view(out, sview("diagnostic ", 0, -1))
         typed_dump_append_i64(out, index)
         typed_dump_append_view(out, sview(" category_hex=", 0, -1))

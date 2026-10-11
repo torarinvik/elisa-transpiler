@@ -452,6 +452,7 @@ extend CTranslator:
         typed_emit_compound_literal_helper(out, ctx, false) if needs_compound_literal_mutable
         typed_emit_compound_literal_helper(out, ctx, true) if needs_compound_literal_readonly
         typed_emit_increment_helpers(out, ctx, increment_helpers)
+        typed_emit_float_classification_helpers(out, ctx)
         typed_emit_frontend_phase_stats(sview(ctx.source, 0, -1), sview("support-helpers-emitted", 0, -1), sview("", 0, 0), arena_bytes, out.count, ctx) can Memory.Allocate, Console, Unsafe.PointerCast if collect_frontend_stats
         body_base_offset: i64 = out.count.i64()
         removed_marker_offsets: mutable darray[i64] = []
@@ -490,7 +491,7 @@ extend CTranslator:
         parsed: JsonParseResult[ast_arena] = json_parse_checked(&ast_arena, bytes_view(ast_bytes))
         if parsed.code != JsonErrorCode.OK:
             source_content_hash: TypedContentHash = typed_source_content_hash(source_view, source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-            typed_push_ast_parse_diagnostic(&translation, sview("AST", 0, -1), sview("invalid-json", 0, -1), source_view, canonical_source, source_content_hash, parsed.pos) can Memory.Allocate, Abort.Panic
+            typed_push_ast_parse_diagnostic(translation, sview("AST", 0, -1), sview("invalid-json", 0, -1), source_view, canonical_source, source_content_hash, parsed.pos) can Memory.Allocate, Abort.Panic
             ast_arena_used_bytes: usize = arena_used_bytes(&ast_arena) if collect_frontend_stats else 0.usize()
             translation.failed <- true
             translation.ast_arena_used_bytes <- ast_arena_used_bytes
@@ -506,7 +507,7 @@ extend CTranslator:
             schema_issue: sview = ast_root_schema_issue(root)
             if schema_issue.len > 0:
                 source_content_hash: TypedContentHash = typed_source_content_hash(source_view, source_working_directory) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                typed_push_ast_parse_diagnostic(&translation, sview("AST schema", 0, -1), schema_issue, source_view, canonical_source, source_content_hash, 0) can Memory.Allocate, Abort.Panic
+                typed_push_ast_parse_diagnostic(translation, sview("AST schema", 0, -1), schema_issue, source_view, canonical_source, source_content_hash, 0) can Memory.Allocate, Abort.Panic
                 translation.failed <- true
                 translation.ast_json_values <- ast_json_values
                 translation.ast_arena_used_bytes <- ast_arena_used_bytes
@@ -569,7 +570,7 @@ extend CTranslator:
                     for index in 0..<generated_ir_dump.count |generated_ir_dump, translation|:
                         translation.typed_ir_dump.push(generated_ir_dump[index])
                 copied_source_map: darray[TypedGeneratedSourceSpan[r]] @r = typed_copy_generated_source_spans(context.generated_source_spans) can Memory.Allocate, Abort.Panic
-                copied_diagnostics: darray[TypedDiagnostic] @r = typed_copy_diagnostics(context.diagnostics) can Memory.Allocate, Abort.Panic
+                copied_diagnostics: darray[TypedDiagnostic[r]] @r = typed_copy_diagnostics(context.diagnostics) can Memory.Allocate, Abort.Panic
                 for index in 0..<copied_source_map.count |copied_source_map, translation|:
                     translation.source_map.push(copied_source_map[index])
                 for index in 0..<copied_diagnostics.count |copied_diagnostics, translation|:

@@ -73,21 +73,43 @@ extend CTranslator:
     def typed_add_clang_record_layout_for_index[@r](ctx: mutable TypedContext[r]&, record_index: i64, size_bytes: i64, alignment_bytes: i64, converted_offsets: darray[i64]) -> void can[Memory.Allocate]:
         return if record_index < 0 or record_index >= ctx.records.count.i64()
         record: TypedRecord[r] = ctx.records[record_index.usize()]
-        return if record.fields_count != converted_offsets.count.i64() or typed_record_layout_is_unsupported(ctx, record.name)
+        # An opaque declaration has no projected fields, but Clang can still
+        # provide its complete ABI size and alignment. Keep those facts while
+        # discarding offsets that cannot be associated with projected fields.
+        opaque_record: bool = record.fields_count == 0
+        return if not opaque_record and record.fields_count != converted_offsets.count.i64()
+        return if typed_record_layout_is_unsupported(ctx, record.name)
+        stored_offset_count: i64 = 0 if opaque_record else converted_offsets.count.i64()
         for index in 0..<ctx.record_layouts.count |ctx, record_index, size_bytes, alignment_bytes, converted_offsets|:
             existing: TypedRecordLayout = ctx.record_layouts[index]
             continue if existing.record_index != record_index
-            consistent: mutable bool = existing.size_bytes == size_bytes and existing.alignment_bytes == alignment_bytes and existing.field_offsets_count == converted_offsets.count.i64()
+            consistent: mutable bool = existing.size_bytes == size_bytes and existing.alignment_bytes == alignment_bytes and existing.field_offsets_count == stored_offset_count
             if consistent:
-                for offset in 0..<converted_offsets.count.i64() |ctx, existing, converted_offsets, consistent|:
+                for offset in 0..<stored_offset_count |ctx, existing, converted_offsets, consistent|:
                     consistent <- false if ctx.record_layout_field_offsets[(existing.field_offsets_start + offset).usize()] != converted_offsets[offset.usize()]
             if not consistent:
                 ctx.record_layouts[index] <- TypedRecordLayout{record_index: record_index, size_bytes: -1, alignment_bytes: -1, field_offsets_start: -1, field_offsets_count: 0}
             return
         offsets_start: i64 = ctx.record_layout_field_offsets.count.i64()
-        for offset in converted_offsets |ctx|:
-            ctx.record_layout_field_offsets.push(offset)
-        ctx.record_layouts.push(TypedRecordLayout{record_index: record_index, size_bytes: size_bytes, alignment_bytes: alignment_bytes, field_offsets_start: offsets_start, field_offsets_count: converted_offsets.count.i64()})
+        for offset in 0..<stored_offset_count |ctx, converted_offsets|:
+            ctx.record_layout_field_offsets.push(converted_offsets[offset.usize()])
+        ctx.record_layouts.push(TypedRecordLayout{record_index: record_index, size_bytes: size_bytes, alignment_bytes: alignment_bytes, field_offsets_start: offsets_start, field_offsets_count: stored_offset_count})
+
+    def typed_record_layout_size_at_index[@r](ctx: TypedContext[r]&, record_index: i64) -> i64:
+        return -1 if record_index < 0 or record_index >= ctx.records.count.i64()
+        for layout in ctx.record_layouts |record_index|:
+            return layout.size_bytes if layout.record_index == record_index
+        return -1
+
+    def typed_record_layout_alignment_at_index[@r](ctx: TypedContext[r]&, record_index: i64) -> i64:
+        return -1 if record_index < 0 or record_index >= ctx.records.count.i64()
+        for layout in ctx.record_layouts |record_index|:
+            return layout.alignment_bytes if layout.record_index == record_index
+        return -1
+
+    def typed_opaque_record_layout_is_representable(size_bytes: i64, alignment_bytes: i64) -> bool:
+        return false if size_bytes <= 0 or alignment_bytes <= 0 or size_bytes % alignment_bytes != 0
+        return alignment_bytes == 1 or (alignment_bytes & (alignment_bytes - 1)) == 0
 
     def typed_add_clang_record_layout[@r](ctx: mutable TypedContext[r]&, type_name: sview, size_bits: i64, alignment_bits: i64, field_offsets_bits: darray[i64]) -> void can[Memory.Allocate]:
         return if sview_starts_with(type_name, sview("union ", 0, -1))

@@ -1,4 +1,40 @@
 extend CTranslator:
+    def typed_unwrap_array_compound_literal_base[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r] @r:
+        kind: sview = ast_kind(node)
+        wrapped: mutable bool = sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1))
+        wrapped <- true if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) and sview_eq(ast_cast_kind(node), sview("ArrayToPointerDecay", 0, -1))
+        return typed_unwrap_array_compound_literal_base(ast_child(node, 0)) if wrapped and ast_child_count(node) == 1
+        return node
+
+    # A pure read from a constant-indexed array compound literal does not
+    # expose the array object's identity. Select the initialized element
+    # directly so the target compiler does not need to index through a
+    # reference returned by the generic compound-literal helper. Preserve the
+    # normal storage path whenever identity, sequencing, or volatile access
+    # could be observed.
+    def typed_lower_pure_array_compound_literal_subscript[@r](ctx: mutable TypedContext[r]&, subscript: JsonValueHandle[r], handled: mutable bool&) -> i64 can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        handled <- false
+        return -1 if ast_child_count(subscript) != 2
+        compound: JsonValueHandle[r] = typed_unwrap_array_compound_literal_base(ast_child(subscript, 0))
+        return -1 if not sview_eq(ast_kind(compound), sview("CompoundLiteralExpr", 0, -1))
+        return -1 if ctx.current_function_id.len == 0
+        compound_type: sview = typed_c_type(ctx, compound) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        return -1 if not c_type_is_array(compound_type) or typed_type_spelling_has_word(compound_type, sview("volatile", 0, -1))
+        index: mutable i64 = 0
+        return -1 if not ast_try_compile_time_integer(ast_child(subscript, 1), index) or index < 0 or index >= c_array_length(compound_type)
+        return -1 if ast_child_count(compound) != 1
+        initializer: JsonValueHandle[r] = ast_child(compound, 0)
+        return -1 if not sview_eq(ast_kind(initializer), sview("InitListExpr", 0, -1))
+        initializer_count: i64 = ast_initializer_child_count(initializer)
+        return -1 if index >= initializer_count
+        for element_index in 0..<initializer_count |initializer|:
+            element: JsonValueHandle[r] = ast_initializer_child(initializer, element_index)
+            return -1 if sview_eq(ast_kind(element), sview("DesignatedInitExpr", 0, -1)) or typed_ast_expression_has_effect(element) or typed_ast_expression_has_volatile_access(element)
+        selected: JsonValueHandle[r] = ast_initializer_child(initializer, index)
+        value: i64 = typed_lower_expr(ctx, selected) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+        handled <- value >= 0
+        return value
+
     def typed_compound_literal_slot_index[@r](ctx: TypedContext[r]&, node_id: sview, function_id: sview) -> i64:
         for index in 0..<ctx.compound_literals.count |ctx, node_id, function_id|:
             slot: TypedCompoundLiteralStorage[r] = ctx.compound_literals[index]
@@ -92,7 +128,7 @@ extend CTranslator:
 
     def typed_rename_compound_literal_exprs[@r](ctx: mutable TypedContext[r]&, first_expr: i64, old_name: sview, new_name: sview) -> void:
         for index in first_expr..<ctx.exprs.count.i64() |ctx, first_expr, old_name, new_name|:
-            expression: TypedExpr[r] = ctx.exprs[index.usize()]
+            expression: mutable TypedExpr[r] = ctx.exprs[index.usize()]
             if expression.kind == TypedExprKind.Name and sview_eq(expression.text, old_name):
                 expression.text <- new_name
                 ctx.exprs[index.usize()] <- expression
@@ -103,7 +139,7 @@ extend CTranslator:
         block: mutable TypedStmt[r] = ctx.stmts[body.usize()]
         new_children: mutable darray[i64] = []
         for index in first_slot..<ctx.compound_literals.count.i64() |ctx, body, first_slot, first_expr, block, new_children|:
-            slot: TypedCompoundLiteralStorage[r] = ctx.compound_literals[index.usize()]
+            slot: mutable TypedCompoundLiteralStorage[r] = ctx.compound_literals[index.usize()]
             continue if not sview_eq(slot.function_id, ctx.current_function_id)
             unique_name: sview = typed_compound_literal_unique_name(ctx, body, index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             if unique_name.len == 0:
@@ -120,11 +156,24 @@ extend CTranslator:
                 ctx.stmt_source_origins[declaration.usize()] <- typed_ir_source_origin(slot.node, sview("storage reserved for C compound literal", 0, -1), ctx.canonical_source)
             new_children.push(declaration)
         return body if new_children.count == 0
-        for offset in 0..<block.children_count |ctx, block, new_children|:
-            new_children.push(ctx.stmt_children[(block.children_start + offset).usize()])
-        block.children_start <- ctx.stmt_children.count.i64()
-        block.children_count <- new_children.count.i64()
-        for index in 0..<new_children.count |ctx, new_children|:
-            ctx.stmt_children.push(new_children[index])
+        insertion: usize = block.children_start.usize()
+        inserted_count: usize = new_children.count
+        original_count: usize = ctx.stmt_children.count
+        for _index in 0..<inserted_count |ctx|:
+            ctx.stmt_children.push(0)
+        cursor: mutable usize = original_count
+        while cursor > insertion |ctx, cursor, inserted_count|:
+            cursor <- cursor - 1.usize()
+            ctx.stmt_children[cursor + inserted_count] <- ctx.stmt_children[cursor]
+        for index in 0..<inserted_count |ctx, new_children, insertion|:
+            ctx.stmt_children[insertion + index] <- new_children[index]
+        inserted_count_i64: i64 = inserted_count.i64()
+        block.children_count <- block.children_count + inserted_count_i64
+        for index in 0..<ctx.stmts.count |ctx, body, insertion, inserted_count_i64|:
+            continue if index.i64() == body
+            statement: mutable TypedStmt[r] = ctx.stmts[index]
+            if statement.kind == TypedStmtKind.Block and statement.children_start >= insertion.i64():
+                statement.children_start <- statement.children_start + inserted_count_i64
+                ctx.stmts[index] <- statement
         ctx.stmts[body.usize()] <- block
         return body

@@ -19,13 +19,14 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import run_fixture_manifest
+from linker_flags import elisa_test_link_flags
 from property_corpus import MAX_SEED, generate_programs
 
 
 DEFAULT_MAX_RSS_KB = 1_572_864
 DEFAULT_TIMEOUT_SECONDS = 90.0
 DEFAULT_OUTPUT_BYTES = 64 * 1024 * 1024
-RUN_ARTIFACT_SCHEMA = "elisa-property-run-v1"
+RUN_ARTIFACT_SCHEMA = "elisa-property-run-v2"
 
 FAMILY_BY_PROGRAM = {
     "integer_operations": ["integer_semantics", "expressions", "runtime_parity"],
@@ -37,19 +38,26 @@ FAMILY_BY_PROGRAM = {
 
 
 def build_manifest_case(
-    program, source: Path, seed: int, native_compiler: str = "clang"
+    program,
+    source: Path,
+    seed: int,
+    native_compiler: str = "clang",
+    elisa_target_triple: str = "",
 ) -> dict[str, object]:
     """Describe one generated source using the canonical fixture-runner stages."""
+    elisa_compile_argv = [
+        "{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"
+    ]
+    if elisa_target_triple:
+        elisa_compile_argv[1:1] = ["-target-triple", "{elisa_target_triple}"]
     return {
         "name": "property_%s_seed_%d" % (program.family, seed),
         "source": str(source.resolve()),
         "translate_argv": ["{translator}", "{source}"],
         "native_build_argv": [native_compiler, "-std=c11", "{source}", "-o", "{native}"],
-        "elisa_compile_argv": [
-            "{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"
-        ],
+        "elisa_compile_argv": elisa_compile_argv,
         "elisa_link_argv": [
-            native_compiler, "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"
+            native_compiler, *elisa_test_link_flags(), "-o", "{elisa_executable}", "{object}"
         ],
         "native_run_argv": ["{native}"],
         "elisa_run_argv": ["{elisa_executable}"],
@@ -99,6 +107,7 @@ def run_toolchain_digest(
     elisa_compiler: Path,
     elisa_runtime: Path | None,
     native_compiler: Path | None = None,
+    elisa_target_triple: str = "",
 ) -> str:
     """Separate preserved run artifacts whenever an executable changes."""
     digest = hashlib.sha256()
@@ -133,6 +142,8 @@ def run_toolchain_digest(
     # These argv profiles define how each tool is used. Bump the schema if the
     # fixed property-run commands or target options change.
     digest.update(b"c11-native-and-O0-elisa\0")
+    digest.update(elisa_target_triple.encode("utf-8", "surrogateescape"))
+    digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -147,6 +158,7 @@ def run_seed(
     timeout_seconds: float,
     max_output_bytes: int,
     min_system_free_percent: int | None,
+    elisa_target_triple: str = "",
 ) -> tuple[int, int]:
     """Run all generated programs serially, preserving runner diagnostics/artifacts."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,7 +175,8 @@ def run_seed(
         raise FileNotFoundError("native Clang compiler not found on PATH")
     native_compiler_path = Path(native_compiler).resolve(strict=True)
     toolchain_key = run_toolchain_digest(
-        translator, elisa_compiler, elisa_runtime, native_compiler_path
+        translator, elisa_compiler, elisa_runtime, native_compiler_path,
+        elisa_target_triple,
     )
     source_dir = output_dir / "sources" / corpus_key
     run_output_dir = output_dir / "runs" / (corpus_key + "-tools-" + toolchain_key)
@@ -174,6 +187,7 @@ def run_seed(
         translator=str(translator.resolve()),
         elisa_compiler=str(elisa_compiler.resolve()),
         elisa_runtime=str(elisa_runtime.resolve()) if elisa_runtime else "",
+        elisa_target_triple=elisa_target_triple,
         timeout_seconds=None,
         default_timeout_seconds=timeout_seconds,
         max_rss_kb=max_rss_kb,
@@ -188,7 +202,9 @@ def run_seed(
         source = source_dir / (program.family + ".c")
         source_bytes = program.source.encode("utf-8")
         persist_content_addressed_source(source, source_bytes)
-        case = build_manifest_case(program, source, seed, str(native_compiler_path))
+        case = build_manifest_case(
+            program, source, seed, str(native_compiler_path), elisa_target_triple
+        )
         result = run_fixture_manifest.run_case(
             case,
             arguments,
@@ -209,6 +225,10 @@ def main() -> int:
         "--elisa-runtime",
         type=Path,
         default=os.environ.get("ELISA_PROPERTY_CORPUS_RUNTIME") or None,
+    )
+    parser.add_argument(
+        "--elisa-target-triple",
+        default=os.environ.get("ELISA_STAGE1_TARGET_TRIPLE", ""),
     )
     parser.add_argument("--seed", type=int, default=1729)
     parser.add_argument("--output-dir", type=Path, default=Path("build/property-corpus"))
@@ -283,6 +303,7 @@ def main() -> int:
         timeout_seconds=args.timeout_seconds,
         max_output_bytes=args.max_output_bytes,
         min_system_free_percent=args.min_system_free_percent,
+        elisa_target_triple=args.elisa_target_triple,
     )
     print("property corpus summary: passed=%d failed=%d" % (passed, failed))
     return 1 if failed else 0

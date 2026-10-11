@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 
+from linker_flags import elisa_test_link_flags
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FORWARD_HEADER = "static inline int imported_increment(int);\n"
@@ -189,7 +191,7 @@ def main() -> int:
         if generated_build.returncode != 0:
             return fail("Elisa compiler rejected the canonical-inline-closure translation", generated_build.stderr)
         generated_executable = temporary_root / "generated"
-        link_argv = [clang, "-Wl,-dead_strip", "-o", str(generated_executable), str(object_file)]
+        link_argv = [clang, *elisa_test_link_flags(), "-o", str(generated_executable), str(object_file)]
         if runtime is not None:
             link_argv.append(str(runtime))
         linked = subprocess.run(link_argv, cwd=temporary_root, capture_output=True, text=True, timeout=30, check=False)

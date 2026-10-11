@@ -1,11 +1,11 @@
 extend CTranslator:
-    def emit_typed_diagnostics(diagnostics: darray[TypedDiagnostic]) -> void can[Console, Unsafe.PointerCast]:
+    def emit_typed_diagnostics[@r](diagnostics: darray[TypedDiagnostic[r]] @r) -> void can[Console, Unsafe.PointerCast]:
         output: mutable darray[u8] = []
         for index in 0..<diagnostics.count |output, diagnostics|:
             typed_append_diagnostic(&output, diagnostics[index])
         emit_view_fd(bytes_view(output), 2) can Console, Unsafe.PointerCast
 
-    def typed_append_diagnostic(out: mutable darray[u8]&, diagnostic: TypedDiagnostic) -> void:
+    def typed_append_diagnostic[@r](out: mutable darray[u8]&, diagnostic: TypedDiagnostic[r]) -> void:
         if sview_eq(diagnostic.category, sview("internal-ir", 0, -1)):
             append_view(out, sview("elisa-c-transpiler: internal typed IR invariant failed: ", 0, -1))
             append_view(out, diagnostic.kind)
@@ -127,11 +127,11 @@ extend CTranslator:
             out.push(34.u8())
         first <- false
 
-    def cli_emit_typed_diagnostics_json(diagnostics: darray[TypedDiagnostic]) -> void can[Console, Unsafe.PointerCast, Memory.Allocate, Abort.Panic]:
+    def cli_emit_typed_diagnostics_json[@r](diagnostics: darray[TypedDiagnostic[r]] @r) -> void can[Console, Unsafe.PointerCast, Memory.Allocate, Abort.Panic]:
         output: mutable darray[u8] = []
         output.push(91.u8())
         for index in 0..<diagnostics.count |output, diagnostics|:
-            diagnostic: TypedDiagnostic = diagnostics[index]
+            diagnostic: TypedDiagnostic[r] = diagnostics[index]
             output.push(44.u8()) if index > 0
             output.push(123.u8())
             first: mutable bool = true

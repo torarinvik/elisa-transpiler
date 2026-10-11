@@ -9,15 +9,6 @@ extend CTranslator:
         start_offset: i64
         end_offset: i64
 
-    struct TypedOwnedSourceRange[@r]:
-        file: sview @r
-        included_from: sview @r
-        start_offset: i64
-        end_offset: i64
-
-    struct TypedSourceMapText[@r]:
-        value: sview @r
-
     struct TypedIRSourceOrigin[@r]:
         node: JsonValueHandle[r]
         translation_unit: sview @r
@@ -27,17 +18,24 @@ extend CTranslator:
         synthesized_reason: sview @r
 
     struct TypedGeneratedSourceSpan[@r]:
-        generated_start: mutable i64
-        generated_end: mutable i64
+        generated_start: i64
+        generated_end: i64
         translation_unit: sview @r
-        source: TypedOwnedSourceRange[r]
-        spelling: TypedOwnedSourceRange[r]
-        expansion: TypedOwnedSourceRange[r]
+        source_file: sview @r
+        source_included_from: sview @r
+        source_start_offset: i64
+        source_end_offset: i64
+        spelling_file: sview @r
+        spelling_included_from: sview @r
+        spelling_start_offset: i64
+        spelling_end_offset: i64
+        expansion_file: sview @r
+        expansion_included_from: sview @r
+        expansion_start_offset: i64
+        expansion_end_offset: i64
         synthesized_reason: sview @r
 
     def typed_copy_view_to_region[@r](value: sview) -> sview @r can[Memory.Allocate, Abort.Panic]:
         return sview("", 0, 0) if value.len == 0
-        copied: mutable darray[u8] @r = []
-        append_view(&copied, value)
-        copied_cstr: cstr = copied.as_cstr()
-        return sview(copied_cstr, 0, -1)
+        copied: darray[u8] @r = clone[darray[u8] @r](value) can Memory.Allocate, Abort.Panic
+        return bytes_view(copied)

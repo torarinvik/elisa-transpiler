@@ -81,6 +81,12 @@ class PropertyCorpusTests(unittest.TestCase):
             changed = run_toolchain_digest(translator, compiler_b, None)
             self.assertEqual(first, same)
             self.assertNotEqual(first, changed)
+            self.assertNotEqual(
+                first,
+                run_toolchain_digest(
+                    translator, compiler_a, None, elisa_target_triple="x86_64-linux-gnu"
+                ),
+            )
             self.write_executable(compiler_a, "exit 1")
             self.assertNotEqual(first, run_toolchain_digest(translator, compiler_a, None))
 
@@ -301,6 +307,16 @@ class PropertyCorpusTests(unittest.TestCase):
                 self.assertEqual(case["expected_exit_code"], 0)
                 self.assertEqual(case["compare"], ["stdout", "stderr", "exit_code"])
                 self.assertIn("{source}", case["capture_files"])
+                targeted = build_manifest_case(
+                    program,
+                    Path("/tmp/property-source.c"),
+                    1729,
+                    elisa_target_triple="x86_64-linux-gnu",
+                )
+                self.assertEqual(
+                    targeted["elisa_compile_argv"][1:3],
+                    ["-target-triple", "{elisa_target_triple}"],
+                )
                 self.assertFalse(
                     set(FAMILY_BY_PROGRAM[program.family])
                     - run_fixture_manifest.FEATURE_FAMILIES

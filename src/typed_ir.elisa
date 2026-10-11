@@ -87,6 +87,10 @@ extend CTranslator:
     # from this base encode a signature index and preserve the inline bit.
     const TYPED_CALL_SIGNATURE_BASE: i64 = 16
     const TYPED_CALL_EXTERNAL_BASE: i64 = 1000000
+    # A varargs builtin's Cast argument may retain a typedef spelling even
+    # though Clang's source operand is an array. Preserve that ABI fact in the
+    # otherwise unused Cast payload for its dedicated emitter.
+    const TYPED_EXPR_CAST_VA_LIST_ARRAY_DECAY: i64 = 1
     const TYPED_STMT_AUX_CPP_UNORDERED_MAP_ITERATOR: i64 = 101
     const TYPED_STMT_AUX_C_DECLARATION_GROUP: i64 = 102
 
@@ -162,7 +166,7 @@ extend CTranslator:
 
     struct TypedExpr[@r]:
         kind: TypedExprKind
-        text: sview @r
+        text: mutable sview @r
         type_name: sview @r
         lhs: i64
         rhs: i64
@@ -180,8 +184,8 @@ extend CTranslator:
         expr: i64
         aux: i64
         aux2: i64
-        children_start: i64
-        children_count: i64
+        children_start: mutable i64
+        children_count: mutable i64
         name: sview @r
         type_name: sview @r
 
@@ -197,7 +201,7 @@ extend CTranslator:
     struct TypedCompoundLiteralStorage[@r]:
         node_id: sview @r
         function_id: sview @r
-        name: sview @r
+        name: mutable sview @r
         type_name: sview @r
         node: JsonValueHandle[r]
 
@@ -439,6 +443,7 @@ extend CTranslator:
         id: sview @r
         previous_id: sview @r
         canonical_id: mutable sview @r
+        source_file: mutable sview @r
         declaration: JsonValueHandle[r]
         complete_record: mutable JsonValueHandle[r]
 
@@ -456,6 +461,7 @@ extend CTranslator:
         pointer_bits: i64
         size_type_bits: i64
         char_unsigned: bool
+        object_symbol_prefix: bool
         # `-fshort-enums` is a semantic ABI option that Clang does not expose
         # in the JSON EnumDecl node. Keep it beside target widths so enum
         # collection can select compatible integer storage.
@@ -519,6 +525,7 @@ extend CTranslator:
         current_function_name: mutable sview @r
         current_function_id: mutable sview @r
         current_function_source: mutable sview @r
+        current_function_diagnostic_source: mutable sview @r
         current_has_goto: mutable bool
         current_emit_has_goto: mutable bool
         current_structured_break_label: mutable i64
@@ -547,7 +554,7 @@ extend CTranslator:
         diagnostic_line_scan_number: mutable i64
         diagnostic_line_scan_previous_cr: mutable bool
         root: mutable JsonValueHandle[r]
-        diagnostics: mutable darray[TypedDiagnostic] @r
+        diagnostics: mutable darray[TypedDiagnostic[r]] @r
 
     def typed_call_selected_function_index[@r](ctx: TypedContext[r]&, call_value: i64) -> i64:
         signature_index: i64 = typed_call_signature_index(call_value)
@@ -563,7 +570,7 @@ extend CTranslator:
         output: mutable darray[u8] @r
         source_map: mutable darray[TypedGeneratedSourceSpan[r]] @r
         typed_ir_dump: mutable darray[u8] @r
-        diagnostics: mutable darray[TypedDiagnostic] @r
+        diagnostics: mutable darray[TypedDiagnostic[r]] @r
         ast_json_values: mutable i64
         ast_arena_used_bytes: mutable usize
         needs_cpp_unordered_map: mutable bool

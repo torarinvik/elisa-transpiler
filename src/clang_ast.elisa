@@ -11,17 +11,17 @@ extend CTranslator:
         return ast_string(ast_field(node, sview("name", 0, -1)))
 
     # Clang's JSON AST carries the ABI spelling separately from the source name.
-    # On Darwin the JSON spelling includes the object-file underscore prefix
-    # (`_foo`, `__Z3fooi`), while Elisa's @link_name expects the linker-facing
-    # name before that platform prefix (`foo`, `_Z3fooi`). On ELF the ordinary
-    # C name has no prefix and the Itanium C++ spelling already starts at `_Z`.
-    # Normalize only the unambiguous leading forms; keep other ABI spellings
-    # lossless for targets such as MSVC.
-    def ast_declaration_link_name[@r](node: JsonValueHandle[r]) -> sview @r:
+    # Mach-O adds one object-file underscore to external symbols; ELF and COFF
+    # do not. Use the target fact gathered from Clang's predefined macros so
+    # ELF symbols that already begin with underscores (for example
+    # __isoc99_sscanf) remain intact.
+    def ast_declaration_link_name[@r](node: JsonValueHandle[r], object_symbol_prefix: bool) -> sview @r:
         mangled: sview = ast_string(ast_field(node, sview("mangledName", 0, -1)))
-        return ast_name(node) if mangled.len == 0 else string_view_suffix(mangled, 1) if sview_starts_with(mangled, sview("__Z", 0, -1)) else string_view_suffix(mangled, 1) if sview_starts_with(mangled, sview("_", 0, -1)) and not sview_starts_with(mangled, sview("_Z", 0, -1)) else mangled
-    def ast_function_link_name[@r](node: JsonValueHandle[r]) -> sview @r:
-        return ast_declaration_link_name(node)
+        return ast_name(node) if mangled.len == 0
+        return string_view_suffix(mangled, 1) if object_symbol_prefix and sview_starts_with(mangled, sview("_", 0, -1))
+        return mangled
+    def ast_function_link_name[@r](node: JsonValueHandle[r], object_symbol_prefix: bool) -> sview @r:
+        return ast_declaration_link_name(node, object_symbol_prefix)
     def ast_qual_type[@r](node: JsonValueHandle[r]) -> sview @r:
         type_view: ClangTypeView[r] = clang_type_view_of_decl(node)
         return type_view.spelling

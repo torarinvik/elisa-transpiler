@@ -211,14 +211,29 @@ extend CTranslator:
                 append_view(out, sview("#", 0, -1))
                 append_view(out, record.comment)
                 append_view(out, sview("\n", 0, -1))
+            opaque_size: i64 = typed_record_layout_size_at_index(ctx, index.i64()) if record.fields_count == 0 else -1
+            opaque_alignment: i64 = typed_record_layout_alignment_at_index(ctx, index.i64()) if record.fields_count == 0 else -1
+            opaque_layout_available: bool = typed_opaque_record_layout_is_representable(opaque_size, opaque_alignment)
+            if opaque_layout_available and opaque_alignment > 1:
+                append_view(out, sview("@align(", 0, -1))
+                append_i64(out, opaque_alignment)
+                append_view(out, sview(")\n", 0, -1))
             append_view(out, sview("struct ", 0, -1))
             append_elisa_type_name(out, record.name)
             append_view(out, sview(" layout(packed):\n", 0, -1)) if typed_record_name_is_packed(ctx, record.name) else append_view(out, sview(":\n", 0, -1))
             if record.fields_count == 0:
-                # Elisa requires at least one field in a struct body. This is
-                # only an opaque declaration used for pointers or ABI values
-                # whose definition is outside the translated source unit.
-                append_view(out, sview("    _opaque: u8\n", 0, -1))
+                # Preserve Clang's complete size/alignment for opaque records
+                # that participate in by-value ABI storage, including target
+                # va_list records. Pointer-only opaque records also stay
+                # faithful when Clang provided the layout.
+                if opaque_layout_available:
+                    append_view(out, sview("    _opaque: array[u8, ", 0, -1))
+                    append_i64(out, opaque_size)
+                    append_view(out, sview("]\n", 0, -1))
+                else:
+                    # Elisa requires at least one field. Keep the historical
+                    # placeholder only when no usable target layout exists.
+                    append_view(out, sview("    _opaque: u8\n", 0, -1))
             else:
                 for offset in 0..<record.fields_count |out, ctx, record|:
                     field: TypedField[r] = ctx.fields[(record.fields_start + offset).usize()]

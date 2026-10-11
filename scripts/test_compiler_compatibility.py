@@ -54,9 +54,10 @@ class CompilerCompatibilityManifestTests(unittest.TestCase):
         validation = self.manifest["translator_validation"]
         self.assertEqual(validation["status"], "pending")
         self.assertFalse(validation["current_translator_sources_verified"])
-        self.assertFalse(validation["compiler_products_current"])
+        self.assertIsInstance(validation["compiler_products_current"], bool)
         self.assertIn("Stage0 source is at", validation["compiler_product_state"])
         self.assertIn("Stage1 source is at", validation["compiler_product_state"])
+        self.assertIn("Translator validation is still pending", validation["compiler_product_state"])
         self.assertTrue(validation["reason"])
         self.assertGreaterEqual(len(validation["required_checks"]), 2)
         self.assertTrue(self.manifest["update_policy"])

@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 
+from linker_flags import elisa_test_link_flags
+
 
 ROOT = Path(__file__).resolve().parents[1]
 HEADER_SOURCE = """\
@@ -445,7 +447,7 @@ def main() -> int:
                 return fail("Elisa compiler rejected the transitive-layout translation", compiled.stderr, generated.read_text(encoding="utf-8"))
 
             linked = subprocess.run(
-                ["clang", "-Wl,-dead_strip", "-o", str(temporary_root / "generated"), str(object_file)],
+                ["clang", *elisa_test_link_flags(), "-o", str(temporary_root / "generated"), str(object_file)],
                 cwd=temporary_root,
                 capture_output=True,
                 text=True,

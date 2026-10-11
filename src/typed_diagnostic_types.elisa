@@ -1,28 +1,28 @@
 extend CTranslator:
-    struct TypedDiagnostic:
-        category: sview
-        kind: sview
-        subject_type: sview
-        required_capability: sview
+    struct TypedDiagnostic[@r]:
+        category: sview @r
+        kind: sview @r
+        subject_type: sview @r
+        required_capability: sview @r
         # Canonical source file whose Clang invocation owns this diagnostic.
         # This is distinct from `source`, which may be a shared header or a
         # macro spelling/expansion location.
-        translation_unit: sview
+        translation_unit: sview @r
         translation_unit_content_hash: TypedContentHash
-        source: sview
-        canonical_source: sview
+        source: sview @r
+        canonical_source: sview @r
         source_content_hash: TypedContentHash
-        spelling_source: sview
-        spelling_canonical_source: sview
+        spelling_source: sview @r
+        spelling_canonical_source: sview @r
         spelling_source_content_hash: TypedContentHash
-        spelling_included_from: sview
-        spelling_included_from_canonical: sview
+        spelling_included_from: sview @r
+        spelling_included_from_canonical: sview @r
         spelling_included_from_content_hash: TypedContentHash
-        expansion_source: sview
-        expansion_canonical_source: sview
+        expansion_source: sview @r
+        expansion_canonical_source: sview @r
         expansion_source_content_hash: TypedContentHash
-        expansion_included_from: sview
-        expansion_included_from_canonical: sview
+        expansion_included_from: sview @r
+        expansion_included_from_canonical: sview @r
         expansion_included_from_content_hash: TypedContentHash
         range_start_offset: i64
         range_end_offset: i64

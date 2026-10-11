@@ -136,6 +136,10 @@ translator-owned compatibility core. The generated Elisa files can then be
 moved together and compiled without the translator's build-directory-relative
 wrapper; the selected support roots remain explicit external dependencies.
 
+For direct source inputs, `--clang PATH` and `--clangxx PATH` select the C and
+C++ frontend executables, including the target-macro query. Compilation
+database entries retain the compiler and arguments recorded for each unit.
+
 Switches are lowered to Elisa `match` statements. Adjacent C labels that share
 an arm become Elisa or-patterns such as `0 | 1:`; three or more consecutive
 integer labels can become a range such as `10..=12:`, and enum labels retain
@@ -291,7 +295,11 @@ the Stage0 it just built, then verifies/rebuilds the runtime using its content
 digest; it refuses before the Stage0 build when another live Stage1 seed lock
 is held. The Stage0 Go compiler build defaults to one package worker; tune it with
 `ELISA_STAGE0_GO_BUILD_PARALLELISM` (1–128) only when the host has adequate
-headroom. The free-memory threshold can be explicitly changed with
+headroom. Stage1 seed optimization defaults to `-O3`; select `-O0`, `-O1`,
+`-O2`, or `-O3` with `ELISA_STAGE1_SEED_OPT_LEVEL`. Setup validates the value
+before building Stage0 and reports the selected level. Its effect on seed peak
+memory has not been measured here; retain the existing process cap and host
+memory floors for lower-level experiments. The free-memory threshold can be explicitly changed with
 `ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT`. Set `ELISAC_BIN` only when deliberately
 testing a different compiler.
 

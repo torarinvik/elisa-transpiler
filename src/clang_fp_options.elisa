@@ -171,11 +171,11 @@ extend CTranslator:
             options.approximate_functions <- ClangFPBooleanSetting.Off
             return true
         elif clang_fp_word_equals(text, offset, sview("-funsafe-math-optimizations", 0, -1)):
-            clang_fp_apply_unsafe_math(&options, true)
+            clang_fp_apply_unsafe_math(options, true)
             options.driver_link_effect <- ClangFPDriverLinkEffect.AutomaticIfLinked if options.driver_link_effect == ClangFPDriverLinkEffect.TargetDefault
             return true
         elif clang_fp_word_equals(text, offset, sview("-fno-unsafe-math-optimizations", 0, -1)):
-            clang_fp_apply_unsafe_math(&options, false)
+            clang_fp_apply_unsafe_math(options, false)
             options.driver_link_effect <- ClangFPDriverLinkEffect.TargetDefault if options.driver_link_effect == ClangFPDriverLinkEffect.AutomaticIfLinked
             return true
         elif clang_fp_word_equals(text, offset, sview("-fno-trapping-math", 0, -1)):
@@ -264,6 +264,10 @@ extend CTranslator:
         return false
 
     def clang_fp_options_mark_unknown(options: mutable ClangFPOptionVector&) -> void:
+        # Unknown/partial arithmetic switches invalidate the mode summary as
+        # well as the individual option fields. Profile parsing may otherwise
+        # overwrite an earlier Unknown result with Relaxed or Strict.
+        options.mode <- ClangFloatingPointMode.Unknown
         options.exception_behavior <- ClangFPExceptionSetting.Unknown
         options.fenv_access <- ClangFPBooleanSetting.Unknown
         options.rounding_mode <- ClangFPRoundingSetting.Unknown
@@ -383,7 +387,8 @@ extend CTranslator:
 
     def clang_fp_options_from_argv(text: darray[u8], offsets: darray[usize]) -> ClangFPOptionVector:
         options: mutable ClangFPOptionVector = clang_fp_options_default()
-        options.mode <- clang_fp_mode_from_argv(text, offsets)
+        mode_summary: ClangFloatingPointMode = clang_fp_mode_from_argv(text, offsets)
+        options.mode <- mode_summary
         shared_seen: mutable bool = false
         link_context_unknown_seen: mutable bool = false
         ofast_seen: mutable bool = false
@@ -455,6 +460,10 @@ extend CTranslator:
         # re-enable contraction, while a later -fno-protect-parens naturally
         # restores the contract selected by the other options.
         options.contract <- ClangFPContractSetting.Off if options.protect_parens == ClangFPBooleanSetting.On
+        # Profile application may update `mode` while processing recognized
+        # scalar options. Keep the conservative Unknown result from the argv
+        # mode scan if any partially modeled switch was present.
+        options.mode <- ClangFloatingPointMode.Unknown if mode_summary == ClangFloatingPointMode.Unknown
         options.driver_link_effect <- ClangFPDriverLinkEffect.Suppressed if shared_seen and options.driver_link_effect == ClangFPDriverLinkEffect.AutomaticIfLinked
         if link_context_unknown_seen and options.driver_link_effect != ClangFPDriverLinkEffect.TargetDefault and options.driver_link_effect != ClangFPDriverLinkEffect.NotLinked:
             options.driver_link_effect <- ClangFPDriverLinkEffect.Unknown

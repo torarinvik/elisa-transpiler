@@ -162,10 +162,10 @@ extend CTranslator:
 
     def typed_finalize_generated_source_spans[@r](spans: mutable darray[TypedGeneratedSourceSpan[r]]& @r, source_offsets: darray[i64]) -> void:
         for index in 0..<spans.count.i64() |spans, source_offsets|:
-            span: mutable TypedGeneratedSourceSpan[r] = spans[index.usize()]
-            span.generated_start <- typed_generated_offset_for_source(source_offsets, span.generated_start)
-            span.generated_end <- typed_generated_offset_for_source(source_offsets, span.generated_end)
-            spans[index.usize()] <- span
+            span: TypedGeneratedSourceSpan[r] = spans[index.usize()]
+            generated_start: i64 = typed_generated_offset_for_source(source_offsets, span.generated_start)
+            generated_end: i64 = typed_generated_offset_for_source(source_offsets, span.generated_end)
+            spans[index.usize()] <- TypedGeneratedSourceSpan[r]{generated_start: generated_start, generated_end: generated_end, translation_unit: span.translation_unit, source_file: span.source_file, source_included_from: span.source_included_from, source_start_offset: span.source_start_offset, source_end_offset: span.source_end_offset, spelling_file: span.spelling_file, spelling_included_from: span.spelling_included_from, spelling_start_offset: span.spelling_start_offset, spelling_end_offset: span.spelling_end_offset, expansion_file: span.expansion_file, expansion_included_from: span.expansion_included_from, expansion_start_offset: span.expansion_start_offset, expansion_end_offset: span.expansion_end_offset, synthesized_reason: span.synthesized_reason}
 
     def typed_count_removed_bytes_before(removed_offsets: darray[i64], boundary: i64) -> i64:
         low: mutable i64 = 0
@@ -180,7 +180,9 @@ extend CTranslator:
 
     def typed_rebase_generated_source_spans[@r](spans: mutable darray[TypedGeneratedSourceSpan[r]]& @r, base_offset: i64, removed_offsets: darray[i64]) -> void:
         for index in 0..<spans.count.i64() |spans, base_offset, removed_offsets|:
-            span: mutable TypedGeneratedSourceSpan[r] = spans[index.usize()]
-            span.generated_start <- base_offset + span.generated_start - typed_count_removed_bytes_before(removed_offsets, span.generated_start)
-            span.generated_end <- base_offset + span.generated_end - typed_count_removed_bytes_before(removed_offsets, span.generated_end)
-            spans[index.usize()] <- span
+            span: TypedGeneratedSourceSpan[r] = spans[index.usize()]
+            original_start: i64 = span.generated_start
+            original_end: i64 = span.generated_end
+            generated_start: i64 = base_offset + original_start - typed_count_removed_bytes_before(removed_offsets, original_start)
+            generated_end: i64 = base_offset + original_end - typed_count_removed_bytes_before(removed_offsets, original_end)
+            spans[index.usize()] <- TypedGeneratedSourceSpan[r]{generated_start: generated_start, generated_end: generated_end, translation_unit: span.translation_unit, source_file: span.source_file, source_included_from: span.source_included_from, source_start_offset: span.source_start_offset, source_end_offset: span.source_end_offset, spelling_file: span.spelling_file, spelling_included_from: span.spelling_included_from, spelling_start_offset: span.spelling_start_offset, spelling_end_offset: span.spelling_end_offset, expansion_file: span.expansion_file, expansion_included_from: span.expansion_included_from, expansion_start_offset: span.expansion_start_offset, expansion_end_offset: span.expansion_end_offset, synthesized_reason: span.synthesized_reason}

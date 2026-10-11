@@ -7,7 +7,7 @@ extend CTranslator:
             extern_params: [], globals: [], functions: [], user_function_names: [], user_function_signatures: [], externs: [], extern_globals: [],
             fields: [], records: [], record_layouts: [], record_layout_field_offsets: [], specialized_types: [], packed_record_names: [], layout_unsupported_record_names: [],
             enums: [], enum_consts: [], labels: [], switch_cases: [], decl_infos: [], declaration_index: [], declaration_index_count: 0, source_hashes: [],
-            break_scopes: [], switch_depth: 0, current_for_increment: -1, current_return_type: sview("", 0, 0), current_function_name: sview("", 0, 0), current_function_source: sview("", 0, 0),
+            break_scopes: [], switch_depth: 0, current_for_increment: -1, current_return_type: sview("", 0, 0), current_function_name: sview("", 0, 0), current_function_source: sview("", 0, 0), current_function_diagnostic_source: sview("", 0, 0),
             current_has_goto: false, current_emit_has_goto: false, current_structured_break_label: -1, current_emit_goto_name: sview("", 0, 0),
             current_switch_done_name: sview("", 0, 0), current_switch_done_index: -1, current_function_body: -1, current_trusted_depth: 0,
             needs_cpp_unordered_map: false, compound_literals: [], unsupported_target_float_seen: false, source_mapping_enabled: capture_source_map, project_mode: project_mode, initializer_name: initializer_name,

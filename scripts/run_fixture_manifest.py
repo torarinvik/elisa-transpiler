@@ -17,6 +17,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 import run_bounded_process as bounded_process
+from linker_flags import elisa_test_link_flags
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,6 +71,18 @@ def substitute_argv(template, values, field_name):
         if not isinstance(part, str):
             raise ManifestError("%s entries must be strings" % field_name)
         result.append(substitute_template(part, values, field_name))
+    return result
+
+
+def normalize_elisa_link_argv(argv):
+    """Translate the manifest's macOS dead-strip marker to host link flags."""
+    link_flags = elisa_test_link_flags()
+    result = []
+    for part in argv:
+        if part == "-Wl,-dead_strip":
+            result.extend(link_flags)
+        else:
+            result.append(part)
     return result
 
 
@@ -356,6 +369,9 @@ def run_case(case, arguments, feature_families=None):
         "translator": str(arguments.translator),
         "elisa_bin": str(arguments.elisa_compiler),
         "elisa_runtime": str(elisa_runtime or ""),
+        "cpp_lib_dir": str(getattr(arguments, "cpp_lib_dir", ROOT / "cpp_lib")),
+        "elisa_std_dir": str(getattr(arguments, "elisa_std_dir", "")),
+        "elisa_target_triple": str(getattr(arguments, "elisa_target_triple", "")),
     }
     stages = []
     checks = []
@@ -434,6 +450,7 @@ def run_case(case, arguments, feature_families=None):
         atomic_json(case_dir / "result.json", result)
         return result
     elisa_link_argv = list(case["elisa_link_argv"])
+    elisa_link_argv = normalize_elisa_link_argv(elisa_link_argv)
     if elisa_runtime and "{elisa_runtime}" not in elisa_link_argv:
         # A self-hosted compiler may lower generated containers through the
         # Elisa arena ABI. Link the explicitly selected matching runtime into
@@ -588,9 +605,24 @@ def main():
     parser.add_argument("--translator", required=True)
     parser.add_argument("--elisa-compiler", required=True)
     parser.add_argument(
+        "--cpp-lib-dir",
+        default=str(ROOT / "cpp_lib"),
+        help="translator-owned C++ compatibility library directory",
+    )
+    parser.add_argument(
+        "--elisa-std-dir",
+        default=os.environ.get("ELISA_STAGE1_STDLIB", ""),
+        help="Elisa standard-library directory for translated compatibility includes",
+    )
+    parser.add_argument(
         "--elisa-runtime",
         default=os.environ.get("ELISA_RUNTIME_OBJ") or os.environ.get("ELISAC_RUNTIME", ""),
         help="matching Elisa runtime object for generated-program links (or ELISA_RUNTIME_OBJ/ELISAC_RUNTIME)",
+    )
+    parser.add_argument(
+        "--elisa-target-triple",
+        default=os.environ.get("ELISA_STAGE1_TARGET_TRIPLE", ""),
+        help="target triple passed through the {elisa_target_triple} manifest placeholder",
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--case", action="append", dest="selected_cases")

@@ -506,6 +506,12 @@ module CTranslator:
                 ast_text: sview = string_view_suffix(text, json_start)
                 if not ast_json_is_well_formed(ast_text):
                     malformed_ast <- true
+                    # Keep shallow malformed input for the checked JSON parser
+                    # when --diagnostics-json is active. The CLI still rejects
+                    # it before translation in its normal human-readable mode.
+                    if not ast_json_exceeds_max_depth(ast_text):
+                        for index in 0..<ast_text.len |ast_text, output|:
+                            output.push(string_view_index(ast_text, index).u8())
                 else:
                     schema_issue: sview = ast_json_root_schema_issue(ast_text)
                     if schema_issue.len > 0:
@@ -515,6 +521,12 @@ module CTranslator:
                         append_literal(diagnostics, " while processing ")
                         append_view(diagnostics, sview(source, 0, -1))
                         append_literal(diagnostics, "\n")
+                        # Let translate_ast_mode_with_options build the typed
+                        # AST-schema diagnostic for machine-readable callers.
+                        # Ordinary callers still take the malformed-AST error
+                        # path below without publishing any partial output.
+                        for index in 0..<ast_text.len |ast_text, output|:
+                            output.push(string_view_index(ast_text, index).u8())
                     else:
                         source_working_directory: sview = sview(working_directory, 0, -1) if use_working_directory else sview("", 0, 0)
                         ast_compact_json_into(ast_text, source, source_working_directory, output) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -526,10 +538,15 @@ module CTranslator:
         _ = c_fclose(stdout_file)
         succeeded <- true
 
-    def run_clang_ast(path: cstr, max_output_bytes: usize, timeout_seconds: usize, succeeded: mutable bool&, limit_exceeded: mutable bool&, malformed_ast: mutable bool&, capture_failed: mutable bool&, timeout_exceeded: mutable bool&, raw_output_bytes: mutable usize&, target_macros: mutable darray[u8]&, target_macros_succeeded: mutable bool&, diagnostics: mutable darray[u8]&, record_layout_dump: mutable darray[u8]&) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
+    def run_clang_ast(path: cstr, clang_c: sview, clang_cxx: sview, max_output_bytes: usize, timeout_seconds: usize, succeeded: mutable bool&, limit_exceeded: mutable bool&, malformed_ast: mutable bool&, capture_failed: mutable bool&, timeout_exceeded: mutable bool&, raw_output_bytes: mutable usize&, target_macros: mutable darray[u8]&, target_macros_succeeded: mutable bool&, diagnostics: mutable darray[u8]&, record_layout_dump: mutable darray[u8]&) -> darray[u8] can[Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console]:
         timeout_exceeded <- false
         macro_arguments: mutable darray[cstr] = []
-        macro_arguments.push("clang++".cast[cstr]) if source_is_cxx(path) else macro_arguments.push("clang".cast[cstr])
+        default_compiler: sview = sview("clang++", 0, -1) if source_is_cxx(path) else sview("clang", 0, -1)
+        selected_compiler: mutable sview = default_compiler
+        selected_compiler <- clang_cxx if source_is_cxx(path) and clang_cxx.len > 0
+        selected_compiler <- clang_c if not source_is_cxx(path) and clang_c.len > 0
+        selected_compiler_path: cstr = string_view_copy(selected_compiler) can Memory.Allocate
+        macro_arguments.push(selected_compiler_path)
         macro_arguments.push("-std=gnu++11".cast[cstr]) if source_is_cxx(path) else macro_arguments.push("-std=c11".cast[cstr])
         macro_arguments.push("-Wno-everything".cast[cstr])
         macro_arguments.push("-dM".cast[cstr])
@@ -552,10 +569,10 @@ module CTranslator:
 
         ast_arguments: mutable darray[cstr] = []
         if source_is_cxx(path):
-            ast_arguments.push("clang++".cast[cstr])
+            ast_arguments.push(selected_compiler_path)
             ast_arguments.push("-std=gnu++11".cast[cstr])
         else:
-            ast_arguments.push("clang".cast[cstr])
+            ast_arguments.push(selected_compiler_path)
             ast_arguments.push("-std=c11".cast[cstr])
         ast_arguments.push("-Wno-everything".cast[cstr])
         ast_arguments.push("-Xclang".cast[cstr])

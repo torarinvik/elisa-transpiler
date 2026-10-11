@@ -75,9 +75,9 @@ extend CTranslator:
         hashed_files.push(CliSourceMapFile{path: path, canonical_path: canonical, content_hash: content_hash})
         return true
 
-    def cli_source_map_collect_range[@r](range: TypedOwnedSourceRange[r], working_directory: sview, files: mutable darray[CliSourceMapFile]&, hashed_files: mutable darray[CliSourceMapFile]&, hashed_bytes: mutable usize&, max_source_bytes: usize, failed_path: mutable sview&, limit_exceeded: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
-        return false if not (cli_source_map_add_file(range.file, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
-        return cli_source_map_add_file(range.included_from, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def cli_source_map_collect_range(file: sview, included_from: sview, working_directory: sview, files: mutable darray[CliSourceMapFile]&, hashed_files: mutable darray[CliSourceMapFile]&, hashed_bytes: mutable usize&, max_source_bytes: usize, failed_path: mutable sview&, limit_exceeded: mutable bool&) -> bool can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+        return false if not (cli_source_map_add_file(file, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+        return cli_source_map_add_file(included_from, working_directory, files, hashed_files, hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
 
     def cli_source_map_compare_paths(left: sview, right: sview) -> i64:
         shared: i64 = left.len if left.len < right.len else right.len
@@ -133,24 +133,24 @@ extend CTranslator:
             return TypedContentHash{value: file.content_hash, available: true} if cli_source_map_compare_paths(file.path, path) == 0
         return unavailable
 
-    def cli_source_map_append_range[@r](out: mutable darray[u8]&, name: sview, range: TypedOwnedSourceRange[r], files: darray[CliSourceMapFile], first: mutable bool&) -> void:
+    def cli_source_map_append_range(out: mutable darray[u8]&, name: sview, file: sview, included_from: sview, start_offset: i64, end_offset: i64, files: darray[CliSourceMapFile], first: mutable bool&) -> void:
         out.push(44.u8()) if not first[0]
         cli_append_json_string(out, name)
         append_view(out, sview(":{", 0, -1))
         first <- true
-        cli_append_json_view_field(out, sview("path", 0, -1), range.file, first)
-        cli_append_json_view_field(out, sview("included_from", 0, -1), range.included_from, first)
+        cli_append_json_view_field(out, sview("path", 0, -1), file, first)
+        cli_append_json_view_field(out, sview("included_from", 0, -1), included_from, first)
         out.push(44.u8()) if not first[0]
         cli_append_json_string(out, sview("content_hash", 0, -1))
         append_view(out, sview(":", 0, -1))
-        cli_source_map_append_hash(out, cli_source_map_hash_for_path(files, range.file))
+        cli_source_map_append_hash(out, cli_source_map_hash_for_path(files, file))
         first <- false
         out.push(44.u8())
         cli_append_json_string(out, sview("included_from_content_hash", 0, -1))
         append_view(out, sview(":", 0, -1))
-        cli_source_map_append_hash(out, cli_source_map_hash_for_path(files, range.included_from))
-        cli_append_json_i64_field(out, sview("start_offset", 0, -1), range.start_offset, first)
-        cli_append_json_i64_field(out, sview("end_offset", 0, -1), range.end_offset, first)
+        cli_source_map_append_hash(out, cli_source_map_hash_for_path(files, included_from))
+        cli_append_json_i64_field(out, sview("start_offset", 0, -1), start_offset, first)
+        cli_append_json_i64_field(out, sview("end_offset", 0, -1), end_offset, first)
         out.push(125.u8())
         first <- false
 
@@ -165,9 +165,9 @@ extend CTranslator:
             return false if not (cli_source_map_add_file(source_identity, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
         for index in 0..<spans.count |spans, files, hashed_files, hashed_bytes, working_directory, max_source_bytes, failed_path, limit_exceeded|:
             span: TypedGeneratedSourceSpan[r] = spans[index]
-            return false if not (cli_source_map_collect_range(span.source, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
-            return false if not (cli_source_map_collect_range(span.spelling, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
-            return false if not (cli_source_map_collect_range(span.expansion, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            return false if not (cli_source_map_collect_range(span.source_file, span.source_included_from, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            return false if not (cli_source_map_collect_range(span.spelling_file, span.spelling_included_from, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
+            return false if not (cli_source_map_collect_range(span.expansion_file, span.expansion_included_from, working_directory, &files, hashed_files, &hashed_bytes, max_source_bytes, failed_path, limit_exceeded) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console)
         cli_source_map_sort_files(&files)
         source_bytes_hashed <- hashed_bytes
 
@@ -198,9 +198,9 @@ extend CTranslator:
             cli_append_json_i64_field(out, sview("generated_start", 0, -1), span.generated_start, &first)
             cli_append_json_i64_field(out, sview("generated_end", 0, -1), span.generated_end, &first)
             cli_append_json_view_field(out, sview("translation_unit", 0, -1), span.translation_unit, &first)
-            cli_source_map_append_range(out, sview("source", 0, -1), span.source, files, &first)
-            cli_source_map_append_range(out, sview("spelling", 0, -1), span.spelling, files, &first)
-            cli_source_map_append_range(out, sview("expansion", 0, -1), span.expansion, files, &first)
+            cli_source_map_append_range(out, sview("source", 0, -1), span.source_file, span.source_included_from, span.source_start_offset, span.source_end_offset, files, &first)
+            cli_source_map_append_range(out, sview("spelling", 0, -1), span.spelling_file, span.spelling_included_from, span.spelling_start_offset, span.spelling_end_offset, files, &first)
+            cli_source_map_append_range(out, sview("expansion", 0, -1), span.expansion_file, span.expansion_included_from, span.expansion_start_offset, span.expansion_end_offset, files, &first)
             cli_append_json_view_field(out, sview("synthesized_reason", 0, -1), span.synthesized_reason, first)
             out.push(125.u8())
             if out.count > max_json_bytes:

@@ -315,7 +315,7 @@ extend CTranslator:
                 elif c_type_call_compatible(ctx, typed_expr_at(ctx, expression.lhs).type_name, expression.type_name) or (c_type_pointer_count(typed_expr_at(ctx, expression.lhs).type_name) == c_type_pointer_count(expression.type_name) and sview_eq(clang_target_type_abi_base(ctx.target_abi, typed_expr_at(ctx, expression.lhs).type_name), clang_target_type_abi_base(ctx.target_abi, expression.type_name)) and c_type_pointer_qualifiers_match(typed_expr_at(ctx, expression.lhs).type_name, expression.type_name)):
                     typed_emit_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 else:
-                    append_view(out, sview("(", 0, -1))
+                    append_view(out, sview("((", 0, -1))
                     if not c_type_pointer_optional(expression.type_name) and typed_nonnull_supported(typed_expr_at(ctx, expression.lhs).type_name):
                         typed_emit_nonnull_expr(out, ctx, expression.lhs) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     else:
@@ -324,7 +324,7 @@ extend CTranslator:
                     append_view(out, sview("mutable ", 0, -1)) if not c_type_pointer_layers_composable(expression.type_name) and sview_find_byte(expression.type_name, 42) >= 0 and not c_type_is_const_pointer(expression.type_name)
                     append_c_type_contextual(out, ctx, expression.type_name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                     append_view(out, sview("?", 0, -1)) if c_type_pointer_outer_optional_suffix_needed(expression.type_name)
-                    append_view(out, sview("]", 0, -1))
+                    append_view(out, sview("])", 0, -1))
             TypedExprKind.Aggregate:
                 if c_type_is_array(expression.type_name):
                     if expression.args_count == 0:
@@ -362,6 +362,15 @@ extend CTranslator:
                                 typed_emit_expr(out, ctx, ctx.expr_children[(expression.args_start + offset).usize()]) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                         append_view(out, sview("}", 0, -1))
             TypedExprKind.Call:
+                float_classification_kind: i64 = typed_float_classification_kind(expression.text)
+                if float_classification_kind > 0 and expression.args_count == 1 and expression.args_start >= 0:
+                    argument_index: i64 = ctx.expr_children[expression.args_start.usize()]
+                    float_type: sview = typed_float_classification_type(ctx, expression)
+                    typed_emit_float_classification_helper_name(out, ctx, float_classification_kind, float_type)
+                    append_view(out, sview("(", 0, -1))
+                    typed_emit_expr(out, ctx, argument_index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                    append_view(out, sview(")", 0, -1))
+                    return
                 if sview_eq(expression.text, sview("__builtin_nan_value", 0, -1)) or sview_eq(expression.text, sview("__builtin_inf_value", 0, -1)):
                     is_float32: bool = sview_eq(clang_target_type_abi_base(ctx.target_abi, expression.type_name), sview("f32", 0, -1))
                     append_view(out, sview("((0.0).f32() / (0.0).f32())", 0, -1)) if sview_eq(expression.text, sview("__builtin_nan_value", 0, -1)) and is_float32
@@ -418,9 +427,26 @@ extend CTranslator:
                         append_view(out, sview(", ", 0, -1)) if offset > 0
                         argument_index: i64 = ctx.expr_children[(expression.args_start + offset).usize()]
                         if sview_eq(expression.text, sview("llvm_va_start", 0, -1)) or sview_eq(expression.text, sview("llvm_va_end", 0, -1)) or sview_eq(expression.text, sview("llvm_va_copy", 0, -1)):
-                            append_view(out, sview("(&", 0, -1))
-                            typed_emit_expr(out, ctx, argument_index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                            append_view(out, sview(").cast[mutable void&]", 0, -1))
+                            argument: TypedExpr[r] = typed_expr_at(ctx, argument_index)
+                            array_source: mutable i64 = -1
+                            if argument.kind == TypedExprKind.Cast and argument.lhs >= 0:
+                                source_type: sview = typed_expr_at(ctx, argument.lhs).type_name
+                                resolved_source_type: sview = typed_resolve_type_aliases(ctx, source_type) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                                array_source <- argument.lhs if argument.value == TYPED_EXPR_CAST_VA_LIST_ARRAY_DECAY or c_type_is_array(source_type) or c_type_is_array(resolved_source_type)
+                            if array_source >= 0:
+                                # Clang represents the first-element decay as a
+                                # cast from the typedef'd array. Keep the extra
+                                # address layer expected by the compiler's
+                                # va_list intrinsic ABI for array-backed targets.
+                                append_view(out, sview("(&(&(", 0, -1))
+                                typed_emit_expr(out, ctx, array_source) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                                append_view(out, sview(")[0])).cast[mutable void&]", 0, -1))
+                            else:
+                                # Scalar/pointer `va_list` targets already
+                                # carry the address value Clang selected.
+                                append_view(out, sview("(", 0, -1))
+                                typed_emit_expr(out, ctx, argument_index) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                                append_view(out, sview(").cast[mutable void&]", 0, -1))
                         else:
                             typed_emit_call_arg(out, ctx, argument_index, offset, expression.lhs if expression.value == 1 else -1, expression.text, expression.value) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
                 append_view(out, sview(")", 0, -1))

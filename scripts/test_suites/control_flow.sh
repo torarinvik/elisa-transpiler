@@ -29,7 +29,7 @@ clang -std=c11 testdata/fixtures/multi_declarator_mutability.c \
 "$elisa_bin" -emit obj -O0 \
     -o build/multi_declarator_mutability.generated.o \
     build/multi_declarator_mutability.generated.elisa
-clang -Wl,-dead_strip -o build/multi_declarator_mutability.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/multi_declarator_mutability.generated \
     build/multi_declarator_mutability.generated.o
 set +e
 ./build/multi_declarator_mutability.native
@@ -44,7 +44,7 @@ test_translator_bounded testdata/fixtures/nested_loop_goto.c > build/nested_loop
 rg -q 'control_state: mutable i32 = 0|goto_state: mutable i32 = 0' build/nested_loop_goto.generated.elisa
 clang -std=c11 testdata/fixtures/nested_loop_goto.c -o build/nested_loop_goto.native
 "$elisa_bin" -emit obj -O0 -o build/nested_loop_goto.generated.o build/nested_loop_goto.generated.elisa
-clang -Wl,-dead_strip -o build/nested_loop_goto.generated build/nested_loop_goto.generated.o
+clang $ELISA_TEST_LINK_FLAGS -o build/nested_loop_goto.generated build/nested_loop_goto.generated.o
 set +e
 ./build/nested_loop_goto.native
 nested_native_rc=$?
@@ -63,7 +63,7 @@ clang -std=c11 testdata/fixtures/goto_out_of_loop_from_switch.c \
     -o build/goto_out_of_loop_from_switch.native
 "$elisa_bin" -emit obj -O0 -o build/goto_out_of_loop_from_switch.generated.o \
     build/goto_out_of_loop_from_switch.generated.elisa
-clang -Wl,-dead_strip -o build/goto_out_of_loop_from_switch.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/goto_out_of_loop_from_switch.generated \
     build/goto_out_of_loop_from_switch.generated.o
 set +e
 ./build/goto_out_of_loop_from_switch.native
@@ -82,7 +82,7 @@ if ! sed -n '/^def main/,/^def /p' build/switch_before_goto.generated.elisa | rg
 fi
 clang -std=c11 testdata/fixtures/switch_before_goto.c -o build/switch_before_goto.native
 "$elisa_bin" -emit obj -O0 -o build/switch_before_goto.generated.o build/switch_before_goto.generated.elisa
-clang -Wl,-dead_strip -o build/switch_before_goto.generated build/switch_before_goto.generated.o
+clang $ELISA_TEST_LINK_FLAGS -o build/switch_before_goto.generated build/switch_before_goto.generated.o
 set +e
 ./build/switch_before_goto.native
 switch_before_goto_native_rc=$?
@@ -102,7 +102,7 @@ clang -std=c11 testdata/fixtures/switch_selector_once_goto.c \
 "$elisa_bin" -emit obj -O0 \
     -o build/switch_selector_once_goto.generated.o \
     build/switch_selector_once_goto.generated.elisa
-clang -Wl,-dead_strip -o build/switch_selector_once_goto.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/switch_selector_once_goto.generated \
     build/switch_selector_once_goto.generated.o
 set +e
 ./build/switch_selector_once_goto.native
@@ -118,7 +118,7 @@ test_translator_bounded testdata/fixtures/loop_condition_effects.c \
 clang -std=c11 testdata/fixtures/loop_condition_effects.c -o build/loop_condition_effects.native
 "$elisa_bin" -emit obj -O0 -o build/loop_condition_effects.generated.o \
     build/loop_condition_effects.generated.elisa
-clang -Wl,-dead_strip -o build/loop_condition_effects.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/loop_condition_effects.generated \
     build/loop_condition_effects.generated.o
 set +e
 ./build/loop_condition_effects.native
@@ -187,7 +187,7 @@ clang -std=c11 testdata/fixtures/loop_assignment_call_condition.c \
 "$elisa_bin" -emit obj -O0 \
     -o build/loop_assignment_call_condition.generated.o \
     build/loop_assignment_call_condition.generated.elisa
-clang -Wl,-dead_strip -o build/loop_assignment_call_condition.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/loop_assignment_call_condition.generated \
     build/loop_assignment_call_condition.generated.o
 set +e
 ./build/loop_assignment_call_condition.native
@@ -205,7 +205,7 @@ clang -std=c11 testdata/fixtures/compound_assignment_conditional_place.c \
 "$elisa_bin" -emit obj -O0 \
     -o build/compound_assignment_conditional_place.generated.o \
     build/compound_assignment_conditional_place.generated.elisa
-clang -Wl,-dead_strip -o build/compound_assignment_conditional_place.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/compound_assignment_conditional_place.generated \
     build/compound_assignment_conditional_place.generated.o
 set +e
 ./build/compound_assignment_conditional_place.native
@@ -231,7 +231,7 @@ clang -std=c11 testdata/fixtures/indirect_call_conditional_comma.c \
     -o build/indirect_call_conditional_comma.native
 "$elisa_bin" -emit obj -O0 -o build/indirect_call_conditional_comma.generated.o \
     build/indirect_call_conditional_comma.generated.elisa
-clang -Wl,-dead_strip -o build/indirect_call_conditional_comma.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/indirect_call_conditional_comma.generated \
     build/indirect_call_conditional_comma.generated.o
 set +e
 ./build/indirect_call_conditional_comma.native
@@ -262,7 +262,7 @@ clang -std=c11 testdata/fixtures/computed_function_pointer_call.c \
     -o build/computed_function_pointer_call.native
 "$elisa_bin" -emit obj -O0 -o build/computed_function_pointer_call.generated.o \
     build/computed_function_pointer_call.generated.elisa
-clang -Wl,-dead_strip -o build/computed_function_pointer_call.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/computed_function_pointer_call.generated \
     build/computed_function_pointer_call.generated.o
 set +e
 ./build/computed_function_pointer_call.native
@@ -289,7 +289,7 @@ clang -std=c11 testdata/fixtures/function_pointer_return.c \
     -o build/function_pointer_return.native
 "$elisa_bin" -emit obj -O0 -o build/function_pointer_return.generated.o \
     build/function_pointer_return.generated.elisa
-clang -Wl,-dead_strip -o build/function_pointer_return.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/function_pointer_return.generated \
     build/function_pointer_return.generated.o
 set +e
 ./build/function_pointer_return.native
@@ -311,7 +311,7 @@ test_clangxx_bounded -std=c++17 testdata/fixtures/call_argument_groups.cpp \
     -o build/call_argument_groups.native
 "$elisa_bin" -emit obj -O0 -o build/call_argument_groups.generated.o \
     build/call_argument_groups_project/elisa_project.elisa
-clang -Wl,-dead_strip -o build/call_argument_groups.generated \
+clang $ELISA_TEST_LINK_FLAGS -o build/call_argument_groups.generated \
     build/call_argument_groups.generated.o
 set +e
 ./build/call_argument_groups.native
@@ -505,7 +505,7 @@ test_translator_bounded testdata/fixtures/declaration_index.c > build/declaratio
 rg -q '^global mutable declaration_index_global_35: i32 = zeroed$' build/declaration_index.generated.elisa
 clang -std=c11 testdata/fixtures/declaration_index.c -o build/declaration_index.native
 "$elisa_bin" -emit obj -O0 -o build/declaration_index.generated.o build/declaration_index.generated.elisa
-clang -Wl,-dead_strip -o build/declaration_index.generated build/declaration_index.generated.o
+clang $ELISA_TEST_LINK_FLAGS -o build/declaration_index.generated build/declaration_index.generated.o
 set +e
 ./build/declaration_index.native
 declaration_index_native_rc=$?
@@ -525,7 +525,7 @@ rg -q '^def first_word\(.*\) -> u32:' build/typedef_identity.generated.elisa
 rg -q '^def second_word\(.*\) -> u64:' build/typedef_identity.generated.elisa
 test_clangxx_bounded -std=gnu++11 testdata/fixtures/typedef_identity.cpp -o build/typedef_identity.native
 "$elisa_bin" -emit obj -O0 -o build/typedef_identity.generated.o build/typedef_identity.generated.elisa
-clang -Wl,-dead_strip -o build/typedef_identity.generated build/typedef_identity.generated.o
+clang $ELISA_TEST_LINK_FLAGS -o build/typedef_identity.generated build/typedef_identity.generated.o
 set +e
 ./build/typedef_identity.native
 typedef_identity_native_rc=$?

@@ -9,9 +9,10 @@ extend CTranslator:
 
     def typed_push_ast_parse_diagnostic[@r](translation: mutable TypedTranslation[r]&, category: sview, kind: sview, source: sview @r, canonical_source: sview @r, source_hash: TypedContentHash, column: i64) -> void can[Memory.Allocate, Abort.Panic]:
         unavailable_hash: TypedContentHash = TypedContentHash{value: 0, available: false}
+        category_copy: sview @r = typed_copy_view_to_region(category) can Memory.Allocate, Abort.Panic
         kind_copy: sview @r = typed_copy_view_to_region(kind) can Memory.Allocate, Abort.Panic
-        translation.diagnostics.push(TypedDiagnostic{
-            category: category, kind: kind_copy, subject_type: sview("", 0, 0), required_capability: sview("", 0, 0),
+        translation.diagnostics.push(TypedDiagnostic[r]{
+            category: category_copy, kind: kind_copy, subject_type: sview("", 0, 0), required_capability: sview("", 0, 0),
             translation_unit: canonical_source, translation_unit_content_hash: source_hash,
             source: source, canonical_source: canonical_source, source_content_hash: source_hash,
             spelling_source: sview("", 0, 0), spelling_canonical_source: sview("", 0, 0), spelling_source_content_hash: unavailable_hash,

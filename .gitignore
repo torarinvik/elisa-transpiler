@@ -2,3 +2,4 @@
 build/
 /src/.compiler_std
 testdata/**/.git/
+/docs/compiler_patches

@@ -5,10 +5,32 @@ module CTranslator:
     struct TypedIRVerifierTestModule:
         _unused: u8
 
+extend CTranslator:
+    def append_view(out: mutable darray[u8]&, value: sview) -> void can[Memory.Allocate, Abort.Panic]:
+        for index in 0..<value.len |out, value|:
+            out.push(string_view_index(value, index).u8()) can Memory.Allocate, Abort.Panic
+
+extern CFile
+@link_name("fread")
+extern c_fread(buffer: mutable void&, size: usize, count: usize, stream: CFile) -> usize
+@link_name("fopen")
+extern c_fopen(path: cstr, mode: cstr) -> CFile?
+@link_name("fclose")
+extern c_fclose(stream: CFile) -> i32
+@link_name("ferror")
+extern c_ferror(stream: CFile) -> i32
+@link_name("realpath")
+extern clang_realpath(path: cstr, resolved_path: void&?) -> u8&?
+
+include "../src/clang_ast_paths.elisa"
+include "../src/clang_source_identity.elisa"
 include "../src/typed_source_map_types.elisa"
+include "../src/typed_diagnostic_types.elisa"
 include "../src/clang_argv_options.elisa"
+include "../src/clang_fp_option_types.elisa"
 include "../src/clang_fp_options.elisa"
 include "../src/typed_ir.elisa"
+include "../src/typed_diagnostic_hashes.elisa"
 include "../src/typed_fp_policy.elisa"
 include "../src/clang_target_abi.elisa"
 include "../src/verify_ir.elisa"
@@ -37,7 +59,7 @@ extend CTranslator:
 
     def typed_fp_test_argv(arguments: sview, text: mutable darray[u8]&, offsets: mutable darray[usize]&) -> void can[Abort.Panic, Memory.Allocate]:
         offsets.push(0.usize()) can Memory.Allocate, Abort.Panic
-        typed_abi_test_append(&text, sview("clang", 0, -1)) can Memory.Allocate, Abort.Panic
+        typed_abi_test_append(text, sview("clang", 0, -1)) can Memory.Allocate, Abort.Panic
         text.push(0.u8()) can Memory.Allocate, Abort.Panic
         cursor: mutable i64 = 0
         while cursor < arguments.len |text, offsets, arguments, cursor|:
@@ -70,9 +92,12 @@ extend CTranslator:
         return options.mode
 
     def test_context[@r](root: JsonValueHandle[r]) -> TypedContext[r]:
-        return test_context_with_language(root, false)
+        return test_context_configured(root, false, TypedTranslationMode.Idiomatic, clang_fp_options_default())
 
     def test_context_with_language[@r](root: JsonValueHandle[r], source_is_cxx: bool) -> TypedContext[r]:
+        return test_context_configured(root, source_is_cxx, TypedTranslationMode.Idiomatic, clang_fp_options_default())
+
+    def test_context_configured[@r](root: JsonValueHandle[r], source_is_cxx: bool, mode: TypedTranslationMode, floating_point_options: ClangFPOptionVector) -> TypedContext[r]:
         return TypedContext{
             exprs: [], expr_source_origins: [], expr_children: [], effect_expr_seen: [], effect_expr_pending: [], effect_expr_generation: 0,
             stmts: [], stmt_source_origins: [], generated_source_spans: [], stmt_children: [], params: [], current_name_aliases: [],
@@ -80,15 +105,16 @@ extend CTranslator:
             extern_params: [], globals: [], functions: [], user_function_names: [], user_function_signatures: [],
             externs: [], extern_globals: [], fields: [], records: [], record_layouts: [], record_layout_field_offsets: [],
             specialized_types: [], packed_record_names: [], layout_unsupported_record_names: [], enums: [],
-            enum_consts: [], labels: [], switch_cases: [], decl_infos: [], declaration_index: [], declaration_index_count: 0,
+            enum_consts: [], labels: [], switch_cases: [], decl_infos: [], declaration_index: [], declaration_index_count: 0, source_hashes: [],
             break_scopes: [], switch_depth: 0,
-            current_for_increment: -1, current_return_type: sview("", 0, 0), current_function_name: sview("", 0, 0), current_has_goto: false,
+            current_for_increment: -1, current_return_type: sview("", 0, 0), current_function_name: sview("", 0, 0), current_function_id: sview("", 0, 0), current_function_source: sview("", 0, 0), current_function_diagnostic_source: sview("", 0, 0), current_has_goto: false,
             current_emit_has_goto: false, current_structured_break_label: -1,
             current_emit_goto_name: sview("", 0, 0), current_switch_done_name: sview("", 0, 0),
             current_switch_done_index: -1, current_function_body: -1, current_trusted_depth: 0,
-            needs_cpp_unordered_map: false, source_mapping_enabled: false, project_mode: false, initializer_name: sview("", 0, 0),
-            mode: TypedTranslationMode.Idiomatic, floating_point_options: clang_fp_options_default(), target_abi: clang_target_abi_unknown(), source_language_is_cxx: source_is_cxx, source: "typed_ir_verifier_test",
+            needs_cpp_unordered_map: false, compound_literals: [], unsupported_target_float_seen: false, source_mapping_enabled: false, project_mode: false, initializer_name: sview("", 0, 0),
+            mode: mode, floating_point_options: floating_point_options, target_abi: clang_target_abi_unknown(), source_language_is_cxx: source_is_cxx, source: "typed_ir_verifier_test",
             source_working_directory: sview("", 0, 0), canonical_source: sview("", 0, 0),
+            diagnostic_line_scan_path: sview("", 0, 0), diagnostic_line_scan_offset: -1, diagnostic_line_scan_number: 1, diagnostic_line_scan_previous_cr: false,
             root: root,
             diagnostics: []
         }
@@ -435,17 +461,17 @@ extend CTranslator:
             return 107 if typed_fp_test_mode(sview("-fno-signed-zeros -ffast-math", 0, -1)) != ClangFloatingPointMode.Unknown
             return 108 if not typed_dump_test_contains(first_dump, sview("floating_point_mode=strict\n", 0, -1))
             return 110 if typed_fp_test_mode(sview("-fvendor-math-mode", 0, -1)) != ClangFloatingPointMode.Unknown
-            relaxed_dump_context: mutable TypedContext = test_context(root)
-            relaxed_dump_context.floating_point_options.mode <- ClangFloatingPointMode.Relaxed
+            relaxed_options: mutable ClangFPOptionVector = clang_fp_options_default()
+            relaxed_options.mode <- ClangFloatingPointMode.Relaxed
+            relaxed_dump_context: mutable TypedContext = test_context_configured(root, false, TypedTranslationMode.Idiomatic, relaxed_options)
             relaxed_dump: darray[u8] = typed_dump_ir(relaxed_dump_context) can Memory.Allocate, Abort.Panic
             return 109 if not typed_dump_test_contains(relaxed_dump, sview("floating_point_mode=relaxed\n", 0, -1))
             return 113 if not typed_fp_relaxed_rewrites_enabled(relaxed_dump_context)
-            unknown_fp_context: mutable TypedContext = test_context(root)
-            unknown_fp_context.floating_point_options.mode <- ClangFloatingPointMode.Unknown
+            unknown_options: mutable ClangFPOptionVector = clang_fp_options_default()
+            unknown_options.mode <- ClangFloatingPointMode.Unknown
+            unknown_fp_context: mutable TypedContext = test_context_configured(root, false, TypedTranslationMode.Idiomatic, unknown_options)
             return 114 if typed_fp_relaxed_rewrites_enabled(unknown_fp_context)
-            fidelity_fp_context: mutable TypedContext = test_context(root)
-            fidelity_fp_context.mode <- TypedTranslationMode.Fidelity
-            fidelity_fp_context.floating_point_options.mode <- ClangFloatingPointMode.Relaxed
+            fidelity_fp_context: mutable TypedContext = test_context_configured(root, false, TypedTranslationMode.Fidelity, relaxed_options)
             return 115 if typed_fp_relaxed_rewrites_enabled(fidelity_fp_context)
             return 111 if typed_fp_test_mode(sview("-Ofast -O2", 0, -1)) != ClangFloatingPointMode.Unknown
             return 112 if typed_fp_test_mode(sview("-ffp-model=fast -fdenormal-fp-math=positive-zero -ffp-model=precise", 0, -1)) != ClangFloatingPointMode.Unknown
@@ -457,6 +483,11 @@ extend CTranslator:
             return 121 if typed_fp_test_mode(sview("source_float_math.c", 0, -1)) != ClangFloatingPointMode.Strict
             return 122 if typed_fp_test_mode(sview("-DNAME=-ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
             return 123 if typed_fp_test_mode(sview("-Ivendor/math_include", 0, -1)) != ClangFloatingPointMode.Strict
+            return 158 if typed_fp_test_mode(sview("-target -ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 159 if typed_fp_test_mode(sview("-x -ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 160 if typed_fp_test_mode(sview("-std -ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 161 if typed_fp_test_mode(sview("-isystem -ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
+            return 162 if typed_fp_test_mode(sview("-target=-ffast-math", 0, -1)) != ClangFloatingPointMode.Strict
             return 124 if typed_fp_test_mode(sview("-mdaz-ftz", 0, -1)) != ClangFloatingPointMode.Unknown
             return 125 if typed_fp_test_mode(sview("-ffast-math -mno-daz-ftz", 0, -1)) != ClangFloatingPointMode.Unknown
 
@@ -481,15 +512,13 @@ extend CTranslator:
             return 152 if fp_contract_protect_parens.protect_parens != ClangFPBooleanSetting.On or fp_contract_protect_parens.contract != ClangFPContractSetting.Off
             fp_protect_parens_disabled: ClangFPOptionVector = typed_fp_test_options(sview("-ffp-contract=fast -fprotect-parens -fno-protect-parens", 0, -1))
             return 153 if fp_protect_parens_disabled.protect_parens != ClangFPBooleanSetting.Off or fp_protect_parens_disabled.contract != ClangFPContractSetting.Fast
-            fp_protect_dump_context: mutable TypedContext = test_context(root)
-            fp_protect_dump_context.floating_point_options <- fp_protect_parens_contract
+            fp_protect_dump_context: mutable TypedContext = test_context_configured(root, false, TypedTranslationMode.Idiomatic, fp_protect_parens_contract)
             fp_protect_dump: darray[u8] = typed_dump_ir(fp_protect_dump_context) can Memory.Allocate, Abort.Panic
             return 155 if not typed_dump_test_contains(fp_protect_dump, sview("fp_option contract=off\n", 0, -1))
             return 156 if not typed_dump_test_contains(fp_protect_dump, sview("fp_option protect_parens=on\n", 0, -1))
             fp_excess_precision_none: ClangFPOptionVector = typed_fp_test_options(sview("-fexcess-precision=16", 0, -1))
             return 154 if fp_excess_precision_none.excess_precision != ClangFPExcessPrecisionSetting.NoExcessPrecision or fp_excess_precision_none.unknown_option_seen
-            fp_excess_dump_context: mutable TypedContext = test_context(root)
-            fp_excess_dump_context.floating_point_options <- fp_excess_precision_none
+            fp_excess_dump_context: mutable TypedContext = test_context_configured(root, false, TypedTranslationMode.Idiomatic, fp_excess_precision_none)
             fp_excess_dump: darray[u8] = typed_dump_ir(fp_excess_dump_context) can Memory.Allocate, Abort.Panic
             return 157 if not typed_dump_test_contains(fp_excess_dump, sview("fp_option excess_precision=none\n", 0, -1))
             fp_exception_maytrap: ClangFPOptionVector = typed_fp_test_options(sview("-ftrapping-math -ffp-exception-behavior=maytrap", 0, -1))

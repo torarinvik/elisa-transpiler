@@ -37,7 +37,10 @@ cleanup_test_files() {
         "$conflict_output/oversized.rsp" \
         "$conflict_output/cycle.rsp" \
         "$conflict_output/malformed.rsp" \
-        "$conflict_output/identity_alias.c"; do
+        "$conflict_output/identity_alias.c" \
+        "$conflict_output/fake clang" \
+        "$conflict_output/fake clangxx" \
+        "$conflict_output/compiler invocation trace"; do
         if [ -f "$generated_file" ]; then unlink "$generated_file"; fi
     done
     for generated_file in \
@@ -51,6 +54,12 @@ cleanup_test_files() {
     rmdir "$transaction_output"
 }
 trap cleanup_test_files EXIT HUP INT TERM
+
+project_output_exists() {
+    find "$1" -type f \
+        \( -name '*.elisa' -o -name '*.elisa-transpiler-tmp-*' -o -name 'elisa_project.*' \) \
+        -print -quit | grep -q .
+}
 
 set +e
 clang -std=c11 -fsyntax-only -Xclang -ast-dump=json \
@@ -118,6 +127,67 @@ fi
 "$transpiler" testdata/fixtures/no_translator_default_macros.c >"$output" 2>"$diagnostics"
 if [ -s "$diagnostics" ] || ! rg -q 'return 42' "$output"; then
     echo "direct translation injected default feature-test or fortify macros" >&2
+    cat "$diagnostics" >&2
+    exit 1
+fi
+
+# Direct inputs can select explicit Clang executables. Use paths containing
+# spaces to prove the override remains a single argv item, and count both the
+# macro query and AST extraction invocations.
+real_clang=$(command -v clang)
+real_clangxx=$(command -v clang++)
+fake_clang="$conflict_output/fake clang"
+fake_clangxx="$conflict_output/fake clangxx"
+compiler_trace="$conflict_output/compiler invocation trace"
+cat >"$fake_clang" <<'EOF'
+#!/bin/sh
+printf 'C\n' >> "$CLANG_OVERRIDE_TRACE"
+exec "$ELISA_REAL_CLANG" "$@"
+EOF
+cat >"$fake_clangxx" <<'EOF'
+#!/bin/sh
+printf 'CXX\n' >> "$CLANG_OVERRIDE_TRACE"
+exec "$ELISA_REAL_CLANGXX" "$@"
+EOF
+chmod +x "$fake_clang" "$fake_clangxx"
+ELISA_REAL_CLANG="$real_clang" CLANG_OVERRIDE_TRACE="$compiler_trace" \
+    "$transpiler" --clang "$fake_clang" testdata/fixtures/simple.c >"$output" 2>"$diagnostics"
+if [ ! -s "$output" ] || [ -s "$diagnostics" ] || \
+    [ "$(wc -l <"$compiler_trace" | tr -d ' ')" -ne 2 ] || \
+    ! rg -q '^C$' "$compiler_trace" || [ "$(rg -c '^C$' "$compiler_trace")" -ne 2 ]; then
+    echo "--clang did not select the explicit C frontend for both invocations" >&2
+    cat "$diagnostics" >&2
+    exit 1
+fi
+rm -f "$compiler_trace"
+ELISA_REAL_CLANGXX="$real_clangxx" CLANG_OVERRIDE_TRACE="$compiler_trace" \
+    "$transpiler" --clangxx "$fake_clangxx" testdata/fixtures/c_compatible.cpp >"$output" 2>"$diagnostics"
+if [ ! -s "$output" ] || [ -s "$diagnostics" ] || \
+    [ "$(wc -l <"$compiler_trace" | tr -d ' ')" -ne 2 ] || \
+    [ "$(rg -c '^CXX$' "$compiler_trace")" -ne 2 ]; then
+    echo "--clangxx did not select the explicit C++ frontend for both invocations" >&2
+    cat "$diagnostics" >&2
+    exit 1
+fi
+
+set +e
+"$transpiler" --clang >"$output" 2>"$diagnostics"
+missing_clang_path_status=$?
+set -e
+if [ "$missing_clang_path_status" -ne 2 ] || [ -s "$output" ] || \
+    ! rg -q -- '--clang and --clangxx require an executable path' "$diagnostics"; then
+    echo "missing explicit Clang path was not rejected during option parsing" >&2
+    cat "$diagnostics" >&2
+    exit 1
+fi
+
+set +e
+"$transpiler" --clang "" testdata/fixtures/simple.c >"$output" 2>"$diagnostics"
+empty_clang_path_status=$?
+set -e
+if [ "$empty_clang_path_status" -ne 2 ] || [ -s "$output" ] || \
+    ! rg -q -- '--clang requires a nonempty executable path' "$diagnostics"; then
+    echo "empty explicit Clang path was not rejected during option parsing" >&2
     cat "$diagnostics" >&2
     exit 1
 fi
@@ -464,6 +534,21 @@ if [ -s "$output" ] || ! rg -q 'return 42' "$project_output/compile_command_quot
     exit 1
 fi
 
+# Compilation-database commands keep their recorded compiler even when a
+# direct-input override is also supplied.
+rm -f "$compiler_trace"
+ELISA_REAL_CLANG="$real_clang" CLANG_OVERRIDE_TRACE="$compiler_trace" \
+    "$transpiler" --clang "$fake_clang" \
+    --compile-commands testdata/fixtures/compile_command_quoted_command.json \
+    --output-dir "$project_output" >"$output" 2>"$diagnostics"
+if [ -s "$output" ] || [ -s "$diagnostics" ] || \
+    [ -s "$compiler_trace" ] || \
+    ! rg -q 'return 42' "$project_output/compile_command_quoted.elisa"; then
+    echo "direct --clang override replaced a compilation-database compiler" >&2
+    cat "$diagnostics" >&2
+    exit 1
+fi
+
 python3 - "$normalization_db" "$root_dir" <<'PY'
 import json
 import pathlib
@@ -579,7 +664,7 @@ status=$?
 set -e
 if [ "$status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'conflicting compilation database entries for testdata/fixtures/compile_command_quoted.c' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "conflicting compile commands were not rejected before emitting project files" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -639,7 +724,7 @@ status=$?
 set -e
 if [ "$status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'conflicting compilation database entries' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "conflicting settings through a canonical source alias were not rejected" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -756,7 +841,7 @@ status=$?
 set -e
 if [ "$status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'conflicting compilation database entries' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "different normalized argv across command/arguments forms was not rejected" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -789,7 +874,7 @@ status=$?
 set -e
 if [ "$status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'compilation database file is not an input operand.*compile_command_quoted.c' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "$mismatch_form entry compiled a source other than its database file" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -824,7 +909,7 @@ status=$?
 set -e
 if [ "$status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'compilation database file is not an input operand.*compile_command_quoted.c' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "$mismatch_form response-file source operand was not checked against the database file" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -971,7 +1056,7 @@ response_status=$?
 set -e
 if [ "$response_status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'could not read Clang response file .*missing-response-file.rsp while processing .*compile_command_quoted.c' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "missing response file was not rejected before emitting project files" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -1001,7 +1086,7 @@ response_status=$?
 set -e
 if [ "$response_status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'malformed or unsupported quoting in Clang response file .*malformed.rsp while processing .*simple.c' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f ! -name malformed.rsp -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "malformed response-file quoting was not reported precisely before Clang launch" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -1035,7 +1120,7 @@ response_status=$?
 set -e
 if [ "$response_status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'response-file expansion exceeded --max-frontend-output-bytes while reading .*oversized.rsp while processing .*simple.c' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f ! -name oversized.rsp -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "response-file byte budget was not enforced before Clang launch" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -1066,7 +1151,7 @@ response_status=$?
 set -e
 if [ "$response_status" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'response-file nesting exceeded the maximum depth of 16 at .*cycle.rsp while processing .*simple.c' "$diagnostics" || \
-    [ -n "$(find "$conflict_output" -type f ! -name cycle.rsp -print -quit)" ]; then
+    project_output_exists "$conflict_output"; then
     echo "cyclic response files were not rejected at the bounded nesting depth" >&2
     cat "$diagnostics" >&2
     exit 1
@@ -1107,8 +1192,8 @@ transaction_exit=$?
 set -e
 if [ "$transaction_exit" -eq 0 ] || [ -s "$output" ] || \
     ! rg -q 'Clang failed while processing' "$diagnostics" || \
-    [ "$(<"$transaction_output/simple.elisa")" != "previous simple generation" ] || \
-    [ "$(<"$transaction_output/elisa_project.elisa")" != "previous project generation" ] || \
+    [ "$(cat "$transaction_output/simple.elisa")" != "previous simple generation" ] || \
+    [ "$(cat "$transaction_output/elisa_project.elisa")" != "previous project generation" ] || \
     [ -e "$transaction_output/zz_transaction_failure.elisa" ] || \
     [ -n "$(find "$transaction_output" -maxdepth 1 -type f \
         ! -name 'zz_transaction_failure.c' \

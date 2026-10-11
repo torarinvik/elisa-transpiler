@@ -119,9 +119,9 @@ extend CTranslator:
         cli_module_disambiguator(out, sources, source_index)
 
     def run(argc: i64, argv: mutable void&) -> i64 can[Abort.Panic, Memory.Allocate, Memory.Release, Unsafe.PointerCast, Console]:
-        region translation:
+        region cli_run:
             if argc < 2:
-                emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--frontend-stats] [--explain-rewrites] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--max-input-sources N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...".cast[cstr])
+                emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--clang PATH --clangxx PATH] [--frontend-stats] [--explain-rewrites] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--max-input-sources N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...".cast[cstr])
                 emit_cstr("\n".cast[cstr])
                 return 2
 
@@ -144,7 +144,7 @@ extend CTranslator:
                 target_macros_succeeded: mutable bool = false
                 clang_diagnostics: mutable darray[u8] = []
                 record_layout_dump: mutable darray[u8] = []
-                ast_bytes: darray[u8] = run_clang_ast(input, cli_default_frontend_output_limit(), cli_default_frontend_timeout_seconds(), &clang_succeeded, &clang_limit_exceeded, &malformed_ast, &capture_failed, &timeout_exceeded, &raw_output_bytes, &target_macros, &target_macros_succeeded, &clang_diagnostics, &record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+                ast_bytes: darray[u8] = run_clang_ast(input, sview("", 0, 0), sview("", 0, 0), cli_default_frontend_output_limit(), cli_default_frontend_timeout_seconds(), &clang_succeeded, &clang_limit_exceeded, &malformed_ast, &capture_failed, &timeout_exceeded, &raw_output_bytes, &target_macros, &target_macros_succeeded, &clang_diagnostics, &record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
                 cli_emit_clang_diagnostics(clang_diagnostics) can Console, Unsafe.PointerCast
                 if not clang_succeeded:
                     if timeout_exceeded:
@@ -183,6 +183,8 @@ extend CTranslator:
             output_directory: mutable sview = sview("", 0, 0)
             compile_commands: mutable sview = sview("", 0, 0)
             source_map_path: mutable sview = sview("", 0, 0)
+            clang_c: mutable sview = sview("", 0, 0)
+            clang_cxx: mutable sview = sview("", 0, 0)
             source_map_project_state: mutable CliSourceMapProjectState = CliSourceMapProjectState{output: [], source_bytes_hashed: 0.usize(), json_bytes: 0.usize(), units: []}
             max_frontend_output_bytes: mutable usize = cli_default_frontend_output_limit()
             max_frontend_json_values: mutable usize = cli_default_frontend_json_value_limit()
@@ -196,7 +198,7 @@ extend CTranslator:
             cpp_compatibility_library_directory <- ""
             cpp_compatibility_std_directory <- ""
             index: mutable i64 = 1
-            while index < argc |argv_slots, sources, output_directory, compile_commands, source_map_path, max_frontend_output_bytes, max_frontend_json_values, max_input_sources, max_frontend_timeout_seconds, mode, frontend_stats, dump_typed_ir, diagnostics_json, index|:
+            while index < argc |argv_slots, sources, output_directory, compile_commands, source_map_path, clang_c, clang_cxx, max_frontend_output_bytes, max_frontend_json_values, max_input_sources, max_frontend_timeout_seconds, mode, frontend_stats, dump_typed_ir, diagnostics_json, index|:
                 argument: sview = sview(argv_slots[index.usize()].cast[cstr], 0, -1)
                 if cli_is_option(argument, sview("--output-dir", 0, -1)) and index + 1 < argc:
                     output_directory <- sview(argv_slots[(index + 1).usize()].cast[cstr], 0, -1)
@@ -204,6 +206,21 @@ extend CTranslator:
                 elif cli_is_option(argument, sview("--compile-commands", 0, -1)) and index + 1 < argc:
                     compile_commands <- sview(argv_slots[(index + 1).usize()].cast[cstr], 0, -1)
                     index <- index + 2
+                elif cli_is_option(argument, sview("--clang", 0, -1)) and index + 1 < argc:
+                    clang_c <- sview(argv_slots[(index + 1).usize()].cast[cstr], 0, -1)
+                    if clang_c.len == 0:
+                        emit_view_fd(sview("elisa-c-transpiler: --clang requires a nonempty executable path\n", 0, -1), 2)
+                        return 2
+                    index <- index + 2
+                elif cli_is_option(argument, sview("--clangxx", 0, -1)) and index + 1 < argc:
+                    clang_cxx <- sview(argv_slots[(index + 1).usize()].cast[cstr], 0, -1)
+                    if clang_cxx.len == 0:
+                        emit_view_fd(sview("elisa-c-transpiler: --clangxx requires a nonempty executable path\n", 0, -1), 2)
+                        return 2
+                    index <- index + 2
+                elif cli_is_option(argument, sview("--clang", 0, -1)) or cli_is_option(argument, sview("--clangxx", 0, -1)):
+                    emit_view_fd(sview("elisa-c-transpiler: --clang and --clangxx require an executable path\n", 0, -1), 2)
+                    return 2
                 elif cli_is_option(argument, sview("--source-map-json", 0, -1)) and index + 1 < argc:
                     source_map_path <- sview(argv_slots[(index + 1).usize()].cast[cstr], 0, -1)
                     if source_map_path.len == 0:
@@ -269,7 +286,7 @@ extend CTranslator:
                     mode <- TypedTranslationMode.Idiomatic
                     index <- index + 1
                 elif cli_is_option(argument, sview("--help", 0, -1)):
-                    emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--frontend-stats] [--explain-rewrites] [--dump-typed-ir] [--diagnostics-json] [--source-map-json PATH] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--max-input-sources N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...\n".cast[cstr])
+                    emit_cstr("usage: elisa-c-transpiler [--fidelity|--idiomatic] [--clang PATH --clangxx PATH] [--frontend-stats] [--explain-rewrites] [--dump-typed-ir] [--diagnostics-json] [--source-map-json PATH] [--frontend-timeout-seconds N] [--max-frontend-output-bytes N] [--max-frontend-json-values N] [--max-input-sources N] [--cpp-lib-dir DIR --elisa-std-dir DIR] [--output-dir DIR] [--compile-commands PATH] <input.c>...\n".cast[cstr])
                     return 0
                 elif argument.len > 0 and string_view_index(argument, 0) == 45:
                     emit_cstr("elisa-c-transpiler: unknown option\n".cast[cstr])
@@ -361,6 +378,8 @@ extend CTranslator:
                 return 1
             cli_sort_project_sources(sources) if project_mode
             manifest_sources: mutable darray[CliSource] = []
+            project_diagnostics: mutable darray[TypedDiagnostic[cli_run]] = []
+            project_translation_failed: mutable bool = false
             # Reserve project manifest ownership in the outer translation
             # region. Per-unit AST/lowering regions may then append without
             # reallocating a buffer that outlives those regions.
@@ -393,7 +412,9 @@ extend CTranslator:
             # iteration; that is unsafe for darray fields whose backing
             # buffers grow while later translation units are processed.
             source_index: mutable i64 = 0
-            while source_index < sources.count |sources, output_directory, source_map_path, source_map_project_state, manifest_sources, max_frontend_output_bytes, max_frontend_json_values, frontend_stats, explain_rewrites, dump_typed_ir, diagnostics_json, project_mode, transaction_id, project_needs_runtime_nonnull, project_needs_runtime_readonly_nonnull, project_needs_runtime_varargs, source_index|:
+            source_failed: mutable bool = false
+            while source_index < sources.count |sources, output_directory, source_map_path, clang_c, clang_cxx, source_map_project_state, manifest_sources, project_diagnostics, project_translation_failed, source_failed, max_frontend_output_bytes, max_frontend_json_values, frontend_stats, explain_rewrites, dump_typed_ir, diagnostics_json, project_mode, transaction_id, project_needs_runtime_nonnull, project_needs_runtime_readonly_nonnull, project_needs_runtime_varargs, source_index|:
+                source_failed <- false
                 region source_translation:
                     source_entry: CliSource = sources[source_index]
                     source: sview = source_entry.path
@@ -418,8 +439,8 @@ extend CTranslator:
                     elif source_entry.command.len > 0:
                         ast_bytes <- run_clang_ast_command(source_entry.directory, source_entry.command, input, max_frontend_output_bytes, max_frontend_timeout_seconds, &clang_succeeded, &clang_limit_exceeded, &clang_command_valid, &malformed_ast, &capture_failed, &timeout_exceeded, &raw_output_bytes, &target_macros, &target_macros_succeeded, &clang_diagnostics, &record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
                     else:
-                        ast_bytes <- run_clang_ast(input, max_frontend_output_bytes, max_frontend_timeout_seconds, &clang_succeeded, &clang_limit_exceeded, &malformed_ast, &capture_failed, &timeout_exceeded, &raw_output_bytes, &target_macros, &target_macros_succeeded, &clang_diagnostics, &record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
-                    cli_emit_clang_diagnostics(clang_diagnostics) can Console, Unsafe.PointerCast
+                        ast_bytes <- run_clang_ast(input, clang_c, clang_cxx, max_frontend_output_bytes, max_frontend_timeout_seconds, &clang_succeeded, &clang_limit_exceeded, &malformed_ast, &capture_failed, &timeout_exceeded, &raw_output_bytes, &target_macros, &target_macros_succeeded, &clang_diagnostics, &record_layout_dump) can Abort.Panic, Memory.Allocate, Unsafe.PointerCast, Console
+                    cli_emit_clang_diagnostics(clang_diagnostics) can Console, Unsafe.PointerCast if not diagnostics_json
                     if not clang_command_valid:
                         if source_entry.command.len > 0:
                             emit_view_fd(sview("elisa-c-transpiler: unsupported or malformed syntax in compilation command for ", 0, -1), 2)
@@ -443,8 +464,9 @@ extend CTranslator:
                             emit_view_fd(sview("\n", 0, -1), 2)
                         return cli_abort_project_output(sources, source_index, output_directory, transaction_id)
                     if malformed_ast:
-                        cli_emit_malformed_clang_ast(source) can Console, Unsafe.PointerCast
-                        return cli_abort_project_output(sources, source_index, output_directory, transaction_id)
+                        if not diagnostics_json or ast_bytes.count == 0.usize():
+                            cli_emit_malformed_clang_ast(source) can Console, Unsafe.PointerCast
+                            return cli_abort_project_output(sources, source_index, output_directory, transaction_id)
                     if ast_bytes.count == 0.usize():
                         emit_cstr("clang produced no AST\n".cast[cstr])
                         return cli_abort_project_output(sources, source_index, output_directory, transaction_id)
@@ -463,27 +485,40 @@ extend CTranslator:
                     cli_emit_typed_ir_dump(translation.typed_ir_dump) can Console, Unsafe.PointerCast if dump_typed_ir
                     cli_emit_rewrite_stats(source) can Console, Unsafe.PointerCast if explain_rewrites
                     if translation.failed:
-                        cli_emit_typed_diagnostics_json(translation.diagnostics) if diagnostics_json else emit_typed_diagnostics(translation.diagnostics)
-                        return cli_abort_project_output(sources, source_index, output_directory, transaction_id)
-                    project_needs_cpp_unordered_map <- true if translation.needs_cpp_unordered_map
-                    project_needs_runtime_nonnull <- true if translation.needs_runtime_nonnull
-                    project_needs_runtime_readonly_nonnull <- true if translation.needs_runtime_readonly_nonnull
-                    project_needs_runtime_varargs <- true if translation.needs_runtime_varargs
-                    if not cli_source_map_process_translation(source_map_path, source_index.usize(), source_entry.canonical_path, translation.source_map, source_entry.directory, output_directory, source_map_project_state, max_frontend_output_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
-                        return cli_abort_project_output(sources, source_index, output_directory, transaction_id) if output_directory.len > 0 else 1
-                    if output_directory.len == 0:
-                        emit_view(bytes_view(translation.output))
+                        if diagnostics_json:
+                            if project_mode:
+                                typed_append_copied_diagnostics(&project_diagnostics, translation.diagnostics) can Memory.Allocate, Abort.Panic
+                                project_translation_failed <- true
+                                source_failed <- true
+                            else:
+                                cli_emit_typed_diagnostics_json(translation.diagnostics)
+                                return cli_abort_project_output(sources, source_index, output_directory, transaction_id)
+                        else:
+                            emit_typed_diagnostics(translation.diagnostics)
+                            return cli_abort_project_output(sources, source_index, output_directory, transaction_id)
                     else:
-                        generated_path: mutable darray[u8] = []
-                        cli_staged_output_path_for_sources(&generated_path, output_directory, sources, source_index, transaction_id)
-                        return cli_abort_project_output(sources, source_index, output_directory, transaction_id) if not cli_write_bytes(bytes_view(generated_path), translation.output)
-                        manifest_source_for_append <- source_entry
+                        project_needs_cpp_unordered_map <- true if translation.needs_cpp_unordered_map
+                        project_needs_runtime_nonnull <- true if translation.needs_runtime_nonnull
+                        project_needs_runtime_readonly_nonnull <- true if translation.needs_runtime_readonly_nonnull
+                        project_needs_runtime_varargs <- true if translation.needs_runtime_varargs
+                        if not cli_source_map_process_translation(source_map_path, source_index.usize(), source_entry.canonical_path, translation.source_map, source_entry.directory, output_directory, source_map_project_state, max_frontend_output_bytes) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console:
+                            return cli_abort_project_output(sources, source_index, output_directory, transaction_id) if output_directory.len > 0 else 1
+                        if output_directory.len == 0:
+                            emit_view(bytes_view(translation.output))
+                        else:
+                            generated_path: mutable darray[u8] = []
+                            cli_staged_output_path_for_sources(&generated_path, output_directory, sources, source_index, transaction_id)
+                            return cli_abort_project_output(sources, source_index, output_directory, transaction_id) if not cli_write_bytes(bytes_view(generated_path), translation.output)
+                            manifest_source_for_append <- source_entry
                     # Release this unit's AST, IR and output before translating
-                    # the next source; the error paths already abort the region.
+                    # the next source, including when diagnostics were copied.
                     destroy source_translation
                 if output_directory.len > 0:
-                    manifest_sources.push(manifest_source_for_append)
+                    manifest_sources.push(manifest_source_for_append) if not source_failed
                 source_index <- source_index + 1
+            if project_translation_failed:
+                cli_emit_typed_diagnostics_json(project_diagnostics)
+                return cli_abort_project_output(sources, sources.count.i64(), output_directory, transaction_id) if output_directory.len > 0 else 1
             if output_directory.len > 0:
                 if not cli_emit_project_manifest(output_directory, manifest_sources, project_needs_cpp_unordered_map, project_needs_runtime_nonnull, project_needs_runtime_readonly_nonnull, project_needs_runtime_varargs, transaction_id):
                     return cli_abort_project_output(sources, sources.count.i64(), output_directory, transaction_id)

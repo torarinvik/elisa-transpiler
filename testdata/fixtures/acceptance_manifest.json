@@ -108,8 +108,8 @@
       "translate_argv": ["{translator}", "{source}"],
       "generated_checks": {
         "contains_regex": [
-          "^def sign_extend_i32\\(value: i32\\) -> i64:\\n    return \\(value\\)\\.i64\\(\\)$",
-          "^def truncate_u64\\(value: u64\\) -> u32:\\n    return \\(value\\)\\.u32\\(\\)$"
+          "^def sign_extend_i32\\(value: i32\\) -> i64[^\\n]*:\\n    can [^\\n]+:\\n        trusted [^\\n]+:\\n            return \\(value\\)\\.i64\\(\\)$",
+          "^def truncate_u64\\(value: u64\\) -> u32[^\\n]*:\\n    can [^\\n]+:\\n        trusted [^\\n]+:\\n            return \\(value\\)\\.u32\\(\\)$"
         ],
         "no_trailing_whitespace": true,
         "max_consecutive_empty_lines": 2
@@ -222,27 +222,28 @@
       "name": "cpp_unordered_map_const_iterator",
       "source": "testdata/fixtures/cpp_unordered_map_const_iterator.cpp",
       "timeout_seconds": 120,
-      "translate_argv": ["{translator}", "{source}"],
+      "translate_argv": ["{translator}", "--cpp-lib-dir", "{cpp_lib_dir}", "--elisa-std-dir", "{elisa_std_dir}", "{source}"],
       "generated_checks": {
         "contains_regex": [
           "unordered_map_const_iterator\\[i32, i32\\]",
           "found.first\\(\\)",
           "found.second\\(\\)",
-          "mutable_found == const_found",
-          "const_found == mutable_found",
-          "mutable_found != const_found",
-          "const_found != mutable_found",
-          "mutable_missing == read_only.end\\(\\)",
-          "const_missing == values.end\\(\\)",
-          "mutable_found != const_missing",
-          "const_missing != mutable_found"
+          "cpp::unordered_map_find_const\\(values, 7\\)",
+          "cpp::unordered_map_find_mutable\\(&values, 7\\)",
+          "cpp::unordered_map_find_const\\(read_only, 7\\)",
+          "cpp::unordered_map_iter_equal_mut_const\\(mutable_found, const_found\\)",
+          "cpp::unordered_map_iter_equal_const_mut\\(const_found, mutable_found\\)",
+          "cpp::unordered_map_iter_equal_mut_const\\(mutable_missing, cpp::unordered_map_end_const\\(read_only\\)\\)",
+          "cpp::unordered_map_iter_equal_const_mut\\(const_missing, cpp::unordered_map_end_mutable\\(&values\\)\\)",
+          "cpp::unordered_map_iter_equal_mut_const\\(mutable_found, const_missing\\)",
+          "cpp::unordered_map_iter_equal_const_mut\\(const_missing, mutable_found\\)"
         ],
         "not_contains_regex": ["set_second"],
         "no_trailing_whitespace": true,
         "max_consecutive_empty_lines": 2
       },
       "native_build_argv": ["clang++", "-std=gnu++11", "{source}", "-o", "{native}"],
-      "elisa_compile_argv": ["{elisa_bin}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
+      "elisa_compile_argv": ["{elisa_bin}", "-target-triple", "{elisa_target_triple}", "-emit", "obj", "-O0", "-o", "{object}", "{generated}"],
       "elisa_link_argv": ["clang", "-Wl,-dead_strip", "-o", "{elisa_executable}", "{object}"],
       "native_run_argv": ["{native}"],
       "elisa_run_argv": ["{elisa_executable}"],
@@ -357,7 +358,7 @@
           "touch\\(\\)\\n\\s+arithmetic_snapshot: i32 = \\(touches \\+ 10\\)",
           "def comma_arithmetic_return\\(\\) -> i32[^\\n]*\\n\\s+can [^\\n]+:\\n\\s+touch\\(\\)\\n\\s+return \\(touches \\+ 20\\)",
           "touch\\(\\)\\n\\s+__elisa_transpiler_call_argument_[0-9]+: mutable i32 = zeroed\\n\\s+__elisa_transpiler_call_argument_[0-9]+ <- \\(touches \\+ 30\\)\\n\\s+arithmetic_call_argument: i32 = identity\\(__elisa_transpiler_call_argument_[0-9]+\\)",
-          "touch\\(\\)\\n\\s+array_index_snapshot: i32 = values\\[0\\]",
+          "touch\\(\\)\\n\\s+array_index_snapshot: i32 = \\(values\\[0\\]\\)\\.i32\\(\\)",
           "touch\\(\\)\\n\\s+short_circuit_and_left: i32 = \\(1 if gate != 0 and touch\\(\\) != 0 else 0\\)",
           "touch\\(\\)\\n\\s+short_circuit_or_left: i32 = \\(1 if gate != 0 or touch\\(\\) != 0 else 0\\)",
           "if gate != 0:\\n\\s+touch\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- \\(touches \\+ 30\\)\\n\\s+else:\\n\\s+touch\\(\\)\\n\\s+__elisa_transpiler_conditional_value_[0-9]+ <- \\(touches \\+ 40\\)\\n\\s+conditional_true: i32 = __elisa_transpiler_conditional_value_[0-9]+",
@@ -706,7 +707,7 @@
         "contains_regex": [
           "^extern va_list$",
           "^extern va_arg\\[T\\]\\(storage: mutable void&\\) -> T$",
-          "va_arg\\[i32\\]\\(\\(&ap\\)\\.cast\\[mutable void&\\]\\)"
+          "va_arg\\[i32\\]\\(.*ap.*cast\\[mutable void&\\]\\)"
         ],
         "no_trailing_whitespace": true,
         "max_consecutive_empty_lines": 2
@@ -903,7 +904,7 @@
           "^extern va_list$",
           "^extern va_arg\\[T\\]\\(storage: mutable void&\\) -> T$",
           "^extern llvm_va_copy\\(destination: mutable void&, source: mutable void&\\) -> void$",
-          "llvm_va_copy\\(\\(&second\\)\\.cast\\[mutable void&\\], \\(&first\\)\\.cast\\[mutable void&\\]\\)"
+          "llvm_va_copy\\(.*second.*cast\\[mutable void&\\], .*first.*cast\\[mutable void&\\]\\)"
         ],
         "no_trailing_whitespace": true,
         "max_consecutive_empty_lines": 2

@@ -25,6 +25,8 @@ extend CTranslator:
         # symbol that may not exist (for example __builtin_huge_valf).
         return 1 if sview_eq(name, sview("__builtin_nan", 0, -1)) or sview_eq(name, sview("__builtin_nanf", 0, -1)) or sview_eq(name, sview("__builtin_nans", 0, -1)) or sview_eq(name, sview("__builtin_nansf", 0, -1))
         return 2 if sview_eq(name, sview("__builtin_inf", 0, -1)) or sview_eq(name, sview("__builtin_inff", 0, -1)) or sview_eq(name, sview("__builtin_huge_val", 0, -1)) or sview_eq(name, sview("__builtin_huge_valf", 0, -1))
+        return 3 if sview_eq(name, sview("__builtin_isnan", 0, -1))
+        return 4 if sview_eq(name, sview("__builtin_isinf_sign", 0, -1))
         return 0
 
     def typed_pointer_difference_element_size[@r](ctx: TypedContext[r]&, pointer_type: sview) -> i64:
@@ -40,7 +42,10 @@ extend CTranslator:
     def typed_ast_expression_has_effect[@r](node: JsonValueHandle[r]) -> bool:
         kind: sview = ast_kind(node)
         if sview_eq(kind, sview("CallExpr", 0, -1)):
-            return false if ast_child_count(node) > 0 and typed_float_builtin_kind(typed_callee_name(ast_child(node, 0))) > 0
+            float_builtin_kind: i64 = typed_float_builtin_kind(typed_callee_name(ast_child(node, 0))) if ast_child_count(node) > 0 else 0
+            if float_builtin_kind == 3 or float_builtin_kind == 4:
+                return typed_ast_expression_has_effect(ast_child(node, 1)) if ast_child_count(node) > 1 else false
+            return false if float_builtin_kind > 0
             return true
         return true if sview_eq(kind, sview("CompoundLiteralExpr", 0, -1))
         return true if sview_eq(kind, sview("CXXMemberCallExpr", 0, -1)) or sview_eq(kind, sview("CXXOperatorCallExpr", 0, -1)) or sview_eq(kind, sview("CXXConstructExpr", 0, -1)) or sview_eq(kind, sview("VAArgExpr", 0, -1))

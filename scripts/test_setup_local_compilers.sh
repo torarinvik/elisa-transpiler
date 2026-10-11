@@ -34,6 +34,12 @@ expect_rejected_before_side_effects \
     ELISA_STAGE0_GO_BUILD_PARALLELISM many \
     'invalid ELISA_STAGE0_GO_BUILD_PARALLELISM'
 expect_rejected_before_side_effects \
+    ELISA_STAGE1_SEED_OPT_LEVEL -O4 \
+    'invalid ELISA_STAGE1_SEED_OPT_LEVEL'
+expect_rejected_before_side_effects \
+    ELISA_STAGE1_SEED_OPT_LEVEL fast \
+    'invalid ELISA_STAGE1_SEED_OPT_LEVEL'
+expect_rejected_before_side_effects \
     ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT 0 \
     'invalid ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT'
 expect_rejected_before_side_effects \
@@ -61,6 +67,9 @@ grep -Fq 'Stage1 seed already running' "$temporary_root/err"
 [ ! -e "$live_lock_worktrees" ]
 
 grep -Fq 'stage0_go_parallelism" -o "$stage0_bin" ./src' "$setup_script"
+grep -Fq 'stage1_seed_opt_level=${ELISA_STAGE1_SEED_OPT_LEVEL:--O3}' "$setup_script"
+grep -Fq 'export ELISA_STAGE1_SEED_OPT_LEVEL="$stage1_seed_opt_level"' "$setup_script"
+grep -Fq 'echo "seeding local stage1 compiler ($stage1_seed_opt_level): $stage1_bin"' "$setup_script"
 grep -Fq 'minimum_free_percent=${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-60}' "$setup_script"
 grep -Fq 'minimum_seed_initial_free_percent=${ELISA_SETUP_SEED_MIN_INITIAL_SYSTEM_FREE_PERCENT:-80}' "$setup_script"
 grep -Fq 'run_bounded 6291456 900 "$minimum_free_percent"' "$setup_script"

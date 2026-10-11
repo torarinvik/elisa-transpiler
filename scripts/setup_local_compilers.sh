@@ -18,6 +18,7 @@ stage1_source=${ELISA_STAGE1_REPO:-$workspace_parent/Elisa-compiler}
 stage0_branch=${ELISA_STAGE0_BRANCH:-codex/transpiler-local-stage0-latest}
 stage1_branch=${ELISA_STAGE1_BRANCH:-codex/transpiler-local-stage1}
 stage0_go_parallelism=${ELISA_STAGE0_GO_BUILD_PARALLELISM:-1}
+stage1_seed_opt_level=${ELISA_STAGE1_SEED_OPT_LEVEL:--O3}
 minimum_free_percent=${ELISA_SETUP_MIN_SYSTEM_FREE_PERCENT:-60}
 minimum_seed_initial_free_percent=${ELISA_SETUP_SEED_MIN_INITIAL_SYSTEM_FREE_PERCENT:-80}
 
@@ -25,6 +26,13 @@ case "$stage0_go_parallelism" in
     [1-9]|[1-9][0-9]|1[01][0-9]|12[0-8]) ;;
     *)
         echo "invalid ELISA_STAGE0_GO_BUILD_PARALLELISM '$stage0_go_parallelism': expected an integer from 1 to 128" >&2
+        exit 2
+        ;;
+esac
+case "$stage1_seed_opt_level" in
+    -O0|-O1|-O2|-O3) ;;
+    *)
+        echo "invalid ELISA_STAGE1_SEED_OPT_LEVEL '$stage1_seed_opt_level': expected -O0, -O1, -O2 or -O3" >&2
         exit 2
         ;;
 esac
@@ -42,6 +50,10 @@ case "$minimum_seed_initial_free_percent" in
         exit 2
         ;;
 esac
+
+# The seed wrapper reads this setting in its child shell. Resolve and export the
+# same validated value setup reports, including the default, before any build.
+export ELISA_STAGE1_SEED_OPT_LEVEL="$stage1_seed_opt_level"
 
 # Do not rebuild Stage0 while another worktree is in the high-memory Stage1
 # seed. The actual seed script still acquires this lock later; this early
@@ -124,9 +136,11 @@ run_bounded() {
 echo "building local stage0 compiler: $stage0_bin" >&2
 (
     cd "$stage0_worktree/compiler"
-    run_bounded 1572864 600 "$minimum_free_percent" "" go build \
+    run_bounded 1572864 600 "$minimum_free_percent" "" go build -buildvcs=true \
         -p "$stage0_go_parallelism" -o "$stage0_bin" ./src
 )
+bash "$stage1_worktree/scripts/stage0_provenance.sh" record \
+    "$stage0_worktree" "$stage0_bin"
 
 if [ ! -f "$stage1_worktree/scripts/assert_stage1_fresh.sh" ]; then
     echo "missing Stage1 source-freshness guard: $stage1_worktree/scripts/assert_stage1_fresh.sh" >&2
@@ -137,7 +151,7 @@ fi
 # the Stage0 product hash. Therefore an existing Stage1 binary can be fresh with
 # respect to its own sources and still have been seeded by an older Stage0. Always
 # reseed here so this command produces a reproducible, current compiler pair.
-echo "seeding local stage1 compiler: $stage1_bin" >&2
+echo "seeding local stage1 compiler ($stage1_seed_opt_level): $stage1_bin" >&2
 (
     cd "$stage1_worktree"
     export ELISACORE_BIN="$stage0_bin" ELISA_STAGE1_BIN="$stage1_bin"
