@@ -151,7 +151,7 @@ extend CTranslator:
                 argument <- typed_materialize_call_argument(ctx, argument, prelude) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             lowered_args.push(argument)
         if named_callee:
-            typed_add_external(ctx, callee_name, callee_type, ast_callee_referenced_decl(callee_node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_add_external(ctx, callee_name, callee_type, ast_callee_referenced_decl(callee_node), ast_callee_reference_expression(callee_node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
         args_start: i64 = ctx.expr_children.count.i64()
         for index in 0..<lowered_args.count |ctx, lowered_args|:
             ctx.expr_children.push(lowered_args[index])

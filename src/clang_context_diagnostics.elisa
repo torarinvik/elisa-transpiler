@@ -136,11 +136,94 @@ extend CTranslator:
         semantic_category: sview = typed_diagnostic_semantic_category(kind)
         capability: sview = sview("", 0, 0) if sview_eq(requested_capability, sview("expression", 0, -1)) or sview_eq(requested_capability, sview("statement", 0, -1)) or sview_eq(requested_capability, sview("declaration", 0, -1)) else requested_capability
         typed_record_diagnostic_with_capability(ctx, node, semantic_category, kind, capability) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+    def typed_ast_callee_references_declaration[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], wanted_id: sview, search_budget: mutable i64&) -> bool:
+        return false if search_budget <= 0
+        search_budget <- search_budget - 1
+        if sview_eq(ast_kind(node), sview("DeclRefExpr", 0, -1)):
+            reference: JsonValueHandle[r] = ast_field(node, sview("referencedDecl", 0, -1))
+            reference_id: sview = ast_string(ast_field(reference, sview("id", 0, -1)))
+            return true if sview_eq(reference_id, wanted_id)
+            reference_identity: sview = typed_decl_canonical_id(ctx, reference_id)
+            wanted_identity: sview = typed_decl_canonical_id(ctx, wanted_id)
+            return reference_identity.len > 0 and wanted_identity.len > 0 and sview_eq(reference_identity, wanted_identity)
+        if sview_eq(ast_kind(node), sview("MemberExpr", 0, -1)):
+            reference_id: sview = ast_string(ast_field(node, sview("referencedMemberDecl", 0, -1)))
+            return true if sview_eq(reference_id, wanted_id)
+            reference_identity: sview = typed_decl_canonical_id(ctx, reference_id)
+            wanted_identity: sview = typed_decl_canonical_id(ctx, wanted_id)
+            return reference_identity.len > 0 and wanted_identity.len > 0 and sview_eq(reference_identity, wanted_identity)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, wanted_id, search_budget|:
+                return true if typed_ast_callee_references_declaration(ctx, ast_child(node, index), wanted_id, search_budget)
+        return false
+    def typed_ast_node_calls_declaration[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], wanted_id: sview, search_budget: mutable i64&) -> bool:
+        return false if search_budget <= 0
+        search_budget <- search_budget - 1
+        kind: sview = ast_kind(node)
+        is_call: bool = sview_eq(kind, sview("CallExpr", 0, -1)) or sview_eq(kind, sview("CXXMemberCallExpr", 0, -1)) or sview_eq(kind, sview("CXXOperatorCallExpr", 0, -1)) or sview_eq(kind, sview("CUDAKernelCallExpr", 0, -1))
+        count: i64 = ast_child_count(node)
+        if is_call and count > 0:
+            return true if typed_ast_callee_references_declaration(ctx, ast_child(node, 0), wanted_id, search_budget)
+        if count >= 0:
+            for index in 0..<count |ctx, node, wanted_id, search_budget|:
+                return true if typed_ast_node_calls_declaration(ctx, ast_child(node, index), wanted_id, search_budget)
+        return false
+    def typed_ast_is_function_definition_kind(kind: sview) -> bool:
+        return sview_eq(kind, sview("FunctionDecl", 0, -1)) or sview_eq(kind, sview("CXXMethodDecl", 0, -1)) or sview_eq(kind, sview("CXXConstructorDecl", 0, -1)) or sview_eq(kind, sview("CXXDestructorDecl", 0, -1)) or sview_eq(kind, sview("CXXConversionDecl", 0, -1))
+    def typed_ast_declaration_id_is_visited[@r](ctx: TypedContext[r]&, visited: darray[sview @r] @r, candidate_id: sview) -> bool:
+        candidate_identity: sview = typed_decl_canonical_id(ctx, candidate_id)
+        for index in 0..<visited.count |ctx, visited, candidate_id, candidate_identity|:
+            previous_id: sview = visited[index]
+            return true if sview_eq(previous_id, candidate_id)
+            previous_identity: sview = typed_decl_canonical_id(ctx, previous_id)
+            return true if candidate_identity.len > 0 and previous_identity.len > 0 and sview_eq(candidate_identity, previous_identity)
+        return false
+    def typed_ast_function_calling_declaration[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], wanted_id: sview, visited: darray[sview @r] @r, search_budget: mutable i64&) -> JsonValueHandle[r]:
+        return json_handle_null(node) if search_budget <= 0
+        search_budget <- search_budget - 1
+        if typed_ast_is_function_definition_kind(ast_kind(node)):
+            identifier: sview = ast_string(ast_field(node, sview("id", 0, -1)))
+            already_visited: bool = typed_ast_declaration_id_is_visited(ctx, visited, identifier)
+            body: JsonValueHandle[r] = ast_find_child(node, sview("CompoundStmt", 0, -1))
+            if not already_visited and not json_handle_is_null(body):
+                return node if typed_ast_node_calls_declaration(ctx, body, wanted_id, search_budget)
+        count: i64 = ast_child_count(node)
+        if count >= 0:
+            for index in 0..<count |ctx, node, wanted_id, visited, search_budget|:
+                found: JsonValueHandle[r] = typed_ast_function_calling_declaration(ctx, ast_child(node, index), wanted_id, visited, search_budget)
+                return found if not json_handle_is_null(found)
+        return json_handle_null(node)
+    def typed_missing_declaration_trail[@r](ctx: TypedContext[r]&, missing_name: sview) -> sview @r can[Memory.Allocate, Abort.Panic]:
+        names: mutable darray[sview @r] @r = []
+        visited: mutable darray[sview @r] @r = []
+        current_id: mutable sview = ctx.current_function_id
+        search_budget: mutable i64 = 250000
+        names.push(ctx.current_function_name) if ctx.current_function_name.len > 0
+        visited.push(current_id) if current_id.len > 0
+        depth: mutable i64 = 0
+        while current_id.len > 0 and depth < 32 and search_budget > 0 |ctx, names, visited, current_id, depth, search_budget|:
+            caller: JsonValueHandle[r] = typed_ast_function_calling_declaration(ctx, ctx.root, current_id, visited, search_budget)
+            break if json_handle_is_null(caller)
+            caller_id: sview = ast_string(ast_field(caller, sview("id", 0, -1)))
+            break if caller_id.len == 0
+            names.push(ast_name(caller))
+            visited.push(caller_id)
+            current_id <- caller_id
+            depth <- depth + 1
+            break if sview_eq(ast_name(caller), sview("main", 0, -1))
+        output: mutable darray[u8] @r = []
+        reverse_index: mutable i64 = names.count.i64() - 1
+        while reverse_index >= 0 |names, output, reverse_index|:
+            append_view(&output, sview(" -> ", 0, -1)) if output.count > 0
+            append_view(&output, names[reverse_index.usize()])
+            reverse_index <- reverse_index - 1
+        append_view(&output, sview(" -> ", 0, -1)) if output.count > 0
+        append_view(&output, missing_name)
+        copied: cstr = string_view_copy(bytes_view(output)) can Memory.Allocate, Abort.Panic
+        return sview(copied, 0, -1)
     def typed_record_missing_declaration_dependency[@r](ctx: mutable TypedContext[r]&, node: JsonValueHandle[r], name: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         kind: mutable darray[u8] = []
         append_view(&kind, sview("missing-declaration-dependency:", 0, -1))
-        if ctx.current_function_name.len > 0:
-            append_view(&kind, ctx.current_function_name)
-            append_view(&kind, sview(" -> ", 0, -1))
-        append_view(&kind, name)
+        append_view(&kind, typed_missing_declaration_trail(ctx, name) can Memory.Allocate, Abort.Panic)
         typed_record_diagnostic(ctx, node, sview("declaration", 0, -1), bytes_view(kind)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console

@@ -341,6 +341,12 @@ extend CTranslator:
         if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
             return ast_callee_referenced_decl(ast_child(node, 0)) if ast_child_count(node) > 0 else json_handle_null(node)
         return json_handle_null(node)
+    def ast_callee_reference_expression[@r](node: JsonValueHandle[r]) -> JsonValueHandle[r]:
+        kind: sview = ast_kind(node)
+        return node if sview_eq(kind, sview("DeclRefExpr", 0, -1))
+        if sview_eq(kind, sview("ImplicitCastExpr", 0, -1)) or sview_eq(kind, sview("ParenExpr", 0, -1)) or sview_eq(kind, sview("CStyleCastExpr", 0, -1)) or sview_eq(kind, sview("ConstantExpr", 0, -1)):
+            return ast_callee_reference_expression(ast_child(node, 0)) if ast_child_count(node) > 0 else json_handle_null(node)
+        return json_handle_null(node)
     def ast_callee_is_header_inline[@r](ctx: TypedContext[r]&, node: JsonValueHandle[r], source: cstr) -> bool:
         referenced: JsonValueHandle[r] = ast_callee_referenced_decl(node)
         identifier: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
@@ -424,13 +430,14 @@ extend CTranslator:
         return if name.len == 0 or typed_external_global_index(ctx, name) >= 0
         binding_name: sview = external_global_binding_name(name) can Memory.Allocate
         ctx.extern_globals.push(TypedExternGlobal[r]{name: binding_name, link_name: name, type_name: type_name, is_mutable: not c_type_is_const_object(type_name)})
-    def typed_add_external[@r](ctx: mutable TypedContext[r]&, name: sview, call_type: sview, referenced: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
+    def typed_add_external[@r](ctx: mutable TypedContext[r]&, name: sview, call_type: sview, referenced: JsonValueHandle[r], reference_expression: JsonValueHandle[r]) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console]:
         return if name.len == 0
         return if sview_starts_with(name, sview("__builtin_va_", 0, -1))
         declaration: mutable JsonValueHandle[r] = referenced
         referenced_id: sview = ast_string(ast_field(referenced, sview("id", 0, -1)))
         declaration_id: sview = typed_decl_identity(ctx, referenced)
         resolved: JsonValueHandle[r] = typed_decl_lookup(ctx, referenced_id) if referenced_id.len > 0 else json_handle_null(ctx.root)
+        diagnostic_node: JsonValueHandle[r] = reference_expression if not json_handle_is_null(reference_expression) else referenced
         # A DeclRefExpr's surrounding FunctionToPointerDecay can still carry
         # a complete function type after the declaration dependency itself
         # has been lost from the AST projection. Do not turn that stale type
@@ -439,7 +446,7 @@ extend CTranslator:
         # closure. Compiler builtins and project-owned cross-unit declarations
         # have their own resolution paths below.
         if referenced_id.len > 0 and json_handle_is_null(resolved) and not ctx.project_mode and not sview_starts_with(name, sview("__builtin_", 0, -1)):
-            typed_record_missing_declaration_dependency(ctx, referenced, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_record_missing_declaration_dependency(ctx, diagnostic_node, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
         declaration <- resolved if not json_handle_is_null(resolved)
         declaration <- ast_find_function_with_named_parameters(ctx.root, name) if json_handle_is_null(declaration)
@@ -451,7 +458,7 @@ extend CTranslator:
         # Same-name overloads may coexist when Clang gives us a signature.
         return if call_type.len == 0 and typed_user_function_index(ctx, name) >= 0
         if function_type.len == 0:
-            typed_record_missing_declaration_dependency(ctx, referenced, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+            typed_record_missing_declaration_dependency(ctx, diagnostic_node, name) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             return
         params_start: i64 = ctx.extern_params.count.i64()
         parameter_count: i64 = ast_child_count(declaration)

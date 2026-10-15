@@ -86,6 +86,17 @@ def main() -> None:
         if item["category"] == "expression"
         and item["required_capability"] == "comma effects in record-valued conditional"
     )
+    conditional_issues = [
+        item
+        for item in diagnostics
+        if item["category"] == "expression"
+        and item["kind"] == "ConditionalOperator"
+        and item["required_capability"] == "comma effects in record-valued conditional"
+        and item["translation_unit"] == str(source_path)
+        and item["range_start_offset"] == conditional["range_start_offset"]
+        and item["range_end_offset"] == conditional["range_end_offset"]
+    ]
+    assert len(conditional_issues) == 1, conditional_issues
     assert conditional["subject_type"] == "struct Payload"
     assert conditional["source"] == str(source_path)
     assert conditional["canonical_source"] == str(source_path)
@@ -154,6 +165,20 @@ def main() -> None:
         item for item in macro_diagnostics if item["kind"] == "AddrLabelExpr"
     ]
     assert len(macro_origin_diagnostics) >= 2, macro_origin_diagnostics
+    macro_expansion_origins = {
+        (
+            item["expansion_canonical_source"],
+            item["expansion_line"],
+            item["expansion_column"],
+            item["range_start_offset"],
+            item["range_end_offset"],
+        )
+        for item in macro_origin_diagnostics
+    }
+    assert len(macro_expansion_origins) >= 2, macro_origin_diagnostics
+    assert (
+        len(macro_expansion_origins) == len(macro_origin_diagnostics)
+    ), macro_origin_diagnostics
     assert all(
         item["spelling_source_content_hash"] == fnv1a64_hex(macro_header.read_bytes())
         and item["expansion_source_content_hash"] == fnv1a64_hex(macro_source.read_bytes())

@@ -71,7 +71,7 @@ extend CTranslator:
                     type_name <- referenced_type
             if sview_eq(ast_kind(referenced), sview("FunctionDecl", 0, -1)):
                 typed_resolve_decl(ctx, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
-                typed_add_external(ctx, name, type_name, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
+                typed_add_external(ctx, name, type_name, referenced, node) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
             is_external_decl: mutable bool = false
             if sview_eq(ast_kind(referenced), sview("VarDecl", 0, -1)):
                 decl_info: TypedDeclInfo[r] = typed_resolve_decl(ctx, referenced) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console
@@ -532,7 +532,7 @@ extend CTranslator:
             callee_name <- sview("llvm_va_start", 0, -1) if varargs_start
             callee_name <- sview("llvm_va_end", 0, -1) if varargs_end
             callee_name <- sview("llvm_va_copy", 0, -1) if varargs_copy
-            typed_add_external(ctx, callee_name, callee_type, ast_callee_referenced_decl(callee_node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if callee_index < 0 and callee_name.len > 0 and not varargs_start and not varargs_end and not varargs_copy and not defined_named_function
+            typed_add_external(ctx, callee_name, callee_type, ast_callee_referenced_decl(callee_node), ast_callee_reference_expression(callee_node)) can Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Console if callee_index < 0 and callee_name.len > 0 and not varargs_start and not varargs_end and not varargs_copy and not defined_named_function
             lowered_args: mutable darray[i64] = []
             first_argument: mutable i64 = 1
             last_argument: mutable i64 = 2 if varargs_start or varargs_end else 3 if varargs_copy else ast_child_count(node)

@@ -1,5 +1,48 @@
 # Translator implementation evidence
 
+## Latest Vast compiler-backed checkpoint — partial — 2026-10-15
+
+Runs used the Vast x86_64 Linux host, translator source revision `013a8a9`,
+Clang/LLVM 21.1.8, and the isolated Stage1 compiler/runtime recorded in
+`docs/compiler_compatibility.json` (compiler SHA-256
+`d8690be426b03afe8c7168cc6196ec3393a9f5c3adc4874682f029c57138cfc6`, runtime
+SHA-256 `10bb27ad5528a2d87c4c247501265f197b4f601608f0fe4b1c350ef23f3239be`).
+The translator rebuilt and linked manually; the bounded build peaked at about
+372 MiB process RSS. Stage0 source/executable revision and SHA-256 were
+`4a68f508b90634b548f5e0728da4147853560248` and
+`fe3df4963b524f87fa7ffc80aca7b04082db2765c47eee48a0f4d197aa8bd02e`; its
+default suite failed while compiling the translator. The Stage1 source revision
+was `58690fe597514eb853e9bb6bd343f8afa954ef4c`.
+`scripts/test_diagnostics_json.py` and `scripts/test_source_map.py` passed. The
+Stage1 full-suite run passed its frontend, AST robustness,
+metamorphic, dependency-closure/schema/type-view, diagnostic semantic/range,
+34-fixture-manifest and five property-seed checks, but stopped at the formatter
+origin harness after Stage1 declined the harness's helper-range declaration.
+That test was changed to construct flattened source spans directly, and the
+focused formatter harness then passed. The full Stage1 suite has not been
+rerun after that fix. The Stage0 build emitted many region/borrow diagnostics,
+so Stage0 is not a passing compatibility result. The corresponding Vast
+logs/status files are
+`build/test-all-stage1-complete-vast.log` and
+`build/test-all-complete-vast.log` in the remote checkout. The diagnostic
+de-duplication assertions added on 2026-10-15 also await a fresh remote run.
+Translator validation therefore remains partial; neither the full Stage1 suite
+nor the Stage0 gate is claimed as passing.
+
+## Transitive missing-declaration trail — implementation staged, compiler verification pending — 2026-10-15
+
+The diagnostic collector now follows direct call expressions, including free
+function, member and operator calls, through the retained Clang AST. It tracks
+visited declaration IDs to stop cycles, limits the trail to 32 edges, and
+bounds AST traversal to 250,000 visits. The existing direct
+`main -> add` case remains, and a new valid C fixture removes the `leaf`
+declaration from `main -> middle -> leaf`; the regression requires that full
+trail, one JSON diagnostic anchored to the exact missing callee token and
+owning translation unit, and no partial Elisa output. Neither the
+translator nor the updated probe has been run after this change because the
+Vast SSH endpoint is closing connections during key exchange. This is staged
+implementation and test coverage, not verified behavior.
+
 ## Scoped floating-point fact collector bounded prototype — compiler verification pending — 2026-10-06
 
 The optional Clang AST plugin prototype now caps retained facts at 250,000
